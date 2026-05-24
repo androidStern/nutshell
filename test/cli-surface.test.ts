@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,6 +48,30 @@ test("version command uses the public nutshell name", async () => {
   const result = await runCli(["--version"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout.startsWith("nutshell ")).toBe(true);
+});
+
+test("invalid numeric flags fail before runtime state is created", async () => {
+  for (const args of [
+    ["enrich", "twitter", "--limit", "nope", "--json"],
+    ["enrich", "twitter", "--delay", "later", "--json"],
+    ["sync", "all", "--timeout", "soon", "--json"],
+    ["sync", "all", "--max-requests", "many", "--json"],
+    ["query", "--limit", "lots", "--json"],
+    ["dashboard", "--port", "local", "--no-open"],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "nutshell-cli-invalid-"));
+    try {
+      const result = await runCli(["--root", root, ...args]);
+      expect(result.exitCode).toBe(64);
+      expect(result.stderr).toContain("must be an integer");
+      expect(existsSync(join(root, "nutconfig.jsonc"))).toBe(false);
+      expect(existsSync(join(root, "nutshell.sqlite"))).toBe(false);
+      expect(existsSync(join(root, "run.lock"))).toBe(false);
+      expect(existsSync(join(root, "logs"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 async function runCli(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {

@@ -44,21 +44,28 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const runtime = new TraceRuntime({ root, configPath: configFile });
+  let runtime: TraceRuntime | null = null;
+  const getRuntime = (): TraceRuntime => {
+    runtime ??= new TraceRuntime({ root, configPath: configFile });
+    return runtime;
+  };
   try {
     if (command === "plugins") {
+      const runtime = getRuntime();
       const plugins = loadBuiltinPlugins().enabled(runtime.config).map((plugin) => plugin.manifest);
       print(args, plugins);
       return 0;
     }
     if (command === "sync") {
       const request = parseSync(args);
+      const runtime = getRuntime();
       const report = await runtime.sync(request);
       print(args, report);
       if (request.failOnPartial && report.sources.some((source) => source.status === "partial")) return 75;
       return report.status === "critical" ? 2 : report.status === "warning" ? 1 : 0;
     }
     if (command === "health") {
+      const runtime = getRuntime();
       const report = await runtime.health();
       if (hasFlag(args, "--json")) {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -69,12 +76,14 @@ async function main(argv: string[]): Promise<number> {
     }
     if (command === "query") {
       const flags = parseFlags(args);
+      const limit = parseIntegerFlag(flags, "limit", 200, { min: 1 });
+      const runtime = getRuntime();
       const page = await runtime.query({
         source: flags.source as SourceId | undefined,
         type: flags.type,
         since: flags.since ? new Date(flags.since) : undefined,
         until: flags.until ? new Date(flags.until) : undefined,
-        limit: flags.limit ? Number(flags.limit) : 200,
+        limit,
       });
       print(args, page);
       return 0;
@@ -83,6 +92,7 @@ async function main(argv: string[]): Promise<number> {
       const date = args.shift();
       if (!date) throw new UsageError(`${CLI_NAME} day requires YYYY-MM-DD`);
       const kind: ProjectionRequest["kind"] = hasFlag(args, "--markdown") ? "daily-markdown" : "daily-json";
+      const runtime = getRuntime();
       const report = await runtime.project({ kind, date });
       if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else process.stdout.write(`${report.outputs.join("\n")}\n`);
@@ -90,9 +100,11 @@ async function main(argv: string[]): Promise<number> {
     }
     if (command === "dashboard") {
       const flags = parseFlags(args);
+      const port = parseIntegerFlag(flags, "port", 0, { min: 0, max: 65_535 });
+      const runtime = getRuntime();
       const server = await serveDashboard(runtime, {
         host: typeof flags.host === "string" ? flags.host : "127.0.0.1",
-        port: flags.port ? Number(flags.port) : 0,
+        port,
         openBrowser: !hasFlag(args, "--no-open"),
       });
       process.stdout.write(`${server.url}\n`);
@@ -105,6 +117,7 @@ async function main(argv: string[]): Promise<number> {
       if (!flags.path) throw new UsageError(`${CLI_NAME} import requires --path`);
       const importPath = flags.path;
       const dryRun = hasFlag(args, "--dry-run");
+      const runtime = getRuntime();
       if (sub === "youtube") {
         const report = await withWriteLock(runtime, `${CLI_NAME} import youtube --path ${importPath}`, dryRun, () =>
           importGoogleTakeoutYoutube(runtime.config, runtime.store, importPath, dryRun),
@@ -129,7 +142,9 @@ async function main(argv: string[]): Promise<number> {
       if (!source) throw new UsageError(`${CLI_NAME} enrich requires a source`);
       const flags = parseFlags(args);
       const dryRun = hasFlag(args, "--dry-run");
-      const limit = flags.limit ? Number(flags.limit) : 100;
+      const limit = parseIntegerFlag(flags, "limit", 100, { min: 1 });
+      const delay = parseIntegerFlag(flags, "delay", 500, { min: 0 });
+      const runtime = getRuntime();
       const report = await runtime.enrich({
         source: source as SourceId,
         limit,
@@ -137,7 +152,7 @@ async function main(argv: string[]): Promise<number> {
         budget: {
           ...DEFAULT_SYNC_BUDGET,
           maxRequests: limit,
-          minDelayMs: flags.delay ? Number(flags.delay) : 500,
+          minDelayMs: delay,
         },
       });
       print(args, report);
@@ -145,6 +160,7 @@ async function main(argv: string[]): Promise<number> {
     }
     if (command === "launchd") {
       const sub = args.shift();
+      const runtime = getRuntime();
       if (sub === "install") {
         const scheduler = objectAt(runtime.config.data, "scheduler");
         const nutshellCommand = currentNutshellCommand();
@@ -176,7 +192,8 @@ async function main(argv: string[]): Promise<number> {
     }
     throw new UsageError(`unknown command: ${command}`);
   } finally {
-    await runtime.close();
+    const openedRuntime = runtime as TraceRuntime | null;
+    await openedRuntime?.close();
   }
 }
 
@@ -213,6 +230,8 @@ function parseSync(args: string[]): SyncRequest {
   const flags = parseFlags(args);
   const mode = ((flags.mode as SyncMode | undefined) ?? "recent") as SyncMode;
   if (mode !== "recent" && mode !== "backfill") throw new UsageError(`${CLI_NAME} sync --mode must be recent or backfill`);
+  const timeoutSeconds = parseIntegerFlag(flags, "timeout", Math.ceil(DEFAULT_SYNC_BUDGET.maxRuntimeMs / 1000), { min: 1 });
+  const maxRequests = parseNullableIntegerFlag(flags, "max-requests", DEFAULT_SYNC_BUDGET.maxRequests, { min: 1 });
   return {
     source: sourceArg === "all" ? null : (sourceArg as SourceId),
     mode,
@@ -220,12 +239,34 @@ function parseSync(args: string[]): SyncRequest {
     collections: collectFlags(args, "--collection"),
     budget: {
       ...DEFAULT_SYNC_BUDGET,
-      maxRuntimeMs: flags.timeout ? Number(flags.timeout) * 1000 : DEFAULT_SYNC_BUDGET.maxRuntimeMs,
-      maxRequests: flags["max-requests"] ? Number(flags["max-requests"]) : DEFAULT_SYNC_BUDGET.maxRequests,
+      maxRuntimeMs: timeoutSeconds * 1000,
+      maxRequests,
     },
     dryRun: hasFlag(args, "--dry-run"),
     failOnPartial: hasFlag(args, "--fail-on-partial"),
   };
+}
+
+function parseIntegerFlag(flags: Record<string, string>, name: string, fallback: number, options: { min?: number; max?: number } = {}): number {
+  const raw = flags[name];
+  if (raw === undefined) return fallback;
+  return parseStrictInteger(raw, name, options);
+}
+
+function parseNullableIntegerFlag(flags: Record<string, string>, name: string, fallback: number | null, options: { min?: number; max?: number } = {}): number | null {
+  const raw = flags[name];
+  if (raw === undefined) return fallback;
+  return parseStrictInteger(raw, name, options);
+}
+
+function parseStrictInteger(raw: string, name: string, options: { min?: number; max?: number }): number {
+  const valueText = raw.trim();
+  if (!/^\d+$/.test(valueText)) throw new UsageError(`${CLI_NAME} --${name} must be an integer`);
+  const value = Number(valueText);
+  if (!Number.isSafeInteger(value)) throw new UsageError(`${CLI_NAME} --${name} is too large`);
+  if (options.min !== undefined && value < options.min) throw new UsageError(`${CLI_NAME} --${name} must be at least ${options.min}`);
+  if (options.max !== undefined && value > options.max) throw new UsageError(`${CLI_NAME} --${name} must be at most ${options.max}`);
+  return value;
 }
 
 function parseFlags(args: string[]): Record<string, string> {
