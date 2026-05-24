@@ -12,7 +12,7 @@ import { FakePlugin } from "../src/testing/fake-plugin";
 
 const LOCALHOST_BIND_AVAILABLE = canBindLocalhost();
 
-test("dashboard status API uses health, launchd, config, and redaction model", async () => {
+test("dashboard status API uses health, launchd, and config model", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
     const runtime = runtimeFor(root);
@@ -138,9 +138,11 @@ test("dashboard renders Twitter cards from cached enrichment without widget netw
     const tweet = display.tweet as Record<string, unknown>;
     const author = tweet.author as Record<string, unknown>;
     expect(display.status).toBe("enriched");
+    expect(display.canonicalUrl).toBe(`https://x.com/someone/status/${tweetId}`);
     expect(author.avatarUrl).toBe("https://example.com/avatar.jpg");
     expect(item.thumbnailUrl).toBe("https://example.com/preview.jpg");
     expect(JSON.stringify(display)).toContain("Quoted text");
+    expect(JSON.stringify(display)).toContain("https://x.com/quoted/status/2222222222222222222");
 
     const jsResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/assets/dashboard.js"));
     const js = await jsResponse.text();
@@ -152,19 +154,20 @@ test("dashboard renders Twitter cards from cached enrichment without widget netw
   }
 });
 
-test("dashboard diagnostics and config APIs redact secrets", async () => {
+test("dashboard diagnostics and config APIs return raw local data", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
     const runtime = runtimeFor(root);
     runtime.config.data.google = { youtube: { apiKey: "secret-api-key", clientSecret: "secret-client" } };
+    runtime.logger.event("secret fixture", { token: "secret-token" });
     const configResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/config"));
     const config = (await configResponse.json()) as Record<string, unknown>;
-    expect(JSON.stringify(config)).not.toContain("secret-api-key");
-    expect(JSON.stringify(config)).toContain("<redacted>");
+    expect(JSON.stringify(config)).toContain("secret-api-key");
+    expect(JSON.stringify(config)).toContain("secret-client");
 
     const diagnosticsResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/diagnostics"));
     const diagnostics = (await diagnosticsResponse.json()) as Record<string, unknown>;
-    expect(JSON.stringify(diagnostics)).not.toContain("secret-client");
+    expect(JSON.stringify(diagnostics)).toContain("secret-token");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -231,7 +234,7 @@ test("dashboard config validation failure does not write", async () => {
   }
 });
 
-test("dashboard raw config save refuses redacted placeholders", async () => {
+test("dashboard raw config save treats placeholder text as ordinary local config", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
     const runtime = runtimeFor(root);
@@ -242,9 +245,10 @@ test("dashboard raw config save refuses redacted placeholders", async () => {
         body: JSON.stringify({ raw: "{\"plugins\":{\"youtube\":{\"apiKey\":\"<redacted>\"}}}" }),
       }),
     );
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     const json = (await response.json()) as Record<string, unknown>;
-    expect(String(json.message)).toContain("redacted placeholders");
+    expect(json.ok).toBe(true);
+    expect(readFileSync(runtime.config.path, "utf8")).toContain("<redacted>");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

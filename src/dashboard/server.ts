@@ -4,7 +4,6 @@ import JSON5 from "json5";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
 import { validateConfig } from "../config/schema";
 import { CLI_NAME, PRODUCT_VERSION } from "../core/product";
-import { redactJson, redactText } from "../core/redaction";
 import type { Json, JsonObject, SourceId, SyncRequest, TraceRecord } from "../core/types";
 import { localDateKey, localDayWindow } from "../core/time";
 import { inspectLaunchd } from "../launchd/status";
@@ -101,7 +100,7 @@ async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, un
   const intervalSeconds = numberAt(scheduler, "intervalSeconds", 900);
   const lastRunAt = latestRecentRun(health.backfill);
   const diskFinding = health.findings.find((finding) => finding.source === "system" && finding.code.startsWith("disk_"));
-  return redactJson({
+  return {
     product: CLI_NAME,
     version: PRODUCT_VERSION,
     checkedAt: new Date().toISOString(),
@@ -120,7 +119,7 @@ async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, un
       detail: diskFinding?.detail ?? {},
     },
     lock: await lockSummary(runtime.config.root),
-  }) as Record<string, unknown>;
+  };
 }
 
 async function dashboardSources(runtime: TraceRuntime): Promise<Record<string, unknown>> {
@@ -130,18 +129,18 @@ async function dashboardSources(runtime: TraceRuntime): Promise<Record<string, u
     sources: manifests.map((manifest) => ({
       manifest,
       health: health.backfill.find((item) => item.source === manifest.id) ?? null,
-      config: redactJson(objectAt(objectAt(runtime.config.data, "plugins"), manifest.id)),
+      config: objectAt(objectAt(runtime.config.data, "plugins"), manifest.id),
     })),
   };
 }
 
 async function dashboardRuns(runtime: TraceRuntime): Promise<Record<string, unknown>> {
   const snapshot = await runtime.store.healthSnapshot();
-  return redactJson({
+  return {
     lastRuns: snapshot.lastRuns,
     lastBackfillRuns: snapshot.lastBackfillRuns,
     latestFindings: snapshot.latestFindings,
-  }) as JsonObject;
+  };
 }
 
 async function dashboardDays(runtime: TraceRuntime, url: URL): Promise<Record<string, unknown>> {
@@ -276,8 +275,8 @@ function dashboardConfig(runtime: TraceRuntime): Record<string, unknown> {
     path: runtime.config.path,
     root: runtime.config.root,
     settings: settingsFromConfig(runtime.config.data),
-    config: redactJson(runtime.config.data),
-    rawRedacted: redactText(raw),
+    config: runtime.config.data,
+    raw,
   };
 }
 
@@ -288,7 +287,6 @@ async function saveDashboardConfig(runtime: TraceRuntime, input: unknown): Promi
   let mode: string;
 
   if (typeof body.raw === "string") {
-    if (body.raw.includes("<redacted>")) throw new Error("Raw config contains redacted placeholders. Save common settings instead, or replace the placeholders first.");
     JSON5.parse(body.raw);
     nextRaw = body.raw.endsWith("\n") ? body.raw : `${body.raw}\n`;
     mode = "raw";
@@ -321,7 +319,7 @@ async function dashboardSync(runtime: TraceRuntime, input: unknown): Promise<Rec
   const body = objectInput(input);
   const source = typeof body.source === "string" && body.source !== "all" ? (body.source as SourceId) : null;
   const request: SyncRequest = { ...defaultSyncRequest(source), mode: "recent", budget: DEFAULT_SYNC_BUDGET };
-  return redactJson(await runtime.sync(request)) as unknown as Record<string, unknown>;
+  return (await runtime.sync(request)) as unknown as Record<string, unknown>;
 }
 
 async function dashboardProject(runtime: TraceRuntime): Promise<Record<string, unknown>> {
@@ -340,7 +338,7 @@ async function dashboardOpen(runtime: TraceRuntime, input: unknown): Promise<Rec
 async function dashboardDiagnostics(runtime: TraceRuntime): Promise<Record<string, unknown>> {
   const [health, launchd, snapshot] = await Promise.all([runtime.health(), inspectLaunchd(runtime.config.root), runtime.store.healthSnapshot()]);
   const log = tailText(join(runtime.config.root, "logs", "nutshell.jsonl"), 80);
-  return redactJson({
+  return {
     generatedAt: new Date().toISOString(),
     version: PRODUCT_VERSION,
     root: runtime.config.root,
@@ -348,8 +346,8 @@ async function dashboardDiagnostics(runtime: TraceRuntime): Promise<Record<strin
     health,
     launchd,
     snapshot,
-    logTail: redactText(log),
-  }) as Record<string, unknown>;
+    logTail: log,
+  };
 }
 
 function groupRecordsByDay(records: TraceRecord[]): JsonObject[] {
@@ -459,7 +457,7 @@ function recordCard(record: TraceRecord): JsonObject {
     timeLabel: time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
     thumbnailUrl: thumbnailFor(record),
     mediaUrls: mediaFor(record),
-    payload: redactJson(payload),
+    payload,
   };
 }
 
@@ -497,8 +495,8 @@ function twitterRecordCard(record: TraceRecord): JsonObject {
     timeLabel: time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
     thumbnailUrl: firstString(mediaUrls),
     mediaUrls,
-    display: redactJson(display),
-    payload: redactJson({ display }),
+    display,
+    payload: { display },
   };
 }
 
@@ -722,7 +720,7 @@ function pathForOpen(runtime: TraceRuntime, target: DashboardAction): string | n
 function diffJson(before: Json, after: Json, path = ""): JsonObject[] {
   if (stableComparable(before) === stableComparable(after)) return [];
   if (!isPlainObject(before) || !isPlainObject(after)) {
-    return [{ path: path || "$", before: redactJson(before), after: redactJson(after) }];
+    return [{ path: path || "$", before, after }];
   }
   const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
   return keys.flatMap((key) => diffJson(before[key] ?? null, after[key] ?? null, path ? `${path}.${key}` : key));
@@ -749,7 +747,7 @@ async function openUrl(url: string): Promise<void> {
 async function lockSummary(root: string): Promise<JsonObject> {
   const path = join(root, "run.lock");
   if (!existsSync(path)) return { present: false, path };
-  return redactJson({ present: true, path, payload: safeJson(readFileSync(path, "utf8")) }) as JsonObject;
+  return { present: true, path, payload: safeJson(readFileSync(path, "utf8")) };
 }
 
 function tailText(path: string, lines: number): string {
@@ -1927,7 +1925,7 @@ function renderSettings() {
     field('Max pages per run', 'twitter-maxPages', plugins.twitter?.maxPages || 50, 'number') +
     field('Delay between pages ms', 'twitter-delayMs', plugins.twitter?.delayMs || 10000, 'number') +
     '<div class="source-actions"><button id="save-settings" class="primary">Save settings</button><button id="rebuild-projections" class="secondary">Rebuild projections</button><button id="open-data" class="secondary">Open data</button><button id="open-config" class="secondary">Open config</button><button id="open-logs" class="secondary">Open logs</button><button id="copy-diagnostics" class="secondary">Copy diagnostics</button></div></section>' +
-    '<section class="settings-panel"><h2>Advanced JSONC</h2><div class="field"><label>Redacted raw config</label><textarea id="raw-config">' + esc(state.config?.rawRedacted || '') + '</textarea></div><button id="save-raw" class="secondary">Validate and save raw</button></section>';
+    '<section class="settings-panel"><h2>Advanced JSONC</h2><div class="field"><label>Raw config</label><textarea id="raw-config">' + esc(state.config?.raw || '') + '</textarea></div><button id="save-raw" class="secondary">Validate and save raw</button></section>';
 }
 
 function field(label, id, value, type) {
