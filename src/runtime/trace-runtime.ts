@@ -179,11 +179,7 @@ export class TraceRuntime {
           clearTimeout(timeout);
         }
       }
-      if (runtimeCfg.projectionAfterSync !== false && !request.dryRun) {
-        await this.project({ kind: "all" }).catch((error) => {
-          this.logger.warn("runtime: projection failed", { error: String(error) });
-        });
-      }
+      if (!request.dryRun) await this.projectAfterMutation();
       const finishedAt = new Date();
       const report: SyncReport = {
         status: reportStatus(sources),
@@ -220,6 +216,7 @@ export class TraceRuntime {
             expectedCheckpointVersion: checkpoint.version,
           });
       const finishedAt = new Date();
+      if (!request.dryRun) await this.projectAfterMutation();
       return {
         source: plugin.manifest.id,
         status: sourceStatus(result.health, result.partial),
@@ -255,6 +252,7 @@ export class TraceRuntime {
             expectedCheckpointVersion: checkpoint.version,
           });
       const finishedAt = new Date();
+      if (!request.dryRun) await this.projectAfterMutation();
       return {
         source: plugin.manifest.id,
         status: sourceStatus(result.health, result.partial),
@@ -314,6 +312,14 @@ export class TraceRuntime {
 
   private configCommandName(): string {
     return "nutshell";
+  }
+
+  private async projectAfterMutation(): Promise<void> {
+    const runtimeCfg = objectAt(this.config.data, "runtime");
+    if (runtimeCfg.projectionAfterSync === false) return;
+    await this.project({ kind: "all" }).catch((error) => {
+      this.logger.warn("runtime: projection failed", { error: String(error) });
+    });
   }
 
   private async withRuntimeLock<T>(command: string, run: () => Promise<T>): Promise<T> {

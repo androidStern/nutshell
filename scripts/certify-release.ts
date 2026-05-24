@@ -73,6 +73,8 @@ async function certifyBuild(): Promise<void> {
     await run(["bun", "run", "lint"]);
     await run(["bun", "run", "build"]);
     await run(["bun", "run", "build:compile"]);
+    mkdirSync(join(tmp, "pack"), { recursive: true });
+    await run(["bun", "pm", "pack", "--destination", join(tmp, "pack")]);
     const signature = await codeSignatureReport(join(repo, "bin", "nutshell"));
     if (requiresStableSignature() && !signature.stableRequirement) {
       throw new Error(`compiled Nutshell binary does not have a stable macOS code-signing identity: ${signature.designatedRequirement}`);
@@ -80,8 +82,6 @@ async function certifyBuild(): Promise<void> {
     await run(["bun", "run", "build:tarball"], {
       NUTSHELL_RELEASE_BASE_URL: `file://${join(repo, "dist", "release")}`,
     });
-    mkdirSync(join(tmp, "pack"), { recursive: true });
-    await run(["bun", "pm", "pack", "--destination", join(tmp, "pack")]);
     const packageManifest = JSON.parse(await runText(["tar", "-xOzf", packageTarballPath(), "package/package.json"])) as {
       dependencies?: Record<string, unknown>;
       files?: string[];

@@ -3,29 +3,11 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SOURCE_BIN="$ROOT_DIR/bin/nutshell"
-BIN_DIR="${NUTSHELL_INSTALL_BIN:-}"
+BIN_DIR="${NUTSHELL_INSTALL_BIN:-$HOME/.local/bin}"
 
 if [ ! -x "$SOURCE_BIN" ]; then
   echo "Nutshell installer could not find an executable at $SOURCE_BIN" >&2
   exit 1
-fi
-
-if [ -z "$BIN_DIR" ]; then
-  OLD_IFS=$IFS
-  IFS=:
-  for dir in $PATH; do
-    if [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ]; then
-      case "$dir" in
-        /bin|/usr/bin|/sbin|/usr/sbin) ;;
-        *) BIN_DIR=$dir; break ;;
-      esac
-    fi
-  done
-  IFS=$OLD_IFS
-fi
-
-if [ -z "$BIN_DIR" ]; then
-  BIN_DIR="$HOME/.local/bin"
 fi
 
 mkdir -p "$BIN_DIR"
