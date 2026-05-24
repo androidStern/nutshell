@@ -43,6 +43,7 @@ type AppleNoteStateEntry = NonNullable<AppleNotesState["notes"]>[string];
 
 const MIN_BODY_FETCH_MS = 1_000;
 const MIN_ARTIFACT_RESERVE_MS = 1_000;
+const MAX_BODY_BATCH_SIZE = 25;
 
 export class AppleNotesPlugin implements TracePlugin {
   constructor(private readonly sourceFactory: (cfg: ReturnType<typeof config>) => NotesSource = buildSource) {}
@@ -111,23 +112,16 @@ export class AppleNotesPlugin implements TracePlugin {
     const unique = dedupeAndFilter(metadata, cfg);
     const seenIds = new Set(unique.map((item) => item.id));
 
-    if (Object.keys(notesState).length >= 20 && seenIds.size < Object.keys(notesState).length * 0.5) {
+    const knownNotes = Object.keys(notesState).length;
+    const missingEntries = Object.entries(notesState).filter(([id, item]) => !seenIds.has(id) && item.status !== "tombstoned");
+    if (knownNotes >= 20 && seenIds.size < knownNotes * 0.5) {
       scanGuardActive = true;
       health.push(
         finding("warning", "apple_notes", "apple_notes_scan_guard", "Metadata scan saw suspiciously few notes; missing detection skipped", {
-          known: Object.keys(notesState).length,
+          known: knownNotes,
           seen: seenIds.size,
         }),
       );
-    } else {
-      for (const [id, item] of Object.entries(notesState)) {
-        if (seenIds.has(id) || item.status === "tombstoned") continue;
-        const missingScanCount = (item.missingScanCount ?? 0) + 1;
-        if (missingScanCount >= cfg.tombstoneAfterMissingScans) {
-          item.status = "tombstoned";
-        }
-        item.missingScanCount = missingScanCount;
-      }
     }
 
     const fetchCandidates = unique
@@ -142,7 +136,8 @@ export class AppleNotesPlugin implements TracePlugin {
         }),
       );
     }
-    const toFetch = hasBodyBudget ? fetchCandidates.slice(0, cfg.batchSize) : [];
+    const bodyBatchSize = Math.max(1, Math.min(cfg.batchSize, MAX_BODY_BATCH_SIZE));
+    const toFetch = hasBodyBudget ? fetchCandidates.slice(0, bodyBatchSize) : [];
     let bodyMap: Map<string, NoteBody>;
     try {
       const fetched = await fetchBodiesResilient(source, toFetch.map((note) => note.id), cfg.osascriptTimeoutMs, ctx.signal, deadlineAt);
@@ -182,9 +177,25 @@ export class AppleNotesPlugin implements TracePlugin {
       };
     }
 
+    for (const note of unique) {
+      const previous = notesState[note.id];
+      if (previous?.missingScanCount) {
+        notesState[note.id] = { ...previous, missingScanCount: 0 };
+      }
+      if (!note.passwordProtected && needsBody(note, previous, false) && !bodyMap.has(note.id)) {
+        notesState[note.id] = pendingBodyState(note, previous);
+      }
+    }
+
+    const notesToRender = unique.filter((note) => bodyMap.has(note.id) || shouldRenderMetadataOnly(note, notesState[note.id]));
+    const processedRenderIds = new Set<string>();
     const observations: RawObservation[] = [];
     const records: TraceRecord[] = [];
-    for (const note of unique) {
+    for (const note of notesToRender) {
+      if (ctx.signal.aborted || remainingMs(deadlineAt, MIN_ARTIFACT_RESERVE_MS) <= 0) {
+        budgetExhausted = true;
+        break;
+      }
       const previous = notesState[note.id];
       const body = bodyMap.get(note.id);
       let status = "ok";
@@ -240,6 +251,7 @@ export class AppleNotesPlugin implements TracePlugin {
         mimeType: "text/markdown",
       });
       artifactRefs.push(markdown.path);
+      processedRenderIds.add(note.id);
 
       notesState[note.id] = {
         modifiedAt: note.modifiedAt,
@@ -279,6 +291,33 @@ export class AppleNotesPlugin implements TracePlugin {
       }
     }
 
+    for (const note of notesToRender) {
+      if (!processedRenderIds.has(note.id) && bodyMap.has(note.id) && !note.passwordProtected) {
+        notesState[note.id] = pendingBodyState(note, notesState[note.id]);
+      }
+    }
+
+    const bodyBacklog = countBodyBacklog(unique, notesState);
+    const partial = budgetExhausted || bodyBacklog > 0;
+    if (budgetExhausted && !health.some((item) => item.code === "apple_notes_runtime_budget_exhausted")) {
+      health.push(
+        finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
+          pendingBodyExports: bodyBacklog,
+        }),
+      );
+    }
+    if (!partial && !scanGuardActive) {
+      for (const [id, item] of missingEntries) {
+        const current = notesState[id] ?? item;
+        const missingScanCount = (current.missingScanCount ?? 0) + 1;
+        notesState[id] = {
+          ...current,
+          status: missingScanCount >= cfg.tombstoneAfterMissingScans ? "tombstoned" : current.status,
+          missingScanCount,
+        };
+      }
+    }
+
     for (const [id, item] of Object.entries(notesState)) {
       if (item.status === "tombstoned" && !records.some((record) => record.sourceId === id && record.type === "apple_note.tombstoned")) {
         records.push({
@@ -298,8 +337,6 @@ export class AppleNotesPlugin implements TracePlugin {
       }
     }
 
-    const bodyBacklog = Math.max(0, fetchCandidates.length - bodyMap.size);
-    const partial = budgetExhausted || bodyBacklog > 0;
     const backfill = state.backfill && typeof state.backfill === "object" && !Array.isArray(state.backfill) ? state.backfill : {};
     const existingLive = backfill.live && typeof backfill.live === "object" && !Array.isArray(backfill.live) ? (backfill.live as JsonObject) : {};
     return {
@@ -327,6 +364,7 @@ export class AppleNotesPlugin implements TracePlugin {
         metadataRows: metadata.length,
         uniqueNotes: unique.length,
         bodyFetches: bodyMap.size,
+        bodyBatchSize,
         bodyBacklog,
         budgetExhausted,
         partial,
@@ -346,7 +384,7 @@ function config(ctx: PluginContext) {
   return {
     source: stringAt(cfg, "source", "jxa"),
     fixturePath: stringAt(cfg, "fixturePath", ""),
-    batchSize: numberAt(cfg, "batchSize", 200),
+    batchSize: numberAt(cfg, "batchSize", MAX_BODY_BATCH_SIZE),
     osascriptTimeoutMs: numberAt(cfg, "osascriptTimeoutMs", 90_000),
     includeFolders: stringArrayAt(cfg, "includeFolders"),
     excludeFolders: stringArrayAt(cfg, "excludeFolders"),
@@ -396,6 +434,34 @@ function bodyFetchPriority(note: NoteMetadata, previous: AppleNoteStateEntry | u
   if (previous.status === "pending_body_export" || !previous.sourceHtmlHash) return 1;
   if (note.modifiedAt && previous.modifiedAt && new Date(note.modifiedAt) > new Date(previous.modifiedAt)) return 2;
   return 4;
+}
+
+function pendingBodyState(note: NoteMetadata, previous: AppleNoteStateEntry | undefined): AppleNoteStateEntry {
+  return {
+    modifiedAt: note.modifiedAt,
+    status: previous?.status === "failed" ? "failed" : "pending_body_export",
+    missingScanCount: 0,
+    markdownPath: previous?.markdownPath,
+    sourceHtmlHash: previous?.sourceHtmlHash,
+    markdownHash: previous?.markdownHash,
+  };
+}
+
+function shouldRenderMetadataOnly(note: NoteMetadata, previous: AppleNoteStateEntry | undefined): boolean {
+  if (!note.passwordProtected) return false;
+  if (!previous) return true;
+  if (previous.modifiedAt !== note.modifiedAt) return true;
+  if (previous.missingScanCount) return true;
+  return previous.status !== "metadata_only" && previous.status !== "stale_locked";
+}
+
+function countBodyBacklog(notes: NoteMetadata[], notesState: Record<string, AppleNoteStateEntry>): number {
+  return notes.filter((note) => {
+    if (note.passwordProtected) return false;
+    const state = notesState[note.id];
+    if (!state) return true;
+    return state.status === "pending_body_export" || state.status === "failed" || !state.sourceHtmlHash;
+  }).length;
 }
 
 async function fetchBodiesResilient(

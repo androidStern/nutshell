@@ -74,7 +74,7 @@ export const DEFAULT_CONFIG: JsonObject = {
       enabled: true,
       source: "applescript",
       fixturePath: "",
-      batchSize: 200,
+      batchSize: 25,
       maxRunMs: 240_000,
       osascriptTimeoutMs: 180_000,
       includeFolders: [],

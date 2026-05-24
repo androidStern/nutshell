@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../src/config/config";
-import type { JsonObject } from "../src/core/types";
+import type { ArtifactRef, JsonObject, PluginContext, WriteArtifactInput } from "../src/core/types";
 import { parseBodyRows, parseMetadataRows, type NotesSource } from "../src/plugins/builtin/apple-notes/jxa-source";
 import { AppleNotesPlugin } from "../src/plugins/builtin/apple-notes/plugin";
 import { JsonlLogger } from "../src/runtime/logger";
@@ -232,6 +232,158 @@ test("apple notes prioritizes never-exported notes before previously failed body
   }
 });
 
+test("apple notes does not rewrite unchanged note artifacts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-unchanged-"));
+  try {
+    const source: NotesSource = {
+      async scanMetadata() {
+        return [metadata("note-1", "Stable Note")];
+      },
+      async fetchBodies(ids) {
+        return new Map(ids.map((id) => [id, { id, html: `<p>${id}</p>`, plaintext: id, error: "" }]));
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => source);
+    let writes = 0;
+    const first = await plugin.sync(
+      context(root, {
+        writeArtifact: async (input) => {
+          writes += 1;
+          const path = join(root, "artifacts", input.relativePath);
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, input.content);
+          return { path, contentHash: "hash", mimeType: input.mimeType ?? null, bytes: 1 };
+        },
+      }),
+      { source: "apple_notes", mode: "recent", window: null, collections: [], budget: plugin.manifest.defaultBudget, dryRun: false },
+      { version: 0, state: {} },
+    );
+
+    expect(writes).toBeGreaterThan(0);
+    const second = await plugin.sync(
+      context(root, {
+        writeArtifact: async () => {
+          throw new Error("unchanged note should not be rewritten");
+        },
+      }),
+      { source: "apple_notes", mode: "recent", window: null, collections: [], budget: plugin.manifest.defaultBudget, dryRun: false },
+      { version: 1, state: first.nextCheckpoint },
+    );
+
+    expect(second.records).toHaveLength(0);
+    expect(second.observations).toHaveLength(0);
+    expect(second.partial).toBe(false);
+    expect(second.metrics).toMatchObject({ bodyBacklog: 0 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apple notes converges body backlog across bounded runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-converge-"));
+  try {
+    const fetchedIds: string[][] = [];
+    const source: NotesSource = {
+      async scanMetadata() {
+        return [metadata("note-1", "One"), metadata("note-2", "Two")];
+      },
+      async fetchBodies(ids) {
+        fetchedIds.push([...ids]);
+        return new Map(ids.map((id) => [id, { id, html: `<p>${id}</p>`, plaintext: id, error: "" }]));
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => source);
+    const request = { source: "apple_notes" as const, mode: "recent" as const, window: null, collections: [], budget: plugin.manifest.defaultBudget, dryRun: false };
+    const first = await plugin.sync(context(root, { config: { batchSize: 1 } }), request, { version: 0, state: {} });
+    const second = await plugin.sync(context(root, { config: { batchSize: 1 } }), request, { version: 1, state: first.nextCheckpoint });
+
+    expect(fetchedIds).toEqual([["note-1"], ["note-2"]]);
+    expect(first.partial).toBe(true);
+    expect(first.metrics).toMatchObject({ bodyFetches: 1, bodyBacklog: 1 });
+    expect(second.partial).toBe(false);
+    expect(second.metrics).toMatchObject({ bodyFetches: 1, bodyBacklog: 0 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apple notes caps oversized body batches to a safe chunk", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-batch-cap-"));
+  try {
+    const fetchedIds: string[][] = [];
+    const source: NotesSource = {
+      async scanMetadata() {
+        return Array.from({ length: 40 }, (_, index) => metadata(`note-${index + 1}`, `Note ${index + 1}`));
+      },
+      async fetchBodies(ids) {
+        fetchedIds.push([...ids]);
+        return new Map(ids.map((id) => [id, { id, html: `<p>${id}</p>`, plaintext: id, error: "" }]));
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => source);
+    const result = await plugin.sync(
+      context(root, { config: { batchSize: 200 } }),
+      { source: "apple_notes", mode: "recent", window: null, collections: [], budget: plugin.manifest.defaultBudget, dryRun: false },
+      { version: 0, state: {} },
+    );
+
+    expect(fetchedIds[0]?.length).toBe(25);
+    expect(result.metrics).toMatchObject({ bodyFetches: 25, bodyBatchSize: 25, bodyBacklog: 15 });
+    expect(result.partial).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apple notes partial runs do not tombstone missing notes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-no-partial-tombstone-"));
+  try {
+    const source: NotesSource = {
+      async scanMetadata() {
+        return [metadata("new-note", "New Note")];
+      },
+      async fetchBodies() {
+        throw new Error("body fetch should not run after budget is exhausted");
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => source);
+    const result = await plugin.sync(
+      context(root),
+      {
+        source: "apple_notes",
+        mode: "recent",
+        window: null,
+        collections: [],
+        budget: { ...plugin.manifest.defaultBudget, maxRuntimeMs: 1 },
+        dryRun: false,
+      },
+      {
+        version: 1,
+        state: {
+          notes: {
+            "old-note": {
+              modifiedAt: "2026-05-19T10:00:00Z",
+              status: "ok",
+              missingScanCount: 2,
+              sourceHtmlHash: "old-hash",
+              markdownHash: "old-md",
+              markdownPath: "old.md",
+            },
+          },
+        },
+      },
+    );
+
+    const notes = (result.nextCheckpoint as JsonObject).notes as JsonObject;
+    const oldNote = notes["old-note"] as JsonObject;
+    expect(result.partial).toBe(true);
+    expect(oldNote.status).toBe("ok");
+    expect(oldNote.missingScanCount).toBe(2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apple notes parses bulk AppleScript metadata rows", () => {
   const rows = parseMetadataRows(
     [
@@ -280,5 +432,44 @@ function emptyRecordReader() {
     async query() {
       return { records: [], total: 0, limit: 0, offset: 0 };
     },
+  };
+}
+
+function metadata(id: string, title: string) {
+  return {
+    id,
+    title,
+    folderId: "folder-1",
+    folderName: "Notes",
+    folderPath: "iCloud/Notes",
+    createdAt: "2026-05-20T10:00:00Z",
+    modifiedAt: "2026-05-21T10:00:00Z",
+    shared: false,
+    passwordProtected: false,
+  };
+}
+
+function context(
+  root: string,
+  options: {
+    config?: JsonObject;
+    writeArtifact?: (input: WriteArtifactInput) => Promise<ArtifactRef>;
+  } = {},
+): PluginContext {
+  return {
+    root,
+    config: options.config ?? {},
+    logger: new JsonlLogger(join(root, "logs", "nutshell.jsonl")),
+    signal: new AbortController().signal,
+    now: () => new Date("2026-05-21T12:00:00Z"),
+    records: emptyRecordReader(),
+    writeArtifact:
+      options.writeArtifact ??
+      (async (input) => {
+        const path = join(root, "artifacts", input.relativePath);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, input.content);
+        return { path, contentHash: "hash", mimeType: input.mimeType ?? null, bytes: 1 };
+      }),
   };
 }
