@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>X Enrichment POC</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f8fb;
+      --ink: #0b1118;
+      --muted: #69727d;
+      --line: #d6dde5;
+      --card: #fbfdff;
+      --accent: #0f76d9;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 48px));
+      margin: 56px auto;
+    }
+
+    header.page {
+      margin-bottom: 28px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font: 700 clamp(34px, 5vw, 64px)/1.02 Georgia, "Times New Roman", serif;
+      letter-spacing: 0;
+    }
+
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 780px;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      overflow: hidden;
+      margin: 26px 0 34px;
+    }
+
+    .summary div {
+      padding: 16px 18px;
+      border-right: 1px solid var(--line);
+    }
+
+    .summary div:last-child { border-right: 0; }
+    .summary strong {
+      display: block;
+      font: 700 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .summary span {
+      display: block;
+      margin-top: 6px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .tweet-card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      min-height: 360px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .media {
+      background: #071018;
+      border-bottom: 1px solid var(--line);
+      min-height: 190px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .media img {
+      width: 100%;
+      height: 260px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .media.none {
+      min-height: 0;
+      height: 0;
+      border-bottom: 0;
+    }
+
+    .body {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+      flex: 1;
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    .profile {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 0, 0, .1);
+      flex: 0 0 auto;
+    }
+
+    .name {
+      display: grid;
+      line-height: 1.1;
+    }
+
+    .name strong { font-size: 16px; }
+    .name span { color: var(--muted); font-size: 14px; }
+
+    .text {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 17px;
+    }
+
+    .nested {
+      border: 1px solid #c9d7e5;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #eef7ff;
+    }
+
+    .nested-label {
+      padding: 10px 12px 0;
+      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .nested-inner {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .nested .media {
+      min-height: 120px;
+      border: 0;
+      border-radius: 8px;
+    }
+
+    .nested .media img { height: 150px; }
+    .nested .text { font-size: 14px; }
+
+    @media (max-width: 760px) {
+      main { width: min(100% - 28px, 1120px); margin: 32px auto; }
+      .summary { grid-template-columns: 1fr 1fr; }
+      .summary div:nth-child(2) { border-right: 0; }
+      .summary div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="page">
+      <div class="eyebrow">X enrichment proof</div>
+      <h1>Same renderer, multiple import paths</h1>
+      <p class="sub">
+        These cards are rendered from tweet IDs using enriched tweet payloads. The examples cover authored archive tweets, archive likes, live bookmarks, quoted tweets, videos, and reply parents.
+      </p>
+    </header>
+
+    <section class="summary" aria-label="POC result summary">
+      <div><strong>Archive authored</strong><span>reply + parent</span></div>
+      <div><strong>Archive likes</strong><span>author + media</span></div>
+      <div><strong>Live bookmarks</strong><span>video + quote</span></div>
+      <div><strong>Render source</strong><span>cached enrichment</span></div>
+    </section>
+
+    <section class="grid" id="cards"></section>
+  </main>
+
+  <script>
+    const tweets = [
+      {
+        label: "Archive authored reply",
+        kind: "authored",
+        id: "2056425087289442777",
+        text: "@trq212 Shit that’s a good one",
+        created_at: "2026-05-18T17:22:01.000Z",
+        user: { name: "Andrew 🎛️🎹🔊", screen_name: "android_stern", avatar: "https://pbs.twimg.com/profile_images/1969644149432258560/8FiqG6M9_normal.jpg" },
+        parent: {
+          label: "replying to",
+          id: "2056415973125796184",
+          text: "a prompt I've been using a lot recently:\n\nimplement <SPEC> and while you do, keep a running implementation-notes.html file (or markdown) with decisions you had to make weren't in the spec, things you had to change, tradeoffs you had to make or anything else I should know https://t.co/qQFTES4fjo",
+          user: { name: "Thariq", screen_name: "trq212", avatar: "https://pbs.twimg.com/profile_images/1976939058741039104/r3GgzqRh_normal.jpg" },
+          media: "https://pbs.twimg.com/media/HInbJHobUAMaPDB.jpg"
+        }
+      },
+      {
+        label: "Archive authored media reply",
+        kind: "authored",
+        id: "2056096036024680666",
+        text: "@tenobrus “I’m going to ask Claude for an independent creative-director pass”, said Codex, of his own accord. \n\nHow long until he asks me for his own Claude Max subscription like he’s asking to hire more people for his team? https://t.co/BE7kDbMtq0",
+        created_at: "2026-05-17T19:34:30.000Z",
+        user: { name: "Andrew 🎛️🎹🔊", screen_name: "android_stern", avatar: "https://pbs.twimg.com/profile_images/1969644149432258560/8FiqG6M9_normal.jpg" },
+        media: "https://pbs.twimg.com/media/HIi30DAXoAEbCiQ.jpg",
+        parent: {
+          label: "replying to",
+          id: "2056074300525047958",
+          text: "wow that must have taken a lot of courage for codex to admit https://t.co/BXdK3R3QuE",
+          user: { name: "Tenobrus", screen_name: "tenobrus", avatar: "https://pbs.twimg.com/profile_images/1640415225991282688/K0CmWWD6_normal.png" },
+          media: "https://pbs.twimg.com/media/HIikYgoaIAAIhf4.png"
+        }
+      },
+      {
+        label: "Archive liked tweet",
+        kind: "liked",
+        id: "2055406975635333263",
+        text: "serverless is amazing.\n\nyou get:\n\n- cold starts\n- 14 dashboards\n- functions timing out because JSON was 3kb too large\n- logs delivered sometime between now and your retirement\n- a billing model based on quantum mechanics\n\nall to avoid managing a VPS that has had a working",
+        created_at: "2026-05-15T21:56:25.000Z",
+        user: { name: "adam", screen_name: "theCTO", avatar: "https://pbs.twimg.com/profile_images/2019659539143094272/V9UGuTd4_normal.jpg" }
+      },
+      {
+        label: "Archive liked quote/video",
+        kind: "liked",
+        id: "2054595331174928627",
+        text: "From Fox11 (Los Angeles) news https://t.co/J2teQYmpZI",
+        created_at: "2026-05-13T16:11:14.000Z",
+        user: { name: "SurfSkateThrash", screen_name: "SurfThrash", avatar: "https://pbs.twimg.com/profile_images/2007251935674675213/Agr4pmk7_normal.jpg" },
+        media: "https://pbs.twimg.com/amplify_video_thumb/2054595279320739840/img/uEKFKqDapRBZbqX5.jpg",
+        quote: {
+          label: "quoted tweet",
+          id: "2054276918099185799",
+          text: "California accents are actually my favorite",
+          user: { name: "KAYLA PARRILLA", screen_name: "kaylaparrilla", avatar: "https://pbs.twimg.com/profile_images/1875956317761806336/5jNjCcs4_normal.jpg" }
+        }
+      },
+      {
+        label: "Live bookmark video",
+        kind: "bookmark",
+        id: "2057089376530714820",
+        text: "Just finished animating all 3 machine scenes for this section.\n\nAny thoughts? https://t.co/Hj6K55a4OK",
+        created_at: "2026-05-20T13:21:40.000Z",
+        user: { name: "Mehmet Özsoy", screen_name: "mehmetozsoyart", avatar: "https://pbs.twimg.com/profile_images/2023810774939185152/vIoYb-8c_normal.jpg" },
+        media: "https://pbs.twimg.com/amplify_video_thumb/2057083860454625280/img/2AU4NpA84m4YE7UA.jpg"
+      },
+      {
+        label: "Live bookmark quote",
+        kind: "bookmark",
+        id: "2056111292348502327",
+        text: "Hermes v0.14.0 is now out.\n\nThis brings the xAI Supergrok & Premium+ account access for Grok models, image gen, video gen, and x search\n\nCodex as a runtime backend for openai models\n\nLINE as a new gateway messenger\n\nSome huge performance increases\n\nNative video generation",
+        created_at: "2026-05-17T20:35:07.000Z",
+        user: { name: "Teknium 🪽", screen_name: "Teknium", avatar: "https://pbs.twimg.com/profile_images/1642401912648777728/2KFikPsE_normal.jpg" },
+        quote: {
+          label: "quoted tweet",
+          id: "2056110234309939330",
+          text: "Hermes Agent v0.14.0 - “The Foundation Release”\n\nChangelog below https://t.co/mLLbImSaPP",
+          user: { name: "Nous Research", screen_name: "NousResearch", avatar: "https://pbs.twimg.com/profile_images/1816254738234761216/TX7TW-Mp_normal.jpg" },
+          media: "https://pbs.twimg.com/media/HIjEKBFWcAA-JbF.jpg"
+        }
+      }
+    ];
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      })[char]);
+    }
+
+    function mediaBlock(url) {
+      if (!url) return '<div class="media none"></div>';
+      return `<div class="media"><img src="${escapeHtml(url)}" alt=""></div>`;
+    }
+
+    function profile(user) {
+      return `
+        <div class="profile">
+          <img class="avatar" src="${escapeHtml(user.avatar)}" alt="">
+          <div class="name">
+            <strong>${escapeHtml(user.name)}</strong>
+            <span>@${escapeHtml(user.screen_name)}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function nested(item) {
+      if (!item) return "";
+      return `
+        <section class="nested">
+          <div class="nested-label">${escapeHtml(item.label)}</div>
+          <div class="nested-inner">
+            ${item.media ? mediaBlock(item.media) : ""}
+            ${profile(item.user)}
+            <p class="text">${escapeHtml(item.text)}</p>
+          </div>
+        </section>
+      `;
+    }
+
+    function card(tweet) {
+      const media = tweet.media || null;
+      return `
+        <article class="tweet-card">
+          ${mediaBlock(media)}
+          <div class="body">
+            <div class="meta">
+              <span>${escapeHtml(tweet.label)}</span>
+              <span>${escapeHtml(tweet.kind)}</span>
+            </div>
+            ${profile(tweet.user)}
+            <p class="text">${escapeHtml(tweet.text)}</p>
+            ${nested(tweet.parent)}
+            ${nested(tweet.quote)}
+          </div>
+        </article>
+      `;
+    }
+
+    document.getElementById("cards").innerHTML = tweets.map(card).join("");
+  </script>
+</body>
+</html>

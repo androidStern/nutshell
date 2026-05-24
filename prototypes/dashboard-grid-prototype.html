@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nutshell Timeline Card Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: oklch(0.985 0.005 245);
+      --ink: oklch(0.18 0.018 252);
+      --muted: oklch(0.54 0.018 252);
+      --line: oklch(0.9 0.008 252);
+      --soft: oklch(0.965 0.008 252);
+      --blue: oklch(0.61 0.15 248);
+      --blue-line: oklch(0.72 0.11 241);
+      --green: oklch(0.57 0.125 154);
+      --twitter: oklch(0.35 0.07 238);
+      --shadow: 0 18px 50px oklch(0.2 0.02 252 / 0.1);
+      --rail: min(824px, calc(100vw - 32px));
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 40px));
+      margin: 0 auto 64px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+    }
+
+    .brand {
+      font-size: 20px;
+      letter-spacing: -0.01em;
+    }
+
+    .nav {
+      display: flex;
+      gap: 6px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+    }
+
+    .nav span {
+      padding: 8px 14px;
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .nav span:first-child {
+      background: oklch(0.998 0.003 245);
+      color: var(--ink);
+      box-shadow: 0 1px 5px oklch(0.2 0.02 252 / 0.08);
+    }
+
+    .hero {
+      text-align: center;
+      padding: 70px 0 26px;
+    }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 12px;
+    }
+
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 500;
+      letter-spacing: 0;
+      font-size: 56px;
+      line-height: 1.04;
+      margin: 10px 0;
+    }
+
+    .subhead {
+      margin: 0 auto 28px;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 680px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      grid-template-areas:
+        "search sync"
+        "chips windows";
+      gap: 10px 14px;
+      align-items: center;
+      text-align: left;
+      width: var(--rail);
+      margin: 0 auto;
+      padding: 12px;
+      background: oklch(0.998 0.003 245);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .search {
+      grid-area: search;
+      width: 100%;
+      min-width: 0;
+      border: 1px solid transparent;
+      outline: 0;
+      border-radius: 7px;
+      padding: 11px 12px;
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 15px;
+    }
+
+    .chip, .sync {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 8px 12px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+    }
+
+    .chip.active {
+      background: oklch(0.998 0.003 245);
+      color: var(--ink);
+      box-shadow: 0 1px 5px oklch(0.2 0.02 252 / 0.08);
+    }
+
+    .source-tabs {
+      grid-area: chips;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .chip {
+      white-space: nowrap;
+      min-height: 34px;
+    }
+
+    .window-tabs {
+      grid-area: windows;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-self: end;
+      flex-wrap: wrap;
+    }
+
+    .window-tabs .chip {
+      font-size: 13px;
+      min-height: 34px;
+    }
+
+    .sync {
+      grid-area: sync;
+      margin-left: auto;
+      border: 0;
+      border-radius: 8px;
+      background: oklch(0.12 0.01 252);
+      color: oklch(0.98 0.004 252);
+      padding: 12px 16px;
+      white-space: nowrap;
+    }
+
+    .hud {
+      width: var(--rail);
+      margin: 24px auto 28px;
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: oklch(0.967 0.008 238);
+      color: var(--muted);
+      overflow-x: auto;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1;
+      font-weight: 650;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .hud strong { color: var(--ink); font-weight: 750; }
+    .hud .ok { color: var(--green); }
+    .hud .critical { color: oklch(0.58 0.18 27); }
+    .hud .sep { color: oklch(0.72 0.014 240); }
+
+    .day {
+      border-top: 1px solid var(--line);
+      width: var(--rail);
+      margin: 0 auto;
+      padding-top: 22px;
+    }
+
+    .day-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .date strong {
+      display: block;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 500;
+      font-size: 28px;
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .date span, .count {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .timeline-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .card {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: oklch(0.998 0.003 245);
+      box-shadow: 0 1px 0 oklch(1 0 0 / 0.45) inset;
+    }
+
+    .card a {
+      color: inherit;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .youtube-video {
+      position: relative;
+      display: flex;
+      min-height: 280px;
+      grid-column: span 8;
+      color: oklch(0.985 0.004 245);
+      background: oklch(0.14 0.008 245);
+    }
+
+    .youtube-video img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .youtube-video:after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(to top, oklch(0.12 0.008 245 / 0.95), oklch(0.12 0.008 245 / 0.16) 58%, oklch(0.12 0.008 245 / 0.28)),
+        linear-gradient(to right, oklch(0.12 0.008 245 / 0.42), transparent 50%);
+    }
+
+    .youtube-video .overlay {
+      position: relative;
+      z-index: 1;
+      align-self: flex-end;
+      width: 100%;
+      padding: 18px;
+    }
+
+    .kicker {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 8px;
+      color: inherit;
+      opacity: 0.78;
+      font: 750 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .youtube-video h2 {
+      max-width: 32rem;
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.08;
+      letter-spacing: -0.025em;
+    }
+
+    .subline {
+      margin-top: 8px;
+      color: oklch(0.9 0.012 245);
+      font-size: 13px;
+    }
+
+    .youtube-search {
+      grid-column: span 4;
+      padding: 14px;
+      background:
+        linear-gradient(135deg, oklch(0.982 0.012 242), oklch(0.958 0.016 238));
+    }
+
+    .search-term {
+      margin: 18px 0 8px;
+      font-size: 20px;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+
+    .note-card {
+      grid-column: span 6;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background:
+        linear-gradient(90deg, oklch(0.988 0.008 232), oklch(0.993 0.004 232));
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .note-card.full {
+      grid-column: span 12;
+    }
+
+    .note-card header, .note-card .note-body, .note-card footer {
+      padding: 14px 16px;
+    }
+
+    .note-card header {
+      border-bottom: 1px solid var(--blue-line);
+    }
+
+    .note-card footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      border-top: 1px solid var(--blue-line);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .note-title {
+      margin: 0 0 5px;
+      font-size: 15px;
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+    }
+
+    .note-meta {
+      color: var(--blue);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .note-body {
+      color: oklch(0.255 0.025 239);
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .tweet-card {
+      grid-column: span 6;
+      display: grid;
+      grid-template-rows: minmax(180px, auto) auto;
+      background: oklch(0.99 0.004 240);
+    }
+
+    .tweet-media {
+      position: relative;
+      min-height: 190px;
+      background: oklch(0.92 0.016 240);
+    }
+
+    .tweet-media img {
+      width: 100%;
+      height: 100%;
+      min-height: 190px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .tweet-media.two {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+      background: var(--line);
+    }
+
+    .tweet-body {
+      padding: 14px;
+    }
+
+    .tweet-author {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tweet-author strong {
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .tweet-text {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .likes-card {
+      grid-column: span 12;
+      display: grid;
+      grid-template-columns: 210px 1fr;
+      min-height: 220px;
+      background: oklch(0.985 0.007 240);
+    }
+
+    .likes-stack {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 2px;
+      background: var(--line);
+    }
+
+    .likes-stack img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .likes-body {
+      padding: 16px;
+    }
+
+    .likes-body h2 {
+      margin: 0 0 10px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+
+    .like-row {
+      display: grid;
+      grid-template-columns: 84px 1fr;
+      gap: 10px;
+      padding: 9px 0;
+      border-top: 1px solid var(--line);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .like-row span:first-child {
+      color: var(--muted);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .podcast {
+      grid-column: span 6;
+      display: grid;
+      grid-template-columns: 76px 1fr;
+      gap: 14px;
+      align-items: center;
+      padding: 14px;
+      background: oklch(0.982 0.009 255);
+    }
+
+    .pod-art {
+      aspect-ratio: 1;
+      border-radius: 12px;
+      background:
+        linear-gradient(135deg, oklch(0.36 0.07 250), oklch(0.77 0.12 330)),
+        var(--soft);
+      box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.24);
+    }
+
+    .podcast h2 {
+      margin: 0 0 7px;
+      font-size: 16px;
+      line-height: 1.15;
+      letter-spacing: -0.025em;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    @media (max-width: 920px) {
+      main { width: min(100vw - 24px, 1180px); }
+      h1 { font-size: 42px; }
+      .controls {
+        grid-template-columns: 1fr;
+        grid-template-areas: "search" "windows" "chips" "sync";
+      }
+      .window-tabs { justify-self: stretch; }
+      .sync { width: 100%; margin-left: 0; }
+      .youtube-video, .youtube-search, .note-card, .tweet-card, .likes-card, .podcast {
+        grid-column: 1 / -1;
+      }
+      .likes-card { grid-template-columns: 1fr; }
+      .likes-stack { min-height: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div class="brand">nutshell</div>
+      <nav class="nav" aria-label="Dashboard sections">
+        <span>Timeline</span>
+        <span>Sources</span>
+        <span>Settings</span>
+      </nav>
+    </div>
+
+    <section class="hero">
+      <p class="eyebrow">Local personal trace</p>
+      <h1>Your trace, organized by day</h1>
+      <p class="subhead">Recent notes, media, and X activity from the local Nutshell store.</p>
+      <section class="controls" aria-label="Dashboard controls">
+      <input class="search" value="" placeholder="Filter loaded cards" title="Filters cards already loaded in the visible date range.">
+      <div class="window-tabs" aria-label="Visible time window">
+        <button class="chip">Previous 24h</button>
+        <button class="chip active">Previous 7 days</button>
+        <button class="chip">30 days</button>
+        <button class="chip">6 months</button>
+        <button class="chip">Custom</button>
+      </div>
+      <div class="source-tabs" aria-label="Sources">
+        <button class="chip active">All</button>
+        <button class="chip">YouTube</button>
+        <button class="chip">Podcasts</button>
+        <button class="chip">Notes</button>
+        <button class="chip">X</button>
+      </div>
+      <button class="sync" title="Run a recent sync now.">Sync now</button>
+      </section>
+    </section>
+
+    <section class="hud" aria-label="System status">
+      <span>Health <strong class="critical">critical</strong></span>
+      <span class="sep">/</span>
+      <span>Daemon <strong>loaded</strong></span>
+      <span class="sep">/</span>
+      <span>Exit <strong>0</strong></span>
+      <span class="sep">/</span>
+      <span>Last <strong>12:12 AM</strong></span>
+      <span class="sep">/</span>
+      <span>Next <strong>12:27 AM</strong></span>
+      <span class="sep">/</span>
+      <span>Lock <strong>clear</strong></span>
+      <span class="sep">/</span>
+      <span>Findings <strong>1</strong></span>
+      <span class="sep">/</span>
+      <span>Store <strong>ok</strong> / ~/Nutshell</span>
+    </section>
+
+    <article class="day">
+      <header class="day-head">
+        <div class="date">
+          <strong>05-22</strong>
+          <span>Friday, May 22, 2026</span>
+        </div>
+        <div class="count">19 trace items</div>
+      </header>
+
+      <section class="timeline-grid">
+        <article class="card youtube-video">
+          <img src="https://i.ytimg.com/vi/DfjAS-2DFL4/hqdefault.jpg" alt="">
+          <div class="overlay">
+            <div class="kicker"><span>YouTube watched</span><span>8:27 PM</span></div>
+            <h2>Joe Rogan Experience #2501, Marc Andreessen</h2>
+            <div class="subline">PowerfulJRE · 3:20:21 · watched</div>
+          </div>
+        </article>
+
+        <article class="card youtube-search">
+          <div class="kicker"><span>YouTube search</span><span>8:25 PM</span></div>
+          <div class="search-term">Joe Rogan Marc Andreessen</div>
+          <div class="meta">Search intent, compact because there is no video thumbnail.</div>
+        </article>
+
+        <article class="card note-card full">
+          <header>
+            <h2 class="note-title">Trace runtime architecture notes</h2>
+            <div class="note-meta">Apple Notes / Projects / modified 4:42 PM</div>
+          </header>
+          <div class="note-body">The important thing is that the daily view is not the source of truth. The store is the source of truth, projections are disposable, and each plugin owns its own sync strategy.</div>
+          <footer>
+            <span>entity: apple_note</span>
+            <span>synced 4:43 PM</span>
+          </footer>
+        </article>
+
+        <article class="card tweet-card">
+          <div class="tweet-media">
+            <img src="https://images.unsplash.com/photo-1515879218367-8466d910aaa4?auto=format&fit=crop&w=900&q=82" alt="">
+          </div>
+          <div class="tweet-body">
+            <div class="tweet-author"><strong>@example</strong><span>bookmarked · 2:12 PM</span></div>
+            <p class="tweet-text">A useful architecture diagram for local-first agent memory, with sync boundaries and explicit checkpoints.</p>
+          </div>
+        </article>
+
+        <article class="card tweet-card">
+          <div class="tweet-media two">
+            <img src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=700&q=82" alt="">
+            <img src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=700&q=82" alt="">
+          </div>
+          <div class="tweet-body">
+            <div class="tweet-author"><strong>@builder</strong><span>bookmarked · 12:44 PM</span></div>
+            <p class="tweet-text">Notes on designing data tools that are debuggable before they are clever.</p>
+          </div>
+        </article>
+
+        <article class="card podcast">
+          <div class="pod-art"></div>
+          <div>
+            <div class="kicker"><span>Podcast</span><span>6:14 PM</span></div>
+            <h2>Acquired: The Complete History of Nvidia</h2>
+            <div class="meta">Acquired · listened · local Podcasts library</div>
+          </div>
+        </article>
+
+        <article class="card likes-card">
+          <div class="likes-stack">
+            <img src="https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=520&q=80" alt="">
+            <img src="https://images.unsplash.com/photo-1487058792275-0ad4aaf24ca7?auto=format&fit=crop&w=520&q=80" alt="">
+            <img src="https://images.unsplash.com/photo-1519389950473-47ba0277781c?auto=format&fit=crop&w=520&q=80" alt="">
+            <img src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=520&q=80" alt="">
+          </div>
+          <div class="likes-body">
+            <div class="kicker"><span>X likes</span><span>grouped</span></div>
+            <h2>You liked 14 posts</h2>
+            <div class="like-row"><span>@researcher</span><div>Benchmarks for local indexing and retrieval over personal archives.</div></div>
+            <div class="like-row"><span>@designer</span><div>A compact visual system for dense dashboards without losing readability.</div></div>
+            <div class="like-row"><span>@infra</span><div>Why sync jobs need observable checkpoints and boring retry semantics.</div></div>
+          </div>
+        </article>
+
+        <article class="card note-card">
+          <header>
+            <h2 class="note-title">Morning thought</h2>
+            <div class="note-meta">Apple Notes / Inbox / created 8:03 AM</div>
+          </header>
+          <div class="note-body">Need to make sure the trace system helps reconstruct the progression of thinking, not just collect artifacts. Chronology matters because it gives future agents the shape of attention.</div>
+          <footer>
+            <span>entity: apple_note</span>
+            <span>body hash ok</span>
+          </footer>
+        </article>
+      </section>
+    </article>
+  </main>
+</body>
+</html>

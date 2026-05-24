@@ -1,0 +1,15 @@
+node_modules/
+dist/
+bin/nutshell
+
+.DS_Store
+*.log
+*.tmp
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+artifacts/
+logs/
+projections/
+launchd/
