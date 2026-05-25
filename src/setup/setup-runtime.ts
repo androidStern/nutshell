@@ -339,6 +339,10 @@ export class SetupRuntime {
         detail: { status: appStatusJson(status) },
       };
     }
+    await this.ui.note({
+      title: "Running smoke sync",
+      body: "Nutshell is running one app-owned sync through the installed app. This proves the background identity can read protected data before setup finishes.",
+    });
     const result = await this.host.run({ command: executable, args: ["__sync-once", "all"], timeoutMs: 150_000 });
     return {
       attempted: true,

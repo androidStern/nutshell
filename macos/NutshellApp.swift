@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -147,7 +148,7 @@ func syncOnce() throws {
     throw AppError.unsupported("Full Disk Access is not granted to \(productName).")
   }
   let source = CommandLine.arguments.dropFirst(2).first ?? "all"
-  let result = try runCore(["sync", source, "--mode", "recent", "--json"])
+  let result = try runCore(["sync", source, "--mode", "recent", "--json"], timeoutSeconds: 120)
   print(result.output)
   if result.code >= 2 {
     throw AppError.processFailed("nutshell-core sync \(source)", result.code, result.output)
@@ -183,14 +184,14 @@ func openFullDiskAccess() {
   }
 }
 
-func runCore(_ arguments: [String]) throws -> ProcessResult {
+func runCore(_ arguments: [String], timeoutSeconds: TimeInterval? = nil) throws -> ProcessResult {
   guard let core = Bundle.main.url(forResource: "nutshell-core", withExtension: nil) else {
     throw AppError.missingBundleResource("nutshell-core")
   }
-  return runProcess(core.path, arguments)
+  return runProcess(core.path, arguments, timeoutSeconds: timeoutSeconds)
 }
 
-func runProcess(_ executable: String, _ arguments: [String]) -> ProcessResult {
+func runProcess(_ executable: String, _ arguments: [String], timeoutSeconds: TimeInterval? = nil) -> ProcessResult {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: executable)
   process.arguments = arguments
@@ -207,7 +208,25 @@ func runProcess(_ executable: String, _ arguments: [String]) -> ProcessResult {
   } catch {
     return ProcessResult(code: 127, output: String(describing: error))
   }
-  process.waitUntilExit()
+  if let timeoutSeconds {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    while process.isRunning && Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.1)
+    }
+    if process.isRunning {
+      process.terminate()
+      Thread.sleep(forTimeInterval: 2.0)
+      if process.isRunning {
+        kill(process.processIdentifier, SIGKILL)
+      }
+      process.waitUntilExit()
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      let output = String(data: data, encoding: .utf8) ?? ""
+      return ProcessResult(code: 124, output: "\(output)\nnutshell-core timed out after \(Int(timeoutSeconds))s")
+    }
+  } else {
+    process.waitUntilExit()
+  }
   let data = pipe.fileHandleForReading.readDataToEndOfFile()
   return ProcessResult(code: process.terminationStatus, output: String(data: data, encoding: .utf8) ?? "")
 }
