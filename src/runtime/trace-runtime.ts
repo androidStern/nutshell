@@ -443,13 +443,13 @@ export class TraceRuntime {
 
   private automaticEnrichmentSettings(syncBudget: SyncBudget): { enabled: boolean; limit: number; budget: SyncBudget } {
     const runtimeCfg = objectAt(this.config.data, "runtime");
-    const configuredMaxRequests = Math.max(0, Math.trunc(numberAt(runtimeCfg, "enrichmentMaxRequests", 50)));
+    const configuredMaxRequests = Math.max(0, Math.trunc(numberAt(runtimeCfg, "enrichmentMaxRequests", 10)));
     const maxRequests = syncBudget.maxRequests === null ? configuredMaxRequests : Math.min(configuredMaxRequests, syncBudget.maxRequests);
     return {
       enabled: booleanAt(runtimeCfg, "enrichmentAfterSync", true),
       limit: maxRequests,
       budget: {
-        maxRuntimeMs: Math.min(numberAt(runtimeCfg, "enrichmentMaxRuntimeMs", 60_000), syncBudget.maxRuntimeMs),
+        maxRuntimeMs: Math.min(numberAt(runtimeCfg, "enrichmentMaxRuntimeMs", 120_000), syncBudget.maxRuntimeMs),
         maxRequests,
         minDelayMs: Math.max(numberAt(runtimeCfg, "enrichmentMinDelayMs", 1_000), syncBudget.minDelayMs),
         stopOnRateLimit: booleanAt(runtimeCfg, "enrichmentStopOnRateLimit", true) || syncBudget.stopOnRateLimit,
