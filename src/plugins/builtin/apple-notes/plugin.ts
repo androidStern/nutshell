@@ -12,7 +12,8 @@ import type {
 } from "../../../core/types";
 import { booleanAt, numberAt, stringArrayAt, stringAt } from "../../../config/config";
 import { finding, type TracePlugin } from "../../interface";
-import { AppleScriptNotesSource, FixtureNotesSource, type NotesSource } from "./jxa-source";
+import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
+import { AppleScriptNotesSource, FixtureNotesSource, JXANotesSource, type NotesSource } from "./jxa-source";
 import {
   noteMarkdownRelativePath,
   noteRawHtmlRelativePath,
@@ -57,6 +58,27 @@ export class AppleNotesPlugin implements TracePlugin {
     defaultBudget: { maxRuntimeMs: 240_000, maxRequests: null, minDelayMs: 0, stopOnRateLimit: true },
   };
 
+  readonly setup = {
+    summarize: async (_ctx: PluginSetupContext) => ({
+      title: "Apple Notes",
+      body:
+        "Nutshell reads current Notes.app metadata and accessible note bodies through macOS automation. Locked notes are kept as metadata-only when the body is not available.",
+    }),
+    run: async (ctx: PluginSetupContext) => {
+      const check = await ctx.ui.ensure({
+        title: "Verify Apple Notes access",
+        body: "If macOS blocks this, allow the installed Nutshell app or command to control Notes, then try the verification again.",
+        check: () => this.setupCheck(ctx),
+        repair: async () => {
+          await ctx.host.openApp("Notes").catch(() => undefined);
+          await ctx.host.macos?.openPrivacyPane("Automation").catch(() => undefined);
+        },
+      });
+      return { findings: setupFindingFromCheck("apple_notes", "apple_notes_setup_failed", check) };
+    },
+    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("apple_notes", "apple_notes_setup_verify_failed", await this.setupCheck(ctx)),
+  };
+
   async check(ctx: PluginContext) {
     const cfg = config(ctx);
     if (cfg.source === "fixture") {
@@ -65,7 +87,9 @@ export class AppleNotesPlugin implements TracePlugin {
         : [finding("critical", "apple_notes", "apple_notes_fixture_missing", "Apple Notes fixture is missing", { fixturePath: cfg.fixturePath })];
     }
     const osascript = Bun.which("osascript");
-    return osascript ? [] : [finding("critical", "apple_notes", "osascript_missing", "osascript is not available", {})];
+    if (!osascript) return [finding("critical", "apple_notes", "osascript_missing", "osascript is not available", {})];
+    const probe = await this.probe(cfg, ctx.signal);
+    return probe.ok ? [] : [finding(probe.level ?? "critical", "apple_notes", "apple_notes_access_probe_failed", probe.message, probe.detail ?? {})];
   }
 
   async sync(ctx: PluginContext, request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
@@ -373,6 +397,89 @@ export class AppleNotesPlugin implements TracePlugin {
       partial,
     };
   }
+
+  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
+    const cfg = configFromJson(ctx.config.pluginConfig("apple_notes"));
+    if (cfg.source === "fixture" && !existsSync(cfg.fixturePath)) {
+      return {
+        ok: false,
+        level: "critical",
+        message: "Apple Notes fixture is missing.",
+        detail: { fixturePath: cfg.fixturePath },
+      };
+    }
+    if (cfg.source !== "fixture" && !Bun.which("osascript")) {
+      return {
+        ok: false,
+        level: "critical",
+        message: "AppleScript is not available, so Notes.app cannot be queried.",
+        detail: {},
+      };
+    }
+    try {
+      return await this.probe(cfg, ctx.signal);
+    } catch (error) {
+      return {
+        ok: false,
+        level: "critical",
+        message: isAppleNotesPermissionError(error) ? "Apple Notes is blocked by macOS automation permissions." : "Apple Notes access could not be verified.",
+        detail: { error: String(error) },
+      };
+    }
+  }
+
+  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<SetupCheck> {
+    try {
+      const source = this.sourceFactory(cfg);
+      const timeoutMs = Math.min(cfg.osascriptTimeoutMs, 45_000);
+      if (source.probeAccess) {
+        const probe = await source.probeAccess(timeoutMs, signal);
+        return {
+          ok: true,
+          level: "ok",
+          message: `Apple Notes automation works (${probe.accountCount} accounts visible).`,
+          detail: { accounts: probe.accountCount, lightweightProbe: true },
+        };
+      }
+      const metadata = await source.scanMetadata(timeoutMs, signal);
+      const accessible = metadata.find((note) => !note.passwordProtected);
+      if (accessible) {
+        const bodies = await source.fetchBodies([accessible.id], timeoutMs, signal);
+        const body = bodies.get(accessible.id);
+        if (!body) {
+          return {
+            ok: false,
+            level: "critical",
+            message: "Apple Notes metadata works, but body export returned no body for an accessible note.",
+            detail: { noteId: accessible.id, title: accessible.title },
+          };
+        }
+        if (body.error) {
+          return {
+            ok: false,
+            level: isAppleNotesPermissionError(body.error) ? "critical" : "warning",
+            message: "Apple Notes metadata works, but body export reported an error.",
+            detail: { noteId: accessible.id, title: accessible.title, error: body.error },
+          };
+        }
+      }
+      return {
+        ok: true,
+        level: "ok",
+        message: accessible
+          ? `Apple Notes access works (${metadata.length} notes visible).`
+          : `Apple Notes metadata works (${metadata.length} notes visible); no unlocked note was available for a body probe.`,
+        detail: { notes: metadata.length, bodyProbe: Boolean(accessible) },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        level: "critical",
+        message: isAppleNotesPermissionError(error) ? "Apple Notes is blocked by macOS automation permissions." : "Apple Notes access could not be verified.",
+        detail: { error: String(error) },
+      };
+    }
+  }
 }
 
 export function createAppleNotesPlugin(): TracePlugin {
@@ -380,7 +487,10 @@ export function createAppleNotesPlugin(): TracePlugin {
 }
 
 function config(ctx: PluginContext) {
-  const cfg = ctx.config as JsonObject;
+  return configFromJson(ctx.config as JsonObject);
+}
+
+function configFromJson(cfg: JsonObject) {
   return {
     source: stringAt(cfg, "source", "jxa"),
     fixturePath: stringAt(cfg, "fixturePath", ""),
@@ -395,8 +505,15 @@ function config(ctx: PluginContext) {
   };
 }
 
+function setupFindingFromCheck(source: "apple_notes", code: string, check: SetupCheck) {
+  if (check.ok) return [];
+  return [finding(check.level === "warning" ? "warning" : "critical", source, code, check.message, check.detail ?? {})];
+}
+
 function buildSource(cfg: ReturnType<typeof config>): NotesSource {
-  return cfg.source === "fixture" ? new FixtureNotesSource(cfg.fixturePath) : new AppleScriptNotesSource();
+  if (cfg.source === "fixture") return new FixtureNotesSource(cfg.fixturePath);
+  if (cfg.source === "jxa") return new JXANotesSource();
+  return new AppleScriptNotesSource();
 }
 
 function normalizeState(value: unknown): AppleNotesState {

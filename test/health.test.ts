@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config/config";
@@ -44,7 +44,7 @@ test("health reports incomplete coverage without provider export or current-sour
     const report = await runtime.health();
     const twitter = report.backfill.find((item) => item.source === "twitter");
     expect(twitter?.status).toBe("backfill_incomplete");
-    expect(twitter?.bulkBackfill.nextCommand).toBe("nutshell import twitter --path <provider-export> --json");
+    expect(twitter?.bulkBackfill.nextCommand).toBe("nutshell import twitter <provider-export> --json");
     expect(report.findings.some((item) => item.source === "twitter" && item.code === "backfill_incomplete")).toBe(true);
     await runtime.close();
   } finally {
@@ -89,6 +89,34 @@ test("health includes the latest source finding when a recent run is partial", a
     const detail = finding?.detail as JsonObject;
     const latest = detail.latestFinding as JsonObject;
     expect(latest.code).toBe("podcasts_db_timeout");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health treats initial partial backfill convergence as warning, not critical", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-"));
+  try {
+    const config = loadConfig(root);
+    config.data.backfill = { cutoffDate: "2026-01-01", cutoffDates: {}, lookbackMonths: 6 };
+    const store = openStore(join(root, "trace.sqlite"));
+    const checkpoint = await store.loadCheckpoint("apple_notes");
+    await store.commitSync({
+      source: "apple_notes",
+      run: { id: "recent-notes", command: "test", mode: "recent", startedAt: new Date("2026-05-21T12:00:00Z") },
+      result: {
+        ...resultWithRecords("apple_notes", [record("apple_note", "one", "note", "2026-05-20T12:00:00Z")]),
+        completed: false,
+        partial: true,
+      },
+      expectedCheckpointVersion: checkpoint.version,
+    });
+
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([new FakePlugin("apple_notes", () => resultWithRecords("apple_notes", []))]) });
+    const report = await runtime.health();
+    const finding = report.findings.find((item) => item.source === "apple_notes" && item.code === "backfill_partial");
+    expect(finding?.level).toBe("warning");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -165,6 +193,115 @@ test("health reports stale runtime locks as critical", async () => {
     const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([]) });
     const report = await runtime.health();
     expect(report.findings.some((item) => item.code === "lock_stale" && item.level === "critical")).toBe(true);
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health reports degraded setup state without running the plugin probe", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {
+      fake: {
+        enabled: true,
+        setup: {
+          status: "degraded",
+          findings: [{ level: "critical", code: "fake_setup", message: "fake setup failed", observedAt: "2026-05-24T12:00:00Z", detail: {} }],
+        },
+      },
+    };
+    let checked = false;
+    class ProbePlugin extends FakePlugin {
+      async check() {
+        checked = true;
+        return [];
+      }
+    }
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([new ProbePlugin("fake", () => resultWithRecords("fake", []))]) });
+    const report = await runtime.health();
+    expect(checked).toBe(false);
+    expect(report.findings.some((item) => item.source === "fake" && item.code === "plugin_setup_degraded")).toBe(true);
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health reports app-owned background and permission status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-app-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = "status" ]; then
+  echo "Full Disk Access: not granted"
+  echo "Agent status: requiresApproval"
+  echo "Background sync: disabled"
+  echo "Data root: ${root}/Nutshell"
+  exit 0
+fi
+exit 64
+`,
+      "utf8",
+    );
+    chmodSync(executable, 0o755);
+    const config = loadConfig(root);
+    config.data.app = { path: appPath };
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([]) });
+
+    const report = await runtime.health();
+
+    expect(report.app.installed).toBe(true);
+    expect(report.app.fullDiskAccess).toBe("missing");
+    expect(report.app.agent).toBe("requiresApproval");
+    expect(report.app.backgroundSync).toBe("disabled");
+    expect(report.findings.some((item) => item.code === "nutshell_app_full_disk_access_missing")).toBe(true);
+    expect(report.findings.some((item) => item.code === "nutshell_agent_requires_approval")).toBe(true);
+    expect(report.findings.some((item) => item.code === "nutshell_background_sync_disabled")).toBe(true);
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("source-scoped health runs only the requested plugin probe", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-scope-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {
+      twitter: { enabled: true },
+      youtube: { enabled: true },
+    };
+    const calls: string[] = [];
+    class ProbePlugin extends FakePlugin {
+      async check() {
+        calls.push(this.manifest.id);
+        return [];
+      }
+    }
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({
+      root,
+      config,
+      store,
+      registry: new PluginRegistry([
+        new ProbePlugin("twitter", () => resultWithRecords("twitter", [])),
+        new ProbePlugin("youtube", () => resultWithRecords("youtube", [])),
+      ]),
+    });
+
+    const report = await runtime.health({ source: "twitter" });
+
+    expect(calls).toEqual(["twitter"]);
+    expect(report.backfill.map((item) => item.source)).toEqual(["twitter"]);
+    expect(report.findings.some((item) => item.source === "youtube")).toBe(false);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

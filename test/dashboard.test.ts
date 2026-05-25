@@ -12,7 +12,7 @@ import { FakePlugin } from "../src/testing/fake-plugin";
 
 const LOCALHOST_BIND_AVAILABLE = canBindLocalhost();
 
-test("dashboard status API uses health, launchd, and config model", async () => {
+test("dashboard status API uses app-owned health and config model", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
     const runtime = runtimeFor(root);
@@ -22,7 +22,8 @@ test("dashboard status API uses health, launchd, and config model", async () => 
     expect(json.product).toBe("nutshell");
     expect(json.root).toBe(root);
     expect(json.health).toBeTruthy();
-    expect(json.launchd).toBeTruthy();
+    expect(json.app).toBeTruthy();
+    expect(json).not.toHaveProperty("launchd");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -154,7 +155,7 @@ test("dashboard renders Twitter cards from cached enrichment without widget netw
   }
 });
 
-test("dashboard diagnostics and config APIs return raw local data", async () => {
+test("dashboard diagnostics and config APIs redact secret-looking local data", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
     const runtime = runtimeFor(root);
@@ -162,12 +163,13 @@ test("dashboard diagnostics and config APIs return raw local data", async () => 
     runtime.logger.event("secret fixture", { token: "secret-token" });
     const configResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/config"));
     const config = (await configResponse.json()) as Record<string, unknown>;
-    expect(JSON.stringify(config)).toContain("secret-api-key");
-    expect(JSON.stringify(config)).toContain("secret-client");
+    expect(JSON.stringify(config)).not.toContain("secret-api-key");
+    expect(JSON.stringify(config)).not.toContain("secret-client");
+    expect(JSON.stringify(config)).toContain("<redacted>");
 
     const diagnosticsResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/diagnostics"));
     const diagnostics = (await diagnosticsResponse.json()) as Record<string, unknown>;
-    expect(JSON.stringify(diagnostics)).toContain("secret-token");
+    expect(JSON.stringify(diagnostics)).not.toContain("secret-token");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

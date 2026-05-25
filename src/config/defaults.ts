@@ -18,10 +18,18 @@ export const DEFAULT_CONFIG: JsonObject = {
   storage: {
     root: "~/Nutshell",
   },
+  app: {
+    path: "",
+  },
   runtime: {
     lockHeartbeatMs: 30_000,
     staleLockMs: 10 * 60 * 1000,
     projectionAfterSync: true,
+    enrichmentAfterSync: true,
+    enrichmentMaxRequests: 50,
+    enrichmentMaxRuntimeMs: 60_000,
+    enrichmentMinDelayMs: 1_000,
+    enrichmentStopOnRateLimit: true,
     diskWarningBytes: 2_000_000_000,
     diskCriticalBytes: 500_000_000,
     projectionStaleMs: 24 * 60 * 60 * 1000,

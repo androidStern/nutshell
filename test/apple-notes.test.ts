@@ -98,6 +98,61 @@ test("apple notes automation denial returns an explicit permission finding", asy
   }
 });
 
+test("apple notes health probe fails closed on automation denial", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-health-permission-"));
+  try {
+    const deniedSource: NotesSource = {
+      async scanMetadata() {
+        throw new Error("Not authorized to send Apple events to Notes.");
+      },
+      async fetchBodies() {
+        return new Map();
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => deniedSource);
+    const findings = await plugin.check({
+      root,
+      config: {},
+      logger: new JsonlLogger(join(root, "logs", "nutshell.jsonl")),
+      signal: new AbortController().signal,
+      now: () => new Date("2026-05-21T12:00:00Z"),
+      records: emptyRecordReader(),
+      writeArtifact: async () => {
+        throw new Error("health test should not write artifacts");
+      },
+    });
+
+    expect(findings.some((item) => item.level === "critical" && item.code === "apple_notes_access_probe_failed")).toBe(true);
+    expect(findings[0]?.message).toContain("automation permissions");
+    expect(String((findings[0]?.detail as JsonObject).error)).toContain("Not authorized");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apple notes health probe uses lightweight app access when available", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-health-lightweight-"));
+  try {
+    const source: NotesSource = {
+      async probeAccess() {
+        return { accountCount: 2 };
+      },
+      async scanMetadata() {
+        throw new Error("health probe should not run a full metadata scan");
+      },
+      async fetchBodies() {
+        throw new Error("health probe should not fetch note bodies");
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => source);
+    const findings = await plugin.check(context(root));
+
+    expect(findings).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apple notes stops body export cleanly when the run budget is exhausted", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-notes-deadline-"));
   try {

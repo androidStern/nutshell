@@ -4,9 +4,9 @@ import JSON5 from "json5";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
 import { validateConfig } from "../config/schema";
 import { CLI_NAME, PRODUCT_VERSION } from "../core/product";
+import { redactJson, redactText } from "../core/redaction";
 import type { Json, JsonObject, SourceId, SyncRequest, TraceRecord } from "../core/types";
 import { localDateKey, localDayWindow } from "../core/time";
-import { inspectLaunchd } from "../launchd/status";
 import { runProcess } from "../runtime/process";
 import { defaultSyncRequest, TraceRuntime } from "../runtime/trace-runtime";
 
@@ -95,7 +95,7 @@ export async function handleDashboardRequest(runtime: TraceRuntime, request: Req
 }
 
 async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, unknown>> {
-  const [health, launchd] = await Promise.all([runtime.health(), inspectLaunchd(runtime.config.root)]);
+  const health = await runtime.health();
   const scheduler = objectAt(runtime.config.data, "scheduler");
   const intervalSeconds = numberAt(scheduler, "intervalSeconds", 900);
   const lastRunAt = latestRecentRun(health.backfill);
@@ -107,7 +107,7 @@ async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, un
     root: runtime.config.root,
     configPath: runtime.config.path,
     health,
-    launchd,
+    app: health.app,
     scheduler: {
       intervalSeconds,
       lastRunAt,
@@ -274,9 +274,9 @@ function dashboardConfig(runtime: TraceRuntime): Record<string, unknown> {
   return {
     path: runtime.config.path,
     root: runtime.config.root,
-    settings: settingsFromConfig(runtime.config.data),
-    config: runtime.config.data,
-    raw,
+    settings: settingsFromConfig(redactJson(runtime.config.data) as JsonObject),
+    config: redactJson(runtime.config.data),
+    raw: redactConfigRaw(raw),
   };
 }
 
@@ -336,18 +336,27 @@ async function dashboardOpen(runtime: TraceRuntime, input: unknown): Promise<Rec
 }
 
 async function dashboardDiagnostics(runtime: TraceRuntime): Promise<Record<string, unknown>> {
-  const [health, launchd, snapshot] = await Promise.all([runtime.health(), inspectLaunchd(runtime.config.root), runtime.store.healthSnapshot()]);
+  const [health, snapshot] = await Promise.all([runtime.health(), runtime.store.healthSnapshot()]);
   const log = tailText(join(runtime.config.root, "logs", "nutshell.jsonl"), 80);
-  return {
+  return redactJson({
     generatedAt: new Date().toISOString(),
     version: PRODUCT_VERSION,
     root: runtime.config.root,
     configPath: runtime.config.path,
     health,
-    launchd,
+    app: health.app,
     snapshot,
-    logTail: log,
-  };
+    logTail: redactText(log),
+  } as unknown as JsonObject) as Record<string, unknown>;
+}
+
+function redactConfigRaw(raw: string): string {
+  if (!raw.trim()) return "";
+  try {
+    return `${JSON.stringify(redactJson(JSON5.parse(raw) as Json), null, 2)}\n`;
+  } catch {
+    return redactText(raw);
+  }
 }
 
 function groupRecordsByDay(records: TraceRecord[]): JsonObject[] {
@@ -1675,13 +1684,14 @@ function render() {
 function renderStatus() {
   const status = state.status || {};
   const health = status.health || {};
-  const launchd = status.launchd || {};
+  const app = status.app || {};
   const scheduler = status.scheduler || {};
   const disk = status.disk || {};
   $('#status').innerHTML = [
     'Health <strong class="' + esc(health.status || '') + '">' + esc(health.status || 'unknown') + '</strong>',
-    'Daemon <strong>' + esc(launchd.loaded ? 'loaded' : 'not loaded') + '</strong>',
-    'Exit <strong>' + esc(launchd.lastExitCode ?? 'unknown') + '</strong>',
+    'App <strong>' + esc(app.installed ? 'installed' : 'missing') + '</strong>',
+    'Agent <strong>' + esc(app.agent || 'unknown') + '</strong>',
+    'Access <strong>' + esc(app.fullDiskAccess || 'unknown') + '</strong>',
     'Last <strong>' + esc(shortTime(scheduler.lastRunAt)) + '</strong>',
     'Next <strong>' + esc(shortTime(scheduler.nextRunAt)) + '</strong>',
     'Lock <strong>' + esc(status.lock?.present ? 'active' : 'clear') + '</strong>',
@@ -1940,22 +1950,27 @@ function showNotice(message) {
 
 document.addEventListener('click', async (event) => {
   const target = event.target;
-  if (target.matches('.tab')) {
+  const tab = target.closest?.('.tab');
+  if (tab) {
     document.querySelectorAll('.tab').forEach((el) => el.classList.remove('active'));
     document.querySelectorAll('.view').forEach((el) => el.classList.remove('active'));
-    target.classList.add('active');
-    $('#' + target.dataset.view + '-view').classList.add('active');
+    tab.classList.add('active');
+    $('#' + tab.dataset.view + '-view').classList.add('active');
   }
-  if (target.matches('[data-source]')) {
-    document.querySelectorAll('[data-source]').forEach((el) => el.classList.remove('active'));
-    target.classList.add('active');
-    state.source = target.dataset.source;
+  const sourceButton = target.closest?.('.source-chips .source-icon[data-source]');
+  if (sourceButton) {
+    const nextSource = sourceButton.dataset.source === state.source && state.source !== 'all' ? 'all' : sourceButton.dataset.source;
+    state.source = nextSource || 'all';
+    document.querySelectorAll('.source-chips .source-icon[data-source]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.source === state.source);
+    });
     loadDays().catch((error) => showNotice(error.message));
   }
-  if (target.matches('[data-window]')) {
+  const windowButton = target.closest?.('[data-window]');
+  if (windowButton) {
     document.querySelectorAll('[data-window]').forEach((el) => el.classList.remove('active'));
-    target.classList.add('active');
-    state.windowPreset = target.dataset.window || '7d';
+    windowButton.classList.add('active');
+    state.windowPreset = windowButton.dataset.window || '7d';
     $('.custom-range').hidden = state.windowPreset !== 'custom';
     loadDays().catch((error) => showNotice(error.message));
   }

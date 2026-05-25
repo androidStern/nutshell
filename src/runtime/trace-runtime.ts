@@ -4,6 +4,7 @@ import type {
   ArtifactRef,
   Checkpoint,
   EnrichmentRequest,
+  EnrichmentSourceReport,
   HealthReport,
   HealthScope,
   JsonObject,
@@ -16,12 +17,15 @@ import type {
   SyncSourceReport,
   TraceQuery,
   RecordPage,
+  SyncBudget,
   WriteArtifactInput,
 } from "../core/types";
 import { sha256, runId } from "../core/ids";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
-import { loadConfig, logPath, objectAt, pluginConfig, storePath, type TraceConfig } from "../config/config";
+import { booleanAt, loadConfig, logPath, numberAt, objectAt, pluginConfig, storePath, type TraceConfig } from "../config/config";
+import { pluginSetupFindings, pluginSetupStatus } from "../setup/config-draft";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
+import type { TracePlugin } from "../plugins/interface";
 import type { TraceStore } from "../store/interface";
 import { openStore } from "../store/sqlite-store";
 import { RuntimeLock } from "./lock";
@@ -73,6 +77,29 @@ export class TraceRuntime {
       const sources: SyncSourceReport[] = [];
       for (const plugin of plugins) {
         const sourceStarted = new Date();
+        const setupStatus = pluginSetupStatus(this.config, plugin.manifest.id);
+        if (!request.source && setupStatus === "degraded") {
+          const finishedAt = new Date();
+          const finding = {
+            level: "critical" as const,
+            source: plugin.manifest.id,
+            code: "plugin_setup_degraded",
+            message: `${plugin.manifest.displayName} setup is degraded; skipping scheduled sync until setup or doctor repairs it`,
+            detail: { setupFindings: pluginSetupFindings(this.config, plugin.manifest.id) },
+            observedAt: finishedAt,
+          };
+          sources.push({
+            source: plugin.manifest.id,
+            status: "skipped",
+            startedAt: sourceStarted,
+            finishedAt,
+            durationMs: finishedAt.getTime() - sourceStarted.getTime(),
+            findings: [finding],
+            metrics: { skipped: true, reason: "plugin_setup_degraded" },
+          });
+          this.logger.warn("runtime: source skipped", { source: plugin.manifest.id, reason: "plugin_setup_degraded" });
+          continue;
+        }
         const controller = new AbortController();
         const budget = { ...plugin.manifest.defaultBudget, ...request.budget };
         const timeout = setTimeout(() => controller.abort(new Error("plugin timeout")), budget.maxRuntimeMs);
@@ -86,7 +113,7 @@ export class TraceRuntime {
             signal: controller.signal,
             now: () => new Date(),
             records: this.pluginRecordReader(),
-            writeArtifact: (input) => this.writeArtifact(input),
+            writeArtifact: request.dryRun ? dryRunWriteArtifact : (input) => this.writeArtifact(input),
           };
           const result = request.dryRun
             ? await plugin.sync(ctx, { ...request, budget }, checkpoint)
@@ -121,6 +148,8 @@ export class TraceRuntime {
             durationMs: sourceReport.durationMs,
             metrics: result.metrics as JsonObject,
           });
+          const enrichment = await this.runAutomaticEnrichment(plugin, request, sourceReport);
+          if (enrichment) sourceReport.enrichment = enrichment;
           sources.push(sourceReport);
         } catch (error) {
           const finishedAt = new Date();
@@ -195,12 +224,12 @@ export class TraceRuntime {
   }
 
   async importProviderExport(request: ProviderExportImportRequest): Promise<SyncSourceReport> {
-    return this.withRuntimeLock(`${this.configCommandName()} import ${request.source} --path ${request.path}`, async () => {
+    return this.withRuntimeLock(`${this.configCommandName()} import ${request.source} ${request.path}`, async () => {
       const plugin = this.registry.get(request.source);
       if (!plugin.importProviderExport) throw new Error(`${request.source} does not support provider export import`);
       const startedAt = new Date();
       const checkpoint = await this.store.loadCheckpoint(plugin.manifest.id);
-      const ctx = this.pluginContext(plugin.manifest.id, new AbortController().signal);
+      const ctx = this.pluginContext(plugin.manifest.id, new AbortController().signal, request.dryRun);
       const result = await plugin.importProviderExport(ctx, request, checkpoint);
       const commit = request.dryRun
         ? undefined
@@ -208,7 +237,7 @@ export class TraceRuntime {
             source: plugin.manifest.id,
             run: {
               id: runId(`${plugin.manifest.id}_import`),
-              command: `${this.configCommandName()} import ${plugin.manifest.id} --path ${request.path}`,
+              command: `${this.configCommandName()} import ${plugin.manifest.id} ${request.path}`,
               mode: "backfill",
               startedAt,
             },
@@ -234,40 +263,14 @@ export class TraceRuntime {
     return this.withRuntimeLock(`${this.configCommandName()} enrich ${request.source}`, async () => {
       const plugin = this.registry.get(request.source);
       if (!plugin.enrich) throw new Error(`${request.source} does not support enrichment`);
-      const startedAt = new Date();
-      const checkpoint = await this.store.loadCheckpoint(plugin.manifest.id);
-      const ctx = this.pluginContext(plugin.manifest.id, new AbortController().signal);
-      const result = await plugin.enrich(ctx, request, checkpoint);
-      const commit = request.dryRun
-        ? undefined
-        : await this.store.commitSync({
-            source: plugin.manifest.id,
-            run: {
-              id: runId(`${plugin.manifest.id}_enrich`),
-              command: `${this.configCommandName()} enrich ${plugin.manifest.id}`,
-              mode: "recent",
-              startedAt,
-            },
-            result,
-            expectedCheckpointVersion: checkpoint.version,
-          });
-      const finishedAt = new Date();
+      const report = await this.runEnrichmentCommit(plugin, request, `${this.configCommandName()} enrich ${plugin.manifest.id}`);
       if (!request.dryRun) await this.projectAfterMutation();
-      return {
-        source: plugin.manifest.id,
-        status: sourceStatus(result.health, result.partial),
-        startedAt,
-        finishedAt,
-        durationMs: finishedAt.getTime() - startedAt.getTime(),
-        commit,
-        findings: result.health,
-        metrics: result.metrics,
-      };
+      return { source: plugin.manifest.id, ...report };
     });
   }
 
-  async health(_scope: HealthScope = {}): Promise<HealthReport> {
-    return evaluateHealth(this.config, this.store, this.registry);
+  async health(scope: HealthScope = {}): Promise<HealthReport> {
+    return evaluateHealth(this.config, this.store, this.registry, scope);
   }
 
   async project(request: ProjectionRequest): Promise<ProjectionReport> {
@@ -292,7 +295,7 @@ export class TraceRuntime {
     await this.store.close();
   }
 
-  private pluginContext(source: string, signal: AbortSignal): PluginContext {
+  private pluginContext(source: string, signal: AbortSignal, dryRun = false): PluginContext {
     return {
       root: this.config.root,
       config: pluginConfig(this.config, source),
@@ -300,7 +303,7 @@ export class TraceRuntime {
       signal,
       now: () => new Date(),
       records: this.pluginRecordReader(),
-      writeArtifact: (input) => this.writeArtifact(input),
+      writeArtifact: dryRun ? dryRunWriteArtifact : (input) => this.writeArtifact(input),
     };
   }
 
@@ -312,6 +315,146 @@ export class TraceRuntime {
 
   private configCommandName(): string {
     return "nutshell";
+  }
+
+  private async runAutomaticEnrichment(
+    plugin: TracePlugin,
+    request: SyncRequest,
+    sourceReport: SyncSourceReport,
+  ): Promise<EnrichmentSourceReport | null> {
+    if (!plugin.enrich) return null;
+    if (request.dryRun) return null;
+    if (request.mode !== "recent") return null;
+    if (sourceReport.status === "critical" || !sourceReport.commit) return null;
+    const settings = this.automaticEnrichmentSettings(request.budget);
+    if (!settings.enabled || settings.limit <= 0) return null;
+    const enrichmentRequest: EnrichmentRequest = {
+      source: plugin.manifest.id,
+      limit: settings.limit,
+      dryRun: false,
+      budget: settings.budget,
+    };
+    const report = await this.runEnrichmentCommit(
+      plugin,
+      enrichmentRequest,
+      `${commandForRequest(request)} --auto-enrich ${plugin.manifest.id}`,
+    );
+    this.logger.event("runtime: source enrichment finished", {
+      source: plugin.manifest.id,
+      status: report.status,
+      durationMs: report.durationMs,
+      metrics: report.metrics as JsonObject,
+    });
+    return report;
+  }
+
+  private async runEnrichmentCommit(
+    plugin: TracePlugin,
+    request: EnrichmentRequest,
+    command: string,
+  ): Promise<EnrichmentSourceReport> {
+    if (!plugin.enrich) throw new Error(`${request.source} does not support enrichment`);
+    const startedAt = new Date();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("plugin enrichment timeout")), request.budget.maxRuntimeMs);
+    let checkpoint: Checkpoint | null = null;
+    try {
+      checkpoint = await this.store.loadCheckpoint(plugin.manifest.id);
+      const ctx = this.pluginContext(plugin.manifest.id, controller.signal, request.dryRun);
+      const result = await plugin.enrich(ctx, request, checkpoint);
+      const commit = request.dryRun
+        ? undefined
+        : await this.store.commitSync({
+            source: plugin.manifest.id,
+            run: {
+              id: runId(`${plugin.manifest.id}_enrich`),
+              command,
+              mode: "recent",
+              startedAt,
+            },
+            result,
+            expectedCheckpointVersion: checkpoint.version,
+          });
+      const finishedAt = new Date();
+      return {
+        status: sourceStatus(result.health, result.partial),
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        commit,
+        findings: result.health,
+        metrics: result.metrics,
+      };
+    } catch (error) {
+      const finishedAt = new Date();
+      const finding = {
+        level: "critical" as const,
+        source: plugin.manifest.id,
+        code: "plugin_enrichment_runtime_error",
+        message: `${plugin.manifest.id} enrichment failed`,
+        detail: { error: String(error) },
+        observedAt: finishedAt,
+      };
+      const report: EnrichmentSourceReport = {
+        status: "critical",
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        findings: [finding],
+        metrics: {},
+      };
+      if (!request.dryRun && checkpoint) {
+        try {
+          report.commit = await this.store.commitSync({
+            source: plugin.manifest.id,
+            run: {
+              id: runId(`${plugin.manifest.id}_enrich`),
+              command,
+              mode: "recent",
+              startedAt,
+            },
+            result: {
+              observations: [],
+              records: [],
+              nextCheckpoint: checkpoint.state as JsonObject,
+              health: [finding],
+              metrics: {},
+              completed: false,
+              partial: true,
+            },
+            expectedCheckpointVersion: checkpoint.version,
+          });
+        } catch (commitError) {
+          this.logger.error("runtime: failed to persist enrichment failure", {
+            source: plugin.manifest.id,
+            error: String(commitError),
+          });
+        }
+      }
+      this.logger.error("runtime: source enrichment failed", {
+        source: plugin.manifest.id,
+        error: String(error),
+      });
+      return report;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private automaticEnrichmentSettings(syncBudget: SyncBudget): { enabled: boolean; limit: number; budget: SyncBudget } {
+    const runtimeCfg = objectAt(this.config.data, "runtime");
+    const configuredMaxRequests = Math.max(0, Math.trunc(numberAt(runtimeCfg, "enrichmentMaxRequests", 50)));
+    const maxRequests = syncBudget.maxRequests === null ? configuredMaxRequests : Math.min(configuredMaxRequests, syncBudget.maxRequests);
+    return {
+      enabled: booleanAt(runtimeCfg, "enrichmentAfterSync", true),
+      limit: maxRequests,
+      budget: {
+        maxRuntimeMs: Math.min(numberAt(runtimeCfg, "enrichmentMaxRuntimeMs", 60_000), syncBudget.maxRuntimeMs),
+        maxRequests,
+        minDelayMs: Math.max(numberAt(runtimeCfg, "enrichmentMinDelayMs", 1_000), syncBudget.minDelayMs),
+        stopOnRateLimit: booleanAt(runtimeCfg, "enrichmentStopOnRateLimit", true) || syncBudget.stopOnRateLimit,
+      },
+    };
   }
 
   private async projectAfterMutation(): Promise<void> {
@@ -353,6 +496,10 @@ export class TraceRuntime {
   }
 }
 
+async function dryRunWriteArtifact(): Promise<ArtifactRef> {
+  throw new Error("dry_run_artifact_write_blocked: dry-run cannot write artifacts");
+}
+
 function commandForRequest(request: SyncRequest): string {
   return `nutshell sync ${request.source ?? "all"} --mode ${request.mode}`;
 }
@@ -365,8 +512,9 @@ function sourceStatus(findings: SyncSourceReport["findings"], partial: boolean):
 }
 
 function reportStatus(sources: SyncSourceReport[]): SyncReport["status"] {
-  if (sources.some((item) => item.status === "critical")) return "critical";
-  if (sources.some((item) => item.status === "warning" || item.status === "partial")) return "warning";
+  const statuses = sources.flatMap((item) => [item.status, item.enrichment?.status].filter(Boolean));
+  if (statuses.some((status) => status === "critical")) return "critical";
+  if (sources.some((item) => item.status === "warning" || item.status === "partial" || item.status === "skipped" || item.enrichment?.status === "warning" || item.enrichment?.status === "partial" || item.enrichment?.status === "skipped" || item.findings.some((finding) => finding.level !== "ok") || item.enrichment?.findings.some((finding) => finding.level !== "ok"))) return "warning";
   return "ok";
 }
 

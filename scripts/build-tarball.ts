@@ -11,15 +11,27 @@ const releaseRoot = join(repo, "dist", "release");
 const stage = join(releaseRoot, name);
 const tarball = join(releaseRoot, `${name}.tar.gz`);
 const binary = join(repo, "bin", "nutshell");
+const appBundle = join(repo, "dist", "macos", "Nutshell.app");
 const defaultReleaseBaseUrl = "https://github.com/winterfell/nutshell/releases/download";
+
+await run(["bun", "run", "build:compile"]);
+if (process.platform === "darwin") {
+  await run(["bun", "run", "build:macos-app"]);
+}
 
 if (!existsSync(binary)) {
   throw new Error("bin/nutshell is missing. Run `bun run build:compile` first.");
+}
+if (process.platform === "darwin" && !existsSync(appBundle)) {
+  throw new Error("dist/macos/Nutshell.app is missing. Run `bun run build:macos-app` before `bun run build:tarball`.");
 }
 
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(join(stage, "bin"), { recursive: true });
 cpSync(binary, join(stage, "bin", "nutshell"));
+if (existsSync(appBundle)) {
+  cpSync(appBundle, join(stage, "Nutshell.app"), { recursive: true });
+}
 cpSync(join(repo, "packaging", "tarball", "install.sh"), join(stage, "install.sh"));
 cpSync(join(repo, "packaging", "tarball", "uninstall.sh"), join(stage, "uninstall.sh"));
 cpSync(join(repo, "packaging", "tarball", "README.md"), join(stage, "README.md"));
@@ -93,26 +105,26 @@ function homebrewFormula(version: string, url: string, sha256: string): string {
   desc "Local personal trace ingestion runtime"
   homepage "https://github.com/winterfell/nutshell"
   url "${url}"
+  version "${version}"
   sha256 "${sha256}"
   license "MIT"
 
   def install
     bin.install "bin/nutshell"
+    prefix.install "Nutshell.app" if File.directory?("Nutshell.app")
   end
 
-  service do
-    run [opt_bin/"nutshell", "sync", "all", "--mode", "recent", "--json"]
-    run_type :interval
-    interval 900
-    environment_variables PATH: std_service_path_env
+  def caveats
+    <<~EOS
+      Run \`nutshell setup\` after install. Protected-data sync is owned by Nutshell.app, not a Homebrew service.
+    EOS
   end
 
   test do
     ENV["NUTSHELL_CONFIG"] = testpath/"nutconfig.jsonc"
     ENV["NUTSHELL_ROOT"] = testpath/"Nutshell"
     system bin/"nutshell", "--version"
-    system bin/"nutshell", "init"
-    assert_match "\\"status\\"", shell_output("#{bin}/nutshell health --json", 2)
+    assert_match "nutshell setup", shell_output("#{bin}/nutshell help")
   end
 end
 `;

@@ -14,6 +14,7 @@ import { fingerprint } from "../../../core/ids";
 import { overlapWindow, sleep } from "../../../core/time";
 import { numberAt, stringArrayAt, stringAt } from "../../../config/config";
 import { finding, type TracePlugin } from "../../interface";
+import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
 import { podcastEpisodeId, podcastListenId, type PodcastEpisodeRow } from "./identity";
 import { probePodcastDatabase, probePodcastFileAccess, readPodcastBackfillPage, readPodcastRows, type PodcastBackfillCursor } from "./sqlite-source";
 
@@ -35,6 +36,27 @@ export class PodcastsPlugin implements TracePlugin {
     collections: ["listened"],
     supportsBackfill: true,
     defaultBudget: { maxRuntimeMs: 60_000, maxRequests: null, minDelayMs: 0, stopOnRateLimit: true },
+  };
+
+  readonly setup = {
+    summarize: async (_ctx: PluginSetupContext) => ({
+      title: "Apple Podcasts",
+      body:
+        "Nutshell reads the local Apple Podcasts library database in read-only mode. On macOS, the installed Nutshell app may need app-data access before the background agent can read it.",
+    }),
+    run: async (ctx: PluginSetupContext) => {
+      const check = await ctx.ui.ensure({
+        title: "Verify Apple Podcasts library access",
+        body: "If macOS blocks the database, use the Nutshell permission window to grant access to the installed app, then verify again.",
+        check: () => this.setupCheck(ctx),
+        repair: async () => {
+          await ctx.host.macos?.showNutshellPermissionWindow().catch(() => undefined);
+          await ctx.host.macos?.openPrivacyPane("Full Disk Access").catch(() => undefined);
+        },
+      });
+      return { findings: setupFindingFromCheck("podcasts_setup_failed", check) };
+    },
+    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("podcasts_setup_verify_failed", await this.setupCheck(ctx)),
   };
 
   async check(ctx: PluginContext) {
@@ -145,6 +167,52 @@ export class PodcastsPlugin implements TracePlugin {
       partial: true,
     };
   }
+
+  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
+    const cfg = configFromJson(ctx.config.pluginConfig("podcasts"));
+    const paths = existingDbPaths(cfg);
+    if (!paths.length) {
+      return {
+        ok: false,
+        level: "critical",
+        message: "Apple Podcasts database was not found.",
+        detail: { dbPath: cfg.dbPath, dbPaths: cfg.dbPaths },
+      };
+    }
+    for (const dbPath of paths) {
+      const access = await probePodcastFileAccess(dbPath, Math.min(cfg.checkTimeoutMs, 5_000));
+      if (!access.ok) {
+        return {
+          ok: false,
+          level: access.code === "permission_denied" ? "critical" : "warning",
+          message: access.message,
+          detail: { dbPath, probe: { ...access } },
+        };
+      }
+      try {
+        await probePodcastDatabase(dbPath, cfg.checkTimeoutMs);
+        return {
+          ok: true,
+          level: "ok",
+          message: "Apple Podcasts database access works.",
+          detail: { dbPath },
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          level: isTimeoutError(String(error)) ? "warning" : "critical",
+          message: isTimeoutError(String(error)) ? "Apple Podcasts database probe timed out." : "Apple Podcasts database schema could not be verified.",
+          detail: { dbPath, error: String(error) },
+        };
+      }
+    }
+    return {
+      ok: false,
+      level: "critical",
+      message: "Apple Podcasts database access could not be verified.",
+      detail: { dbPaths: cfg.dbPaths },
+    };
+  }
 }
 
 export function createPodcastsPlugin(): TracePlugin {
@@ -152,7 +220,10 @@ export function createPodcastsPlugin(): TracePlugin {
 }
 
 function config(ctx: PluginContext) {
-  const cfg = ctx.config as JsonObject;
+  return configFromJson(ctx.config as JsonObject);
+}
+
+function configFromJson(cfg: JsonObject) {
   const dbPath = stringAt(cfg, "dbPath");
   return {
     dbPath,
@@ -164,6 +235,11 @@ function config(ctx: PluginContext) {
     timeoutMs: numberAt(cfg, "timeoutMs", 10_000),
     checkTimeoutMs: numberAt(cfg, "checkTimeoutMs", 3_000),
   };
+}
+
+function setupFindingFromCheck(code: string, check: SetupCheck) {
+  if (check.ok) return [];
+  return [finding(check.level === "warning" ? "warning" : "critical", "podcasts", code, check.message, check.detail ?? {})];
 }
 
 function existingDbPaths(cfg: ReturnType<typeof config>): string[] {

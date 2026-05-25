@@ -131,11 +131,23 @@ export interface BackfillHealthItem {
   detail: JsonObject;
 }
 
+export interface AppBackgroundStatus {
+  installed: boolean;
+  path: string;
+  executable: string;
+  fullDiskAccess: "granted" | "missing" | "unknown";
+  backgroundSync: "enabled" | "disabled" | "unknown";
+  agent: "enabled" | "requiresApproval" | "notRegistered" | "notFound" | "unknown";
+  dataRoot: string | null;
+  raw: string;
+}
+
 export interface HealthReport {
   status: "ok" | "warning" | "critical";
   checkedAt: Date;
   findings: HealthFinding[];
   backfill: BackfillHealthItem[];
+  app: AppBackgroundStatus;
 }
 
 export interface SyncRunStart {
@@ -162,6 +174,17 @@ export interface CommitReport {
 
 export interface SyncSourceReport {
   source: SourceId;
+  status: "ok" | "warning" | "critical" | "partial" | "skipped";
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  commit?: CommitReport;
+  findings: HealthFinding[];
+  metrics: Json;
+  enrichment?: EnrichmentSourceReport;
+}
+
+export interface EnrichmentSourceReport {
   status: "ok" | "warning" | "critical" | "partial" | "skipped";
   startedAt: Date;
   finishedAt: Date;

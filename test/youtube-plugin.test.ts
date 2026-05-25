@@ -68,8 +68,30 @@ test("youtube historical backfill refuses live collection and requires official 
   expect(result.records).toHaveLength(0);
   expect(result.observations).toHaveLength(0);
   expect(result.health[0]?.code).toBe("youtube_provider_export_required");
-  expect((result.health[0]?.detail as JsonObject).nextCommand).toBe("nutshell import youtube --path <provider-export> --json");
+  expect((result.health[0]?.detail as JsonObject).nextCommand).toBe("nutshell import youtube <provider-export> --json");
   expect(result.nextCheckpoint).toEqual({ existing: true });
+});
+
+test("youtube health probe fails closed on unexpected empty access", async () => {
+  const plugin = new YouTubePlugin(async () => ({
+    items: [],
+    scroll: {
+      driver: "fixture",
+      pages: 1,
+      maxPages: 1,
+      reachedCutoff: false,
+      stoppedForStagnation: false,
+      stoppedForCursorLoop: false,
+      stoppedForExhaustion: false,
+      loadedCardCount: 0,
+      nextCursor: "cursor-1",
+    },
+  }));
+
+  const findings = await plugin.check(context());
+
+  expect(findings.some((item) => item.level === "critical" && item.code === "youtube_auth_probe_failed")).toBe(true);
+  expect(JSON.stringify(findings[0]?.detail)).toContain("cursor-1");
 });
 
 function request(mode: "recent" | "backfill", maxRequests: number | null): SyncRequest {

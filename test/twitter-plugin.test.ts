@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonObject, PluginContext, RecordPage, SyncRequest, TraceQuery, TraceRecord } from "../src/core/types";
-import { BirdClient, type BirdFollowingPage } from "../src/plugins/builtin/twitter/bird-client";
+import { BirdClient, type BirdClientConfig, type BirdFollowingPage } from "../src/plugins/builtin/twitter/bird-client";
 import {
   enqueueUnresolvedTweetTargets,
   type TweetEnrichmentFetcher,
@@ -13,10 +13,12 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 
 const originalPage = BirdClient.prototype.page;
 const originalFollowing = BirdClient.prototype.following;
+const originalClient = (BirdClient.prototype as unknown as { client: unknown }).client;
 
 afterEach(() => {
   BirdClient.prototype.page = originalPage;
   BirdClient.prototype.following = originalFollowing;
+  (BirdClient.prototype as unknown as { client: unknown }).client = originalClient;
 });
 
 test("twitter backfill refuses live transport and requires official X archive import", async () => {
@@ -31,8 +33,28 @@ test("twitter backfill refuses live transport and requires official X archive im
   expect(result.records).toHaveLength(0);
   expect(result.observations).toHaveLength(0);
   expect(result.health[0]?.code).toBe("twitter_provider_export_required");
-  expect(((result.health[0]?.detail as JsonObject).nextCommand)).toBe("nutshell import twitter --path <provider-export> --json");
+  expect(((result.health[0]?.detail as JsonObject).nextCommand)).toBe("nutshell import twitter <provider-export> --json");
   expect(result.nextCheckpoint).toEqual({ existing: true });
+});
+
+test("twitter auth check fails closed even when account identity is configured", async () => {
+  (BirdClient.prototype as unknown as { client: () => Promise<unknown> }).client = async () => ({
+    getCurrentUser: async () => ({ success: false, error: "401 unauthorized" }),
+  });
+  const client = new BirdClient(birdConfig({ accountUserId: "12345", accountHandle: "winterfell" }));
+
+  const result = await client.check(new AbortController().signal);
+
+  expect(result.ok).toBe(false);
+  expect(result.authFailed).toBe(true);
+  expect(result.text).toContain("401");
+});
+
+test("twitter internal timeout override fails closed when Bird library shape changes", () => {
+  const client = new BirdClient(birdConfig());
+  const installFetchGuard = (client as unknown as { installFetchGuard: (target: unknown) => void }).installFetchGuard.bind(client);
+
+  expect(() => installFetchGuard({})).toThrow("@steipete/bird fetchWithTimeout API changed");
 });
 
 test("twitter recent sync skips fresh following snapshots during scheduled all-collection runs", async () => {
@@ -544,6 +566,21 @@ test("generic runtime and store modules do not encode twitter enrichment semanti
   }
 });
 
+test("production twitter paths do not shell out to Bird CLI or BirdClaw", () => {
+  const files = [
+    join(import.meta.dir, "../src/plugins/builtin/twitter/plugin.ts"),
+    join(import.meta.dir, "../src/plugins/builtin/twitter/bird-client.ts"),
+    join(import.meta.dir, "../src/plugins/builtin/twitter/x-archive.ts"),
+    join(import.meta.dir, "../src/runtime/trace-runtime.ts"),
+  ];
+  const forbiddenSpawn = /(runProcess|Bun\.spawn|spawnSync)\s*\(\s*(?:\[)?\s*["'`](?:[^"'`]*\/)?bird(?:claw)?["'`]/;
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    expect(text, `${file} must not execute bird or birdclaw`).not.toMatch(forbiddenSpawn);
+    expect(text, `${file} must not read BirdClaw state`).not.toMatch(/\.birdclaw|birdclaw\.sqlite|backfill-state\.json/);
+  }
+});
+
 function request(): SyncRequest {
   return {
     source: "twitter",
@@ -563,6 +600,18 @@ function recentRequest(collections: string[]): SyncRequest {
     collections,
     budget: { maxRuntimeMs: 30_000, maxRequests: 3, minDelayMs: 0, stopOnRateLimit: true },
     dryRun: false,
+  };
+}
+
+function birdConfig(overrides: Partial<BirdClientConfig> = {}): BirdClientConfig {
+  return {
+    accountUserId: "",
+    accountHandle: "",
+    cookieBrowser: "chrome",
+    cookieProfile: "",
+    cookieTimeoutMs: 1_000,
+    timeoutMs: 1_000,
+    ...overrides,
   };
 }
 

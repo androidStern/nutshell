@@ -18,10 +18,11 @@
     "lint": "tsc --noEmit",
     "build": "bun build ./src/cli.ts --outdir ./dist --target bun",
     "build:compile": "bun run scripts/build-compile.ts",
+    "build:macos-app": "bun run scripts/build-macos-app.ts",
+    "install:macos-app": "bun run scripts/build-macos-app.ts --install",
     "build:tarball": "bun run scripts/build-tarball.ts",
     "certify:release": "bun run scripts/certify-release.ts",
-    "certify:post-reboot": "bun run scripts/certify-release.ts --post-reboot-check",
-    "certify:fresh-user": "bun run scripts/certify-release.ts --fresh-user-check",
+    "test:battle": "bun run scripts/battle-test.ts",
     "prepack": "bun run build:compile"
   },
   "devDependencies": {
@@ -35,5 +36,8 @@
   },
   "engines": {
     "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.4.0"
   }
 }

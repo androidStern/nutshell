@@ -1,22 +1,19 @@
 #!/usr/bin/env bun
-import { existsSync, rmSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { TraceError, UsageError } from "./core/errors";
-import { CLI_NAME, COMMAND_ENV, PRODUCT_VERSION } from "./core/product";
+import { APP_PATH_ENV, CLI_NAME, DEFAULT_APP_PATH, PRODUCT_VERSION } from "./core/product";
 import { DEFAULT_SYNC_BUDGET } from "./config/defaults";
-import { ensureRoot, expandHome, loadConfig, numberAt, objectAt, resolveConfigPath, resolveRoot } from "./config/config";
+import { expandHome, loadConfig, resolveConfigPath, resolveRoot } from "./config/config";
 import { TraceRuntime } from "./runtime/trace-runtime";
-import { loadBuiltinPlugins } from "./plugins/registry";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
-import { importGoogleTakeoutYoutube } from "./imports/google-takeout-youtube";
-import { generatedLaunchdPlistPath, installedLaunchdPlistPath, LAUNCHD_LABEL, writeLaunchdPlist } from "./launchd/plist";
-import { formatLaunchdStatusText, inspectLaunchd } from "./launchd/status";
 import { runProcess } from "./runtime/process";
-import { RuntimeLock } from "./runtime/lock";
+import { configuredAppPath } from "./macos/app-status";
 import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sqlite-worker";
 import { serveDashboard } from "./dashboard/server";
-import type { ProjectionRequest, SourceId, SyncMode, SyncRequest } from "./core/types";
+import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
+import type { SourceId, SyncMode, SyncRequest } from "./core/types";
 
 async function main(argv: string[]): Promise<number> {
   const global = parseGlobal(argv);
@@ -36,12 +33,21 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(helpText());
     return 0;
   }
-
-  if (command === "init") {
-    ensureRoot(root);
-    const config = loadConfig(root, configFile);
-    process.stdout.write(`Config: ${config.path}\nData: ${config.root}\n`);
+  if (hasFlag(args, "--help") || hasFlag(args, "-h")) {
+    process.stdout.write(helpText());
     return 0;
+  }
+
+  if (command === "setup") {
+    const setup = new SetupRuntime({ root, configPath: configFile });
+    const report = await setup.run({
+      json: hasFlag(args, "--json"),
+      assumeYes: hasFlag(args, "--yes"),
+      backgroundAgent: !hasFlag(args, "--no-background-agent"),
+      smokeSync: !hasFlag(args, "--no-smoke-sync"),
+    });
+    if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return exitCodeForSetup(report);
   }
 
   let runtime: TraceRuntime | null = null;
@@ -50,12 +56,6 @@ async function main(argv: string[]): Promise<number> {
     return runtime;
   };
   try {
-    if (command === "plugins") {
-      const runtime = getRuntime();
-      const plugins = loadBuiltinPlugins().enabled(runtime.config).map((plugin) => plugin.manifest);
-      print(args, plugins);
-      return 0;
-    }
     if (command === "sync") {
       const request = parseSync(args);
       const runtime = getRuntime();
@@ -74,29 +74,13 @@ async function main(argv: string[]): Promise<number> {
       }
       return exitCodeForHealth(report);
     }
-    if (command === "query") {
-      const flags = parseFlags(args);
-      const limit = parseIntegerFlag(flags, "limit", 200, { min: 1 });
+    if (command === "doctor") {
+      const source = args[0] && !args[0].startsWith("--") ? (args.shift() as SourceId) : undefined;
       const runtime = getRuntime();
-      const page = await runtime.query({
-        source: flags.source as SourceId | undefined,
-        type: flags.type,
-        since: flags.since ? new Date(flags.since) : undefined,
-        until: flags.until ? new Date(flags.until) : undefined,
-        limit,
-      });
-      print(args, page);
-      return 0;
-    }
-    if (command === "day") {
-      const date = args.shift();
-      if (!date) throw new UsageError(`${CLI_NAME} day requires YYYY-MM-DD`);
-      const kind: ProjectionRequest["kind"] = hasFlag(args, "--markdown") ? "daily-markdown" : "daily-json";
-      const runtime = getRuntime();
-      const report = await runtime.project({ kind, date });
+      const report = await runtime.health(source ? { source } : {});
       if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-      else process.stdout.write(`${report.outputs.join("\n")}\n`);
-      return 0;
+      else process.stdout.write(formatHealthText(report));
+      return exitCodeForHealth(report);
     }
     if (command === "dashboard") {
       const flags = parseFlags(args);
@@ -111,104 +95,26 @@ async function main(argv: string[]): Promise<number> {
       await server.waitClosed();
       return 0;
     }
-    if (command === "import") {
-      const sub = args.shift();
-      const flags = parseFlags(args);
-      if (!flags.path) throw new UsageError(`${CLI_NAME} import requires --path`);
-      const importPath = flags.path;
-      const dryRun = hasFlag(args, "--dry-run");
-      const runtime = getRuntime();
-      if (sub === "youtube") {
-        const report = await withWriteLock(runtime, `${CLI_NAME} import youtube --path ${importPath}`, dryRun, () =>
-          importGoogleTakeoutYoutube(runtime.config, runtime.store, importPath, dryRun),
-        );
-        print(args, report);
-        return report.available && (report.counts.items ?? 0) > 0 ? 0 : 1;
-      }
-      if (sub === "twitter") {
-        const report = await runtime.importProviderExport({
-          source: "twitter",
-          path: importPath,
-          dryRun,
-          budget: DEFAULT_SYNC_BUDGET,
-        });
-        print(args, report);
-        return report.status === "critical" ? 2 : report.status === "warning" || report.status === "partial" ? 1 : 0;
-      }
-      throw new UsageError(`${CLI_NAME} import requires youtube or twitter`);
+    if (command === "app") {
+      return await runAppCommand(args, root, configFile);
     }
-    if (command === "enrich") {
-      const source = args.shift();
-      if (!source) throw new UsageError(`${CLI_NAME} enrich requires a source`);
-      const flags = parseFlags(args);
+    if (command === "import") {
+      const parsed = parseImport(args);
       const dryRun = hasFlag(args, "--dry-run");
-      const limit = parseIntegerFlag(flags, "limit", 100, { min: 1 });
-      const delay = parseIntegerFlag(flags, "delay", 500, { min: 0 });
       const runtime = getRuntime();
-      const report = await runtime.enrich({
-        source: source as SourceId,
-        limit,
+      const report = await runtime.importProviderExport({
+        source: parsed.source,
+        path: parsed.path,
         dryRun,
-        budget: {
-          ...DEFAULT_SYNC_BUDGET,
-          maxRequests: limit,
-          minDelayMs: delay,
-        },
+        budget: DEFAULT_SYNC_BUDGET,
       });
       print(args, report);
       return report.status === "critical" ? 2 : report.status === "warning" || report.status === "partial" ? 1 : 0;
-    }
-    if (command === "launchd") {
-      const sub = args.shift();
-      const runtime = getRuntime();
-      if (sub === "install") {
-        const scheduler = objectAt(runtime.config.data, "scheduler");
-        const nutshellCommand = currentNutshellCommand();
-        const plist = writeLaunchdPlist(runtime.config.root, runtime.config.path, nutshellCommand, numberAt(scheduler, "intervalSeconds", 900));
-        const domain = `gui/${process.getuid?.() ?? 501}`;
-        await runProcess(["/bin/launchctl", "bootout", domain, plist.installedPath], { timeoutMs: 10_000 }).catch(() => undefined);
-        const result = await runProcess(["/bin/launchctl", "bootstrap", domain, plist.installedPath], { timeoutMs: 10_000 });
-        if (result.code !== 0) throw new TraceError("launchd_install_failed", result.stderr || result.stdout, 1);
-        await runProcess(["/bin/launchctl", "enable", `${domain}/${LAUNCHD_LABEL}`], { timeoutMs: 10_000 }).catch(() => undefined);
-        process.stdout.write(`${plist.installedPath}\n`);
-        return 0;
-      }
-      if (sub === "uninstall") {
-        const plist = installedLaunchdPlistPath();
-        const domain = `gui/${process.getuid?.() ?? 501}`;
-        const result = await runProcess(["/bin/launchctl", "bootout", domain, plist], { timeoutMs: 10_000 });
-        rmSync(plist, { force: true });
-        rmSync(generatedLaunchdPlistPath(runtime.config.root), { force: true });
-        process.stdout.write(result.stdout || result.stderr || `uninstalled ${LAUNCHD_LABEL}\n`);
-        return result.code === 0 || result.code === 113 ? 0 : 1;
-      }
-      if (sub === "status") {
-        const report = await inspectLaunchd(runtime.config.root);
-        if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-        else process.stdout.write(formatLaunchdStatusText(report));
-        return report.status === "ok" ? 0 : 1;
-      }
-      throw new UsageError(`${CLI_NAME} launchd requires install, uninstall, or status`);
     }
     throw new UsageError(`unknown command: ${command}`);
   } finally {
     const openedRuntime = runtime as TraceRuntime | null;
     await openedRuntime?.close();
-  }
-}
-
-async function withWriteLock<T>(runtime: TraceRuntime, command: string, dryRun: boolean, run: () => Promise<T>): Promise<T> {
-  if (dryRun) return run();
-  const runtimeCfg = objectAt(runtime.config.data, "runtime");
-  const lock = new RuntimeLock(join(runtime.config.root, "run.lock"), command, runtime.logger, {
-    heartbeatMs: typeof runtimeCfg.lockHeartbeatMs === "number" ? runtimeCfg.lockHeartbeatMs : 30_000,
-    staleMs: typeof runtimeCfg.staleLockMs === "number" ? runtimeCfg.staleLockMs : 10 * 60_000,
-  });
-  await lock.acquire();
-  try {
-    return await run();
-  } finally {
-    lock.release();
   }
 }
 
@@ -223,6 +129,29 @@ function parseGlobal(argv: string[]): { root?: string; rest: string[] } {
     }
   }
   return { root, rest };
+}
+
+function parseImport(args: string[]): { source: SourceId; path: string } {
+  const source = args[0] && !args[0].startsWith("--") ? (args.shift() as SourceId) : null;
+  if (!source) throw new UsageError(`${CLI_NAME} import requires a plugin name`);
+  const positional = positionalArgs(args);
+  const path = positional[0];
+  if (!path) throw new UsageError(`${CLI_NAME} import requires an archive path`);
+  return { source, path };
+}
+
+function positionalArgs(args: string[]): string[] {
+  const values: string[] = [];
+  const valueFlags = new Set(["--source", "--mode", "--collection", "--since", "--until", "--timeout", "--max-requests", "--host", "--port"]);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (arg.startsWith("--")) {
+      if (valueFlags.has(arg)) i += 1;
+      continue;
+    }
+    values.push(arg);
+  }
+  return values;
 }
 
 function parseSync(args: string[]): SyncRequest {
@@ -303,42 +232,52 @@ function print(args: string[], value: unknown): void {
   else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function currentNutshellCommand(): string[] {
-  if (import.meta.dir.startsWith("/$bunfs/")) return [process.execPath];
-  const explicit = process.env[COMMAND_ENV];
-  if (explicit) return [resolve(expandHome(explicit))];
-  const installed = findOnPath(CLI_NAME);
-  if (installed) return [installed];
-  throw new TraceError(
-    "nutshell_not_installed",
-    "Install Nutshell into your PATH before installing the background job. The daemon must run the same stable `nutshell` command you run in Terminal.",
-    69,
-  );
+async function runAppCommand(args: string[], root: string, configPath: string): Promise<number> {
+  const sub = args.shift() ?? "status";
+  const flags = parseFlags(args);
+  const appPath = appBundlePath(flags.app, root, configPath);
+  const appExecutable = appCommandPath(flags.app, root, configPath);
+  if (sub === "path") {
+    process.stdout.write(`${appExecutable}\n`);
+    return 0;
+  }
+  if (!existsSync(appExecutable)) {
+    throw new TraceError(
+      "nutshell_app_not_installed",
+      `Nutshell.app is not installed at ${appExecutable}. Run \`bun run install:macos-app\` from the repo or install the macOS app bundle.`,
+      69,
+    );
+  }
+  if (sub === "setup" || sub === "onboard" || sub === "open") {
+    const result = await runProcess(["/usr/bin/open", appPath], { timeoutMs: 30_000 });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    return result.code;
+  }
+  const allowed = new Set(["status", "register-agent", "unregister-agent", "enable-sync", "disable-sync", "open-full-disk-access", "verify", "help"]);
+  if (!allowed.has(sub)) throw new UsageError(`${CLI_NAME} app requires setup, status, register-agent, unregister-agent, enable-sync, disable-sync, open-full-disk-access, verify, or path`);
+  const result = await runProcess([appExecutable, sub === "help" ? "help" : sub], { timeoutMs: sub === "verify" ? 120_000 : 30_000 });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  return result.code;
 }
 
-function findOnPath(name: string): string | null {
-  const path = process.env.PATH || "";
-  for (const dir of path.split(delimiter)) {
-    if (!dir) continue;
-    const candidate = resolve(expandHome(dir), name);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+function appCommandPath(rawPath: string | undefined, root: string, configPath: string): string {
+  return join(appBundlePath(rawPath, root, configPath), "Contents", "MacOS", "Nutshell");
+}
+
+function appBundlePath(rawPath: string | undefined, root: string, configPath: string): string {
+  if (rawPath || process.env[APP_PATH_ENV]) return resolve(expandHome(rawPath || process.env[APP_PATH_ENV] || DEFAULT_APP_PATH));
+  return configuredAppPath(loadConfig(root, configPath));
 }
 
 function helpText(): string {
-  return `${CLI_NAME} init
-${CLI_NAME} plugins
-${CLI_NAME} sync [source|all] [--mode recent|backfill] [--collection name] [--since date] [--until date] [--dry-run] [--json]
-${CLI_NAME} import [youtube|twitter] --path <provider-export> [--dry-run] [--json]
-${CLI_NAME} enrich twitter [--limit N] [--json]
+  return `${CLI_NAME} setup
+${CLI_NAME} sync [all|plugin] [--json]
 ${CLI_NAME} health [--json]
-${CLI_NAME} query [--source source] [--since date] [--until date] [--type type] [--json]
-${CLI_NAME} day YYYY-MM-DD [--json|--markdown]
 ${CLI_NAME} dashboard [--no-open] [--host 127.0.0.1] [--port 0]
-${CLI_NAME} launchd install
-${CLI_NAME} launchd uninstall
-${CLI_NAME} launchd status [--json]
+${CLI_NAME} doctor [plugin] [--json]
+${CLI_NAME} import <plugin> <archive-path> [--dry-run] [--json]
 `;
 }
 

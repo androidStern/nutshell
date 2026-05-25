@@ -6,10 +6,16 @@ import { join } from "node:path";
 test("help exposes only the minimal product CLI", async () => {
   const result = await runCli(["help"]);
   expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("nutshell sync [source|all] [--mode recent|backfill]");
-  expect(result.stdout).toContain("nutshell import [youtube|twitter] --path <provider-export>");
-  expect(result.stdout).toContain("nutshell enrich twitter [--limit N]");
+  expect(result.stdout).toContain("nutshell setup");
+  expect(result.stdout).toContain("nutshell sync [all|plugin] [--json]");
+  expect(result.stdout).toContain("nutshell import <plugin> <archive-path>");
   expect(result.stdout).toContain("nutshell dashboard [--no-open]");
+  expect(result.stdout).toContain("nutshell doctor [plugin] [--json]");
+  expect(result.stdout).not.toContain("nutshell enrich");
+  expect(result.stdout).not.toContain("nutshell app ");
+  expect(result.stdout).not.toContain("nutshell launchd");
+  expect(result.stdout).not.toContain("nutshell query");
+  expect(result.stdout).not.toContain("nutshell day");
   expect(result.stdout).not.toContain("--root");
   for (const forbidden of [
     "trace migrate",
@@ -35,6 +41,14 @@ test("old machine-specific commands are not accepted", async () => {
       ["--root", root, "import", "google-takeout", "--source", "youtube", "--path", "anything"],
       ["--root", root, "import", "canonical", "--source", "podcasts", "--path", "anything"],
       ["--root", root, "backfill", "waive", "youtube", "--reason", "no"],
+      ["--root", root, "init"],
+      ["--root", root, "plugins"],
+      ["--root", root, "query", "--json"],
+      ["--root", root, "day", "2026-05-24", "--json"],
+      ["--root", root, "enrich", "twitter", "--json"],
+      ["--root", root, "launchd", "status", "--json"],
+      ["--root", root, "launchd", "install", "--json"],
+      ["--root", root, "launchd", "uninstall", "--json"],
     ]) {
       const result = await runCli(args);
       expect(result.exitCode).not.toBe(0);
@@ -50,13 +64,33 @@ test("version command uses the public nutshell name", async () => {
   expect(result.stdout.startsWith("nutshell ")).toBe(true);
 });
 
+test("subcommand help is side-effect free", async () => {
+  for (const args of [
+    ["sync", "--help"],
+    ["health", "--help"],
+    ["doctor", "--help"],
+    ["dashboard", "--help"],
+    ["import", "--help"],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "nutshell-cli-help-"));
+    try {
+      const result = await runCli(["--root", root, ...args]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("nutshell setup");
+      expect(existsSync(join(root, "nutconfig.jsonc"))).toBe(false);
+      expect(existsSync(join(root, "nutshell.sqlite"))).toBe(false);
+      expect(existsSync(join(root, "run.lock"))).toBe(false);
+      expect(existsSync(join(root, "logs"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("invalid numeric flags fail before runtime state is created", async () => {
   for (const args of [
-    ["enrich", "twitter", "--limit", "nope", "--json"],
-    ["enrich", "twitter", "--delay", "later", "--json"],
     ["sync", "all", "--timeout", "soon", "--json"],
     ["sync", "all", "--max-requests", "many", "--json"],
-    ["query", "--limit", "lots", "--json"],
     ["dashboard", "--port", "local", "--no-open"],
   ]) {
     const root = mkdtempSync(join(tmpdir(), "nutshell-cli-invalid-"));

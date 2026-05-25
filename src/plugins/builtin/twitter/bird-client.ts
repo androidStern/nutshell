@@ -147,8 +147,11 @@ export class BirdClient {
 
   private installFetchGuard(client: TwitterClient): void {
     const guarded = client as unknown as {
-      fetchWithTimeout(url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response>;
+      fetchWithTimeout?: (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Promise<Response>;
     };
+    if (typeof guarded.fetchWithTimeout !== "function") {
+      throw new Error("@steipete/bird fetchWithTimeout API changed; refusing to run without request timeout guard");
+    }
     guarded.fetchWithTimeout = async (url, init) => {
       const activeSignal = this.activeSignal;
       activeSignal?.throwIfAborted();
@@ -181,6 +184,9 @@ export class BirdClient {
 
   private installCurrentUserCache(client: TwitterClient): void {
     type CurrentUserResult = Awaited<ReturnType<TwitterClient["getCurrentUser"]>>;
+    if (typeof client.getCurrentUser !== "function") {
+      throw new Error("@steipete/bird getCurrentUser API changed; refusing to run without current-user auth check");
+    }
     const original = client.getCurrentUser.bind(client);
     let cached: CurrentUserResult | null = null;
     client.getCurrentUser = async () => {
@@ -190,26 +196,7 @@ export class BirdClient {
         cached = result;
         return result;
       }
-      const configuredUser = this.configuredCurrentUser();
-      if (configuredUser) {
-        cached = configuredUser;
-        return configuredUser;
-      }
       return result;
-    };
-  }
-
-  private configuredCurrentUser(): Awaited<ReturnType<TwitterClient["getCurrentUser"]>> | null {
-    const id = this.cfg.accountUserId.trim();
-    if (!/^\d+$/.test(id)) return null;
-    const username = this.cfg.accountHandle.replace(/^@/, "") || id;
-    return {
-      success: true,
-      user: {
-        id,
-        username,
-        name: username,
-      },
     };
   }
 

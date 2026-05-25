@@ -6,6 +6,7 @@ const FIELD_SEP = "\x1f";
 const ROW_SEP = "\x1e";
 
 export interface NotesSource {
+  probeAccess?(timeoutMs: number, signal: AbortSignal): Promise<{ accountCount: number }>;
   scanMetadata(timeoutMs: number, signal: AbortSignal): Promise<NoteMetadata[]>;
   fetchBodies(ids: string[], timeoutMs: number, signal: AbortSignal): Promise<Map<string, NoteBody>>;
 }
@@ -45,6 +46,15 @@ export class FixtureNotesSource implements NotesSource {
 }
 
 export class AppleScriptNotesSource implements NotesSource {
+  async probeAccess(timeoutMs: number, signal: AbortSignal): Promise<{ accountCount: number }> {
+    const result = await runProcess(["osascript", "-e", probeScript], { timeoutMs, signal });
+    if (result.code !== 0) {
+      throw new Error(`command failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+    const accountCount = Number.parseInt(result.stdout.trim(), 10);
+    return { accountCount: Number.isFinite(accountCount) ? accountCount : 0 };
+  }
+
   async scanMetadata(timeoutMs: number, signal: AbortSignal): Promise<NoteMetadata[]> {
     const result = await runProcess(["osascript", "-e", metadataScript], { timeoutMs, signal });
     if (result.code !== 0) {
@@ -70,6 +80,50 @@ export class AppleScriptNotesSource implements NotesSource {
         html: String(item.html ?? ""),
         plaintext: String(item.plaintext ?? ""),
         error: String(item.error ?? ""),
+      });
+    }
+    for (const id of ids) {
+      if (!map.has(id)) map.set(id, { id, html: "", plaintext: "", error: "note body not returned by Notes.app" });
+    }
+    return map;
+  }
+}
+
+export class JXANotesSource implements NotesSource {
+  async probeAccess(timeoutMs: number, signal: AbortSignal): Promise<{ accountCount: number }> {
+    const result = await runProcess(["osascript", "-l", "JavaScript", "-e", jxaProbeScript], { timeoutMs, signal });
+    if (result.code !== 0) {
+      throw new Error(`command failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+    const accountCount = Number.parseInt(result.stdout.trim(), 10);
+    return { accountCount: Number.isFinite(accountCount) ? accountCount : 0 };
+  }
+
+  async scanMetadata(timeoutMs: number, signal: AbortSignal): Promise<NoteMetadata[]> {
+    const result = await runProcess(["osascript", "-l", "JavaScript", "-e", jxaMetadataScript], { timeoutMs, signal });
+    if (result.code !== 0) {
+      throw new Error(`command failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+    const rows = JSON.parse(result.stdout || "[]") as unknown[];
+    return rows.map((item) => normalizeMetadata(item)).filter((item) => item.id);
+  }
+
+  async fetchBodies(ids: string[], timeoutMs: number, signal: AbortSignal): Promise<Map<string, NoteBody>> {
+    if (!ids.length) return new Map();
+    const result = await runProcess(["osascript", "-l", "JavaScript", "-e", jxaBodyScript(ids)], { timeoutMs, signal });
+    if (result.code !== 0) {
+      throw new Error(`command failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+    const rows = JSON.parse(result.stdout || "[]") as Record<string, unknown>[];
+    const map = new Map<string, NoteBody>();
+    for (const row of rows) {
+      const id = String(row.id ?? "");
+      if (!id) continue;
+      map.set(id, {
+        id,
+        html: String(row.html ?? ""),
+        plaintext: String(row.plaintext ?? ""),
+        error: String(row.error ?? ""),
       });
     }
     for (const id of ids) {
@@ -181,6 +235,7 @@ set fieldSep to ASCII character 31
 set rowSep to ASCII character 30
 set outputRows to ""
 
+with timeout of 600 seconds
 tell application "Notes"
 \trepeat with accountItem in accounts
 \t\tset accountName to name of accountItem as text
@@ -209,12 +264,14 @@ tell application "Notes"
 \t\tend repeat
 \tend repeat
 end tell
+end timeout
 
 return outputRows
 `;
 
 function bodyScript(ids: string[]): string {
   return `
+with timeout of 600 seconds
 set fieldSep to ASCII character 31
 set rowSep to ASCII character 30
 set targetIDs to ${appleScriptList(ids)}
@@ -235,6 +292,114 @@ tell application "Notes"
 end tell
 
 return outputRows
+end timeout
+`;
+}
+
+const probeScript = `
+with timeout of 30 seconds
+tell application "Notes"
+\treturn count of accounts
+end tell
+end timeout
+`;
+
+const jxaProbeScript = `
+const Notes = Application("/System/Applications/Notes.app");
+Notes.accounts().length;
+`;
+
+const jxaMetadataScript = `
+const Notes = Application("/System/Applications/Notes.app");
+function safe(fn, fallback) {
+  try { return fn(); } catch (_error) { return fallback; }
+}
+function asString(value) {
+  if (value === undefined || value === null) return "";
+  return String(value);
+}
+function iso(value) {
+  try {
+    if (!value) return "";
+    return new Date(value).toISOString();
+  } catch (_error) {
+    return "";
+  }
+}
+function visitFolder(folder, folderPath, rows) {
+  const folderName = asString(safe(() => folder.name(), "Notes"));
+  const currentPath = folderPath ? folderPath + "/" + folderName : folderName;
+  const folderId = asString(safe(() => folder.id(), currentPath));
+  const notes = safe(() => folder.notes(), []);
+  for (const note of notes) {
+    rows.push({
+      id: asString(safe(() => note.id(), "")),
+      title: asString(safe(() => note.name(), "Untitled")),
+      folder_id: folderId,
+      folder_name: folderName,
+      folder_path: currentPath,
+      created_at: iso(safe(() => note.creationDate(), "")),
+      modified_at: iso(safe(() => note.modificationDate(), "")),
+      shared: Boolean(safe(() => note.shared(), false)),
+      password_protected: Boolean(safe(() => note.passwordProtected(), false))
+    });
+  }
+  const children = safe(() => folder.folders(), []);
+  for (const child of children) visitFolder(child, currentPath, rows);
+}
+const rows = [];
+const accounts = safe(() => Notes.accounts(), []);
+if (accounts.length) {
+  for (const account of accounts) {
+    const folders = safe(() => account.folders(), []);
+    for (const folder of folders) visitFolder(folder, "", rows);
+  }
+} else {
+  const folders = safe(() => Notes.folders(), []);
+  for (const folder of folders) visitFolder(folder, "", rows);
+}
+JSON.stringify(rows);
+`;
+
+function jxaBodyScript(ids: string[]): string {
+  return `
+const wanted = new Set(${JSON.stringify(ids)});
+const Notes = Application("/System/Applications/Notes.app");
+function safe(fn, fallback) {
+  try { return fn(); } catch (_error) { return fallback; }
+}
+function asString(value) {
+  if (value === undefined || value === null) return "";
+  return String(value);
+}
+function visitFolder(folder, rows) {
+  const notes = safe(() => folder.notes(), []);
+  for (const note of notes) {
+    const id = asString(safe(() => note.id(), ""));
+    if (wanted.has(id)) {
+      rows.push({
+        id,
+        html: asString(safe(() => note.body(), "")),
+        plaintext: asString(safe(() => note.plaintext(), "")),
+        error: ""
+      });
+    }
+  }
+  const children = safe(() => folder.folders(), []);
+  for (const child of children) visitFolder(child, rows);
+}
+const rows = [];
+const accounts = safe(() => Notes.accounts(), []);
+if (accounts.length) {
+  for (const account of accounts) {
+    const folders = safe(() => account.folders(), []);
+    for (const folder of folders) visitFolder(folder, rows);
+  }
+} else {
+  const folders = safe(() => Notes.folders(), []);
+  for (const folder of folders) visitFolder(folder, rows);
+}
+JSON.stringify(rows);
 `;
 }
 

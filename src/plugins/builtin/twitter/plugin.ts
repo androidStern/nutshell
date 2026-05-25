@@ -15,6 +15,7 @@ import { sleep } from "../../../core/time";
 import { CLI_NAME } from "../../../core/product";
 import { numberAt, stringArrayAt, stringAt } from "../../../config/config";
 import { finding, type TracePlugin } from "../../interface";
+import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
 import { BirdClient } from "./bird-client";
 import { authorPayload, collectionEventType, profileId, tweetCreatedAt, tweetId, type BirdTweet } from "./identity";
 import { looksLikeRateLimit } from "./rate-limit";
@@ -45,10 +46,36 @@ export class TwitterPlugin implements TracePlugin {
   readonly manifest: PluginManifest = {
     id: "twitter",
     displayName: "Twitter/X",
-    authKind: "local_os",
+    authKind: "browser_profile",
     collections: ["bookmarks", "likes", "authored", "following"],
     supportsBackfill: true,
     defaultBudget: { maxRuntimeMs: 10 * 60_000, maxRequests: 50, minDelayMs: 10_000, stopOnRateLimit: true },
+  };
+
+  readonly setup = {
+    summarize: async (_ctx: PluginSetupContext) => ({
+      title: "Twitter/X",
+      body:
+        "Nutshell uses your configured browser session for recent X activity. Historical backfill is optional and uses an official X archive export.",
+      archiveImport: {
+        title: "Import official X archive now?",
+        body: "Use this only if you already have the official X archive export from x.com.",
+        laterCommand: `${CLI_NAME} import twitter <x-archive.zip> --json`,
+        allowedExtensions: ["zip", "js", "json"],
+      },
+    }),
+    run: async (ctx: PluginSetupContext) => {
+      const check = await ctx.ui.ensure({
+        title: "Verify X browser session",
+        body: "If this fails, sign into X in the configured browser profile and try again.",
+        check: () => this.setupCheck(ctx),
+        repair: async () => {
+          await ctx.host.openUrl("https://x.com/home");
+        },
+      });
+      return { findings: setupFindingFromCheck("twitter_setup_failed", check) };
+    },
+    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("twitter_setup_verify_failed", await this.setupCheck(ctx)),
   };
 
   async check(ctx: PluginContext) {
@@ -57,10 +84,10 @@ export class TwitterPlugin implements TracePlugin {
     const client = new BirdClient(cfg);
     const result = await client.check(ctx.signal);
     if (!result.ok || result.authFailed) {
-      findings.push(finding("critical", "twitter", "twitter_auth", "bird credential check failed", { text: result.text.slice(-1200) }));
+      findings.push(finding("critical", "twitter", "twitter_auth", "X browser session check failed", { text: result.text.slice(-1200) }));
     }
     if (result.rateLimited) {
-      findings.push(finding("critical", "twitter", "twitter_rate_limited", "bird reported a rate limit", { text: result.text.slice(-1200) }));
+      findings.push(finding("critical", "twitter", "twitter_rate_limited", "X reported a rate limit", { text: result.text.slice(-1200) }));
     }
     return findings;
   }
@@ -73,7 +100,7 @@ export class TwitterPlugin implements TracePlugin {
         nextCheckpoint: checkpoint.state,
         health: [
           finding("warning", "twitter", "twitter_provider_export_required", "Twitter/X historical backfill requires an official X archive import", {
-            nextCommand: `${CLI_NAME} import twitter --path <provider-export> --json`,
+            nextCommand: `${CLI_NAME} import twitter <provider-export> --json`,
           }),
         ],
         metrics: { providerExportRequired: true },
@@ -202,6 +229,42 @@ export class TwitterPlugin implements TracePlugin {
       partial: result.partial,
     };
   }
+
+  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
+    const cfg = configFromJson(ctx.config.pluginConfig("twitter"));
+    try {
+      const result = await new BirdClient(cfg).check(ctx.signal);
+      if (result.ok) {
+        return {
+          ok: true,
+          level: "ok",
+          message: result.text,
+          detail: { browser: cfg.cookieBrowser, profile: cfg.cookieProfile || null },
+        };
+      }
+      return {
+        ok: false,
+        level: "critical",
+        message: result.authFailed
+          ? "X browser session could not be authenticated."
+          : result.rateLimited
+            ? "X is currently rate limited."
+            : "X access could not be verified.",
+        detail: {
+          authFailed: result.authFailed,
+          rateLimited: result.rateLimited,
+          text: result.text.slice(-1200),
+        },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        level: "critical",
+        message: "X access could not be verified.",
+        detail: { error: String(error) },
+      };
+    }
+  }
 }
 
 export function createTwitterPlugin(): TracePlugin {
@@ -209,7 +272,10 @@ export function createTwitterPlugin(): TracePlugin {
 }
 
 function config(ctx: PluginContext) {
-  const cfg = ctx.config as JsonObject;
+  return configFromJson(ctx.config as JsonObject);
+}
+
+function configFromJson(cfg: JsonObject) {
   return {
     accountId: stringAt(cfg, "accountId", "acct_primary"),
     accountUserId: stringAt(cfg, "accountUserId", ""),
@@ -228,6 +294,11 @@ function config(ctx: PluginContext) {
     saturationPages: numberAt(cfg, "saturationPages", 1),
     recentSeedPages: numberAt(cfg, "recentSeedPages", 1),
   };
+}
+
+function setupFindingFromCheck(code: string, check: SetupCheck) {
+  if (check.ok) return [];
+  return [finding(check.level === "warning" ? "warning" : "critical", "twitter", code, check.message, check.detail ?? {})];
 }
 
 function normalizeState(value: unknown): TwitterState {

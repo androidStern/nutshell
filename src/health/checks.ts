@@ -2,11 +2,14 @@ import { existsSync, statfsSync, statSync, unlinkSync, writeFileSync } from "nod
 import { join } from "node:path";
 import type { TraceConfig } from "../config/config";
 import { logPath, objectAt, pluginConfig } from "../config/config";
+import { pluginSetupFindings, pluginSetupStatus } from "../setup/config-draft";
 import type {
+  AppBackgroundStatus,
   BackfillHealthItem,
   BackfillLaneHealth,
   HealthFinding,
   HealthReport,
+  HealthScope,
   Json,
   JsonObject,
   PluginContext,
@@ -15,17 +18,19 @@ import type {
 } from "../core/types";
 import { localDateKey } from "../core/time";
 import { CLI_NAME, PRODUCT_NAME } from "../core/product";
-import { inspectLaunchd } from "../launchd/status";
+import { appStatusJson, inspectNutshellApp } from "../macos/app-status";
 import type { PluginRegistry } from "../plugins/registry";
 import { inspectLock } from "../runtime/lock";
 import { JsonlLogger } from "../runtime/logger";
 import type { TraceStore } from "../store/interface";
 import { makeFinding, reportStatus } from "./health";
 
-export async function evaluateHealth(config: TraceConfig, store: TraceStore, registry: PluginRegistry): Promise<HealthReport> {
+export async function evaluateHealth(config: TraceConfig, store: TraceStore, registry: PluginRegistry, scope: HealthScope = {}): Promise<HealthReport> {
   const findings: HealthFinding[] = [];
   const checkedAt = new Date();
   const runtimeCfg = objectAt(config.data, "runtime");
+  const app = await inspectNutshellApp(config);
+  findings.push(...appFindings(app));
 
   const rootWriteFinding = checkRootWritable(config.root);
   if (rootWriteFinding) findings.push(rootWriteFinding);
@@ -39,21 +44,6 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
         heartbeatAgeMs: lock.heartbeatAgeMs,
         payload: lock.payload as unknown as JsonObject,
       }),
-    );
-  }
-
-  const launchd = await inspectLaunchd(config.root);
-  if (launchd.plistExists && !launchd.loaded) {
-    findings.push(makeFinding("warning", "system", "launchd_not_loaded", `${PRODUCT_NAME} launchd plist exists but the job is not loaded`, launchd as unknown as JsonObject));
-  } else if (launchd.loaded && launchd.lastExitCode !== null && launchd.lastExitCode !== 0) {
-    findings.push(
-      makeFinding(
-        launchd.lastExitCode >= 2 ? "critical" : "warning",
-        "system",
-        "launchd_last_exit_nonzero",
-        `${PRODUCT_NAME} launchd job last exited ${launchd.lastExitCode}`,
-        launchd as unknown as JsonObject,
-      ),
     );
   }
 
@@ -74,14 +64,14 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
     findings.push(makeFinding("critical", "system", "sqlite_quick_check", "SQLite quick_check failed", { detail: snapshot.dbDetail }));
   }
 
-  const enabledSources = registry.enabled(config).map((plugin) => plugin.manifest.id);
+  const enabledSources = registry.enabled(config).map((plugin) => plugin.manifest.id).filter((source) => !scope.source || source === scope.source);
   const latestFindingBySource = rowBySource(snapshot.latestFindings);
   const backfill = evaluateBackfill(config, enabledSources, snapshot.recordCounts, snapshot.lastRuns, snapshot.lastBackfillRuns, snapshot.sourceStates, snapshot.latestFindings, checkedAt);
   for (const item of backfill) {
     if (item.status === "backfill_incomplete" || item.status === "backfill_partial") {
       findings.push(
         makeFinding(
-          item.status === "backfill_partial" ? "critical" : "warning",
+          "warning",
           item.source,
           item.status,
           `${item.source} coverage is ${item.status === "backfill_partial" ? "partial" : "incomplete"} for the configured cutoff`,
@@ -95,6 +85,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
     if (!run || typeof run !== "object" || Array.isArray(run)) continue;
     const row = run as JsonObject;
     const source = String(row.source ?? "system") as SourceId;
+    if (scope.source && source !== scope.source) continue;
     const status = String(row.status ?? "");
     const partial = Number(row.partial ?? 0) === 1;
     const completed = Number(row.completed ?? 0) === 1;
@@ -128,27 +119,37 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   const twitterPending = numberAt(twitterEnrichment, "pending", 0);
   const twitterRateLimited = numberAt(twitterEnrichment, "rateLimited", 0);
   const twitterFailures = numberAt(twitterEnrichment, "failed", 0);
-  if (twitterRateLimited > 0) {
+  if ((!scope.source || scope.source === "twitter") && twitterRateLimited > 0) {
     findings.push(
       makeFinding("critical", "twitter", "twitter_enrichment_rate_limited", "Twitter enrichment is paused by rate limits", twitterEnrichment),
     );
-  } else if (twitterPending > 0) {
+  } else if ((!scope.source || scope.source === "twitter") && twitterPending > 0) {
     findings.push(
       makeFinding("warning", "twitter", "twitter_enrichment_pending", "Twitter enrichment has queued tweets that are not ready for dashboard rendering", twitterEnrichment),
     );
-  } else if (twitterFailures > 0) {
+  } else if ((!scope.source || scope.source === "twitter") && twitterFailures > 0) {
     findings.push(
       makeFinding("warning", "twitter", "twitter_enrichment_failed", "Twitter enrichment has retryable failures", twitterEnrichment),
     );
   }
-  for (const plugin of registry.enabled(config)) {
+  for (const plugin of registry.enabled(config).filter((plugin) => !scope.source || plugin.manifest.id === scope.source)) {
+    const setupStatus = pluginSetupStatus(config, plugin.manifest.id);
+    if (setupStatus === "degraded") {
+      findings.push(
+        makeFinding("critical", plugin.manifest.id, "plugin_setup_degraded", `${plugin.manifest.displayName} setup is degraded`, {
+          setupFindings: pluginSetupFindings(config, plugin.manifest.id),
+          nextAction: `${CLI_NAME} setup`,
+        }),
+      );
+      continue;
+    }
     const sourceState = parseState(sourceStateBySource.get(plugin.manifest.id));
     if (plugin.manifest.id === "podcasts" && typeof sourceState.permissionBlockedAt === "string") {
       findings.push(
         makeFinding("critical", "podcasts", "podcasts_permission_blocked", "Apple Podcasts sync is paused until app-data permission is fixed", {
           blockedAt: sourceState.permissionBlockedAt,
           blockCode: typeof sourceState.permissionBlockCode === "string" ? sourceState.permissionBlockCode : "unknown",
-          nextAction: "Allow the installed nutshell command in the macOS app-data prompt or Full Disk Access, then run `nutshell sync podcasts --mode recent --json` once.",
+          nextAction: "Run `nutshell setup`, grant Full Disk Access to Nutshell.app, then run `nutshell sync podcasts --mode recent --json` once.",
         }),
       );
       continue;
@@ -175,7 +176,29 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
 
   findings.push(...checkProjectionFreshness(config.root, snapshot.lastRuns, runtimeCfg));
 
-  return { status: reportStatus(findings), checkedAt, findings, backfill };
+  return { status: reportStatus(findings), checkedAt, findings, backfill, app };
+}
+
+function appFindings(app: AppBackgroundStatus): HealthFinding[] {
+  const detail = appStatusJson(app);
+  if (!app.installed) {
+    return [makeFinding("critical", "system", "nutshell_app_missing", `${PRODUCT_NAME}.app is not installed or could not be found`, detail)];
+  }
+  const findings: HealthFinding[] = [];
+  if (app.fullDiskAccess === "missing") {
+    findings.push(makeFinding("critical", "system", "nutshell_app_full_disk_access_missing", `${PRODUCT_NAME}.app does not have Full Disk Access`, detail));
+  } else if (app.fullDiskAccess === "unknown") {
+    findings.push(makeFinding("warning", "system", "nutshell_app_full_disk_access_unknown", `${PRODUCT_NAME}.app Full Disk Access could not be determined`, detail));
+  }
+  if (app.agent === "requiresApproval") {
+    findings.push(makeFinding("warning", "system", "nutshell_agent_requires_approval", `${PRODUCT_NAME} background agent requires approval`, detail));
+  } else if (app.agent === "notRegistered" || app.agent === "notFound") {
+    findings.push(makeFinding("warning", "system", "nutshell_agent_not_enabled", `${PRODUCT_NAME} background agent is not enabled`, detail));
+  }
+  if (app.backgroundSync === "disabled") {
+    findings.push(makeFinding("warning", "system", "nutshell_background_sync_disabled", `${PRODUCT_NAME} background sync is disabled`, detail));
+  }
+  return findings;
 }
 
 function evaluateBackfill(
@@ -268,7 +291,7 @@ function twitterEnrichmentHealth(state: JsonObject, now: Date): JsonObject {
     lastSuccessAt: typeof enrichment.lastSuccessAt === "string" ? enrichment.lastSuccessAt : null,
     lastFailureAt: typeof enrichment.lastFailureAt === "string" ? enrichment.lastFailureAt : null,
     lastRateLimitedAt: typeof enrichment.lastRateLimitedAt === "string" ? enrichment.lastRateLimitedAt : null,
-    nextCommand: items.length ? `${CLI_NAME} enrich twitter --limit 100 --json` : null,
+    nextCommand: items.length ? `${CLI_NAME} sync twitter --mode recent --json` : null,
   };
 }
 
@@ -291,7 +314,7 @@ function providerImportHealth(source: SourceId, state: JsonObject, cutoff: strin
   return {
     status: complete ? "complete" : "incomplete",
     reason: complete ? null : `${source} official provider export has not covered the configured cutoff`,
-    nextCommand: source === "youtube" ? `${CLI_NAME} import youtube --path <provider-export> --json` : `${CLI_NAME} import twitter --path <provider-export> --json`,
+    nextCommand: source === "youtube" ? `${CLI_NAME} import youtube <provider-export> --json` : `${CLI_NAME} import twitter <provider-export> --json`,
     counts: objectAt(item, "counts"),
     targets: { cutoffDate: cutoff },
     detail: item,

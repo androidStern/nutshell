@@ -44,7 +44,6 @@ export function ensureRoot(root: string): void {
     join(root, "projections", "daily-json"),
     join(root, "projections", "daily-markdown"),
     join(root, "projections", "dashboard"),
-    join(root, "launchd"),
     join(root, "browser-profiles"),
   ]) {
     mkdirSync(path, { recursive: true });

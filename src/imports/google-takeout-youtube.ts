@@ -80,7 +80,7 @@ export async function importGoogleTakeoutYoutube(
     source: "youtube",
     run: {
       id: runId("google_takeout_youtube"),
-      command: `${CLI_NAME} import youtube --path ${archivePath}`,
+      command: `${CLI_NAME} import youtube ${archivePath}`,
       mode: "backfill",
       startedAt: now,
     },
@@ -94,6 +94,39 @@ export async function importGoogleTakeoutYoutube(
     checkpointVersion: commit.checkpointVersion,
   };
   return report;
+}
+
+export async function googleTakeoutYoutubePluginResult(
+  archivePath: string,
+  existingState: JsonObject,
+  now: Date,
+): Promise<PluginSyncResult> {
+  const read = await readGoogleTakeoutYoutube(archivePath);
+  const health = read.issues.map((issue) => ({
+    level: read.available && read.records.length > 0 ? "warning" as const : "critical" as const,
+    source: "youtube" as const,
+    code: "google_takeout_import_issue",
+    message: issue,
+    detail: { path: archivePath },
+    observedAt: now,
+  }));
+  const ok = read.available && read.records.length > 0 && !health.some((finding) => finding.level === "critical");
+  return {
+    observations: read.observations,
+    records: read.records,
+    nextCheckpoint: ok ? nextYoutubeArchiveStateWithoutConfig(existingState, read, archivePath, now) : existingState,
+    health,
+    metrics: {
+      ...read.counts,
+      available: read.available,
+      files: read.files.length,
+      path: archivePath,
+      oldestDateKey: read.dateRange.oldestDateKey,
+      newestDateKey: read.dateRange.newestDateKey,
+    },
+    completed: ok,
+    partial: !ok,
+  };
 }
 
 interface ReadGoogleTakeoutYoutube {
@@ -322,6 +355,62 @@ function nextYoutubeArchiveState(
         archiveComplete,
         complete: archiveComplete ? true : live.complete === true,
         lastPartialReason: archiveComplete ? null : live.lastPartialReason ?? "archive_does_not_reach_stop_date",
+      },
+    },
+  };
+}
+
+function nextYoutubeArchiveStateWithoutConfig(
+  existingState: JsonObject,
+  read: ReadGoogleTakeoutYoutube,
+  archivePath: string,
+  now: Date,
+): JsonObject {
+  const backfill = objectAt(existingState, "backfill");
+  const bulk = objectAt(backfill, "bulk");
+  const live = objectAt(backfill, "live");
+  return {
+    ...existingState,
+    backfill: {
+      ...backfill,
+      imports: {
+        ...objectAt(backfill, "imports"),
+        google_youtube: {
+          importedAt: now.toISOString(),
+          path: archivePath,
+          counts: read.counts as unknown as JsonObject,
+          files: read.files,
+          oldest: read.dateRange.oldest,
+          newest: read.dateRange.newest,
+          oldestDateKey: read.dateRange.oldestDateKey,
+          newestDateKey: read.dateRange.newestDateKey,
+        },
+      },
+      bulk: {
+        ...bulk,
+        complete: true,
+        importedAt: now.toISOString(),
+        sources: {
+          ...objectAt(bulk, "sources"),
+          google_youtube: {
+            complete: true,
+            path: archivePath,
+            importedAt: now.toISOString(),
+            counts: read.counts as unknown as JsonObject,
+            files: read.files,
+            oldest: read.dateRange.oldest,
+            newest: read.dateRange.newest,
+            oldestDateKey: read.dateRange.oldestDateKey,
+            newestDateKey: read.dateRange.newestDateKey,
+          },
+        },
+      },
+      live: {
+        ...live,
+        archiveImportedAt: now.toISOString(),
+        archiveOldestDateKey: read.dateRange.oldestDateKey,
+        archiveNewestDateKey: read.dateRange.newestDateKey,
+        complete: live.complete === true,
       },
     },
   };

@@ -186,10 +186,11 @@ export async function enqueueUnresolvedTweetTargets(
 
 export async function enrichDueTargets(state: TwitterEnrichmentState, options: EnrichDueOptions): Promise<EnrichDueResult> {
   const queue = state.queue ?? {};
+  const maxRequests = options.budget.maxRequests === null ? options.limit : Math.min(options.limit, options.budget.maxRequests);
   const due = Object.values(queue)
     .filter((item) => !item.nextAttemptAt || Date.parse(item.nextAttemptAt) <= options.now.getTime())
     .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt))
-    .slice(0, Math.max(0, options.limit));
+    .slice(0, Math.max(0, maxRequests));
   const records: TraceRecord[] = [];
   const health: HealthFinding[] = [];
   let enriched = 0;

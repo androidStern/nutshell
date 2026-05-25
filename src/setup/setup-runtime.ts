@@ -1,0 +1,425 @@
+import { existsSync } from "node:fs";
+import type { HealthFinding, JsonObject, PluginContext, SourceId } from "../core/types";
+import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
+import { loadConfig, logPath, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
+import { makeFinding, reportStatus as healthReportStatus } from "../health/health";
+import { appExecutable, appStatusJson, configuredAppPath, inspectNutshellApp } from "../macos/app-status";
+import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
+import type { TracePlugin } from "../plugins/interface";
+import { redactText } from "../core/redaction";
+import { JsonlLogger } from "../runtime/logger";
+import { TraceRuntime } from "../runtime/trace-runtime";
+import { JsonConfigDraft } from "./config-draft";
+import { defaultSecretStore, type FileSecretStore } from "./secret-store";
+import { DefaultHostCapabilities } from "./host";
+import { ClackSetupUI } from "./ui-clack";
+import type {
+  ConfigDraft,
+  HostCapabilities,
+  PluginArchiveImportOffer,
+  PluginSetupContext,
+  PluginSetupSummary,
+  SetupPluginReport,
+  SetupReport,
+  SetupRequest,
+  SetupUI,
+} from "./types";
+
+export interface SetupRuntimeOptions {
+  root?: string;
+  configPath?: string;
+  config?: TraceConfig;
+  registry?: PluginRegistry;
+  ui?: SetupUI;
+  host?: HostCapabilities;
+  secretStore?: FileSecretStore;
+}
+
+interface PendingImport {
+  source: SourceId;
+  path: string;
+}
+
+interface PluginSetupOutcome {
+  report: SetupPluginReport;
+  summary: PluginSetupSummary;
+}
+
+export class SetupRuntime {
+  readonly config: TraceConfig;
+  readonly registry: PluginRegistry;
+  readonly ui: SetupUI;
+  readonly host: HostCapabilities;
+  readonly logger: JsonlLogger;
+  readonly secretStore: FileSecretStore;
+
+  constructor(options: SetupRuntimeOptions = {}) {
+    const configPath = options.configPath ?? resolveConfigPath(options.root);
+    const root = options.root ? resolveRoot(options.root, configPath) : resolveRoot(undefined, configPath);
+    this.config = options.config ?? loadConfig(root, configPath);
+    this.registry = options.registry ?? loadBuiltinPlugins();
+    this.ui = options.ui ?? new ClackSetupUI();
+    this.host = options.host ?? new DefaultHostCapabilities();
+    this.logger = new JsonlLogger(logPath(this.config));
+    this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
+  }
+
+  async run(request: SetupRequest): Promise<SetupReport> {
+    const startedAt = new Date();
+    const draft = new JsonConfigDraft(this.config);
+    const secretDraft = await this.secretStore.draft();
+    const controller = new AbortController();
+    const reports: SetupPluginReport[] = [];
+    const pendingImports: PendingImport[] = [];
+
+    this.logger.event("setup: started", {});
+    await this.ui.intro({
+      title: "Nutshell setup",
+      body: `Data root: ${this.config.root}\nConfig: ${this.config.path}`,
+    });
+
+    const selected = await this.selectPlugins(draft);
+    const selectedIds = new Set(selected.map((plugin) => plugin.manifest.id));
+    const installedAppPath = configuredAppPath(this.config);
+    if (existsSync(appExecutable(installedAppPath))) {
+      const appConfig = draft.data.app && typeof draft.data.app === "object" && !Array.isArray(draft.data.app) ? (draft.data.app as JsonObject) : {};
+      draft.data.app = { ...appConfig, path: installedAppPath };
+    }
+    for (const plugin of this.registry.list()) {
+      draft.setPluginEnabled(plugin.manifest.id, selectedIds.has(plugin.manifest.id));
+      if (!selectedIds.has(plugin.manifest.id)) {
+        reports.push({
+          source: plugin.manifest.id,
+          displayName: plugin.manifest.displayName,
+          status: "disabled",
+          findings: [],
+          archiveImport: "unavailable",
+          importCommand: null,
+        });
+      }
+    }
+
+    for (const plugin of selected) {
+      const ctx = this.pluginSetupContext(plugin, draft, secretDraft.plugin(plugin.manifest.id), controller.signal);
+      const { report, summary } = await this.setupPlugin(plugin, ctx);
+      reports.push(report);
+      draft.setPluginSetupStatus(plugin.manifest.id, report.status, report.findings);
+      if (report.status === "ready" && report.importCommand && plugin.importProviderExport) {
+        const offer = summary?.archiveImport;
+        const archivePath = offer ? await this.offerArchiveImport(offer) : null;
+        if (archivePath) {
+          pendingImports.push({ source: plugin.manifest.id, path: archivePath });
+          report.archiveImport = "imported";
+        } else if (offer) {
+          report.archiveImport = "skipped";
+        }
+      }
+    }
+
+    await secretDraft.commit();
+    await draft.commit();
+    this.logger.event("setup: config committed", { selectedPlugins: [...selectedIds] });
+
+    const imports = await this.runImports(pendingImports);
+    for (const imported of imports) {
+      const report = reports.find((item) => item.source === imported.source);
+      if (!report) continue;
+      report.archiveImport = imported.ok ? "imported" : "failed";
+      if (!imported.ok) report.findings.push(imported.finding);
+    }
+
+    const backgroundAgent = request.backgroundAgent ? await this.enableBackgroundAgent() : skippedAction("background agent disabled by request");
+    const smokeSync = request.smokeSync ? await this.runSmokeSync() : skippedAction("smoke sync disabled by request");
+    const finishedAt = new Date();
+    const status =
+      reports.some((item) => item.status === "degraded" || item.archiveImport === "failed") || !backgroundAgent.ok || !smokeSync.ok
+        ? "warning"
+        : "ok";
+    const report: SetupReport = {
+      status,
+      startedAt,
+      finishedAt,
+      plugins: reports,
+      backgroundAgent,
+      smokeSync,
+    };
+    this.logger.event("setup: finished", {
+      status,
+      plugins: reports.map((item) => ({ source: item.source, status: item.status, archiveImport: item.archiveImport })),
+      backgroundAgent,
+      smokeSync,
+    });
+    await this.ui.note({ title: "Setup complete", body: setupSummaryText(report) });
+    return report;
+  }
+
+  private async selectPlugins(draft: ConfigDraft): Promise<TracePlugin[]> {
+    const plugins = this.registry.list();
+    const initialValues = plugins.filter((plugin) => draft.pluginConfig(plugin.manifest.id).enabled !== false).map((plugin) => plugin.manifest.id);
+    const selectedIds = await this.ui.multiselect<SourceId>({
+      title: "Choose plugins to enable",
+      options: plugins.map((plugin) => ({
+        label: plugin.manifest.displayName,
+        value: plugin.manifest.id,
+        hint: plugin.manifest.collections.join(", "),
+      })),
+      initialValues,
+    });
+    const selected = new Set(selectedIds);
+    return plugins.filter((plugin) => selected.has(plugin.manifest.id));
+  }
+
+  private async setupPlugin(plugin: TracePlugin, ctx: PluginSetupContext): Promise<PluginSetupOutcome> {
+    const source = plugin.manifest.id;
+    const started = new Date();
+    this.logger.event("setup: plugin started", { source });
+    try {
+      const summary = await pluginSummary(plugin, ctx);
+      await this.ui.note({ title: summary.title, body: summary.body });
+      const setupFindings = plugin.setup ? (await plugin.setup.run(ctx)).findings ?? [] : [];
+      const verifyFindings = plugin.setup ? await plugin.setup.verify(ctx) : await this.defaultVerify(plugin);
+      const findings = [...setupFindings, ...verifyFindings];
+      const degraded = findings.some((finding) => finding.level === "critical");
+      const status = degraded ? "degraded" : "ready";
+      const report: SetupPluginReport = {
+        source,
+        displayName: plugin.manifest.displayName,
+        status,
+        findings,
+        archiveImport: summary.archiveImport ? "skipped" : "unavailable",
+        importCommand: summary.archiveImport?.laterCommand ?? null,
+      };
+      this.logger.event("setup: plugin finished", {
+        source,
+        status,
+        durationMs: Date.now() - started.getTime(),
+        findingCount: findings.length,
+      });
+      return { report, summary };
+    } catch (error) {
+      const finding = makeFinding("critical", source, "plugin_setup_failed", `${plugin.manifest.displayName} setup failed`, { error: String(error) });
+      this.logger.error("setup: plugin failed", { source, error: String(error) });
+      return {
+        summary: { title: plugin.manifest.displayName, body: "Setup failed before the plugin could finish." },
+        report: {
+        source,
+        displayName: plugin.manifest.displayName,
+        status: "degraded",
+        findings: [finding],
+        archiveImport: "unavailable",
+        importCommand: null,
+        },
+      };
+    }
+  }
+
+  private async defaultVerify(plugin: TracePlugin): Promise<HealthFinding[]> {
+    const ctx = pluginRuntimeContext(this.config, plugin, this.logger, new AbortController().signal);
+    return plugin.check(ctx);
+  }
+
+  private pluginSetupContext(
+    plugin: TracePlugin,
+    draft: ConfigDraft,
+    secrets: PluginSetupContext["secrets"],
+    signal: AbortSignal,
+  ): PluginSetupContext {
+    return {
+      root: this.config.root,
+      pluginId: plugin.manifest.id,
+      ui: this.ui,
+      config: draft,
+      secrets,
+      host: this.host,
+      logger: this.logger,
+      signal,
+      now: () => new Date(),
+    };
+  }
+
+  private async offerArchiveImport(offer: PluginArchiveImportOffer): Promise<string | null> {
+    const importNow = await this.ui.confirm({
+      title: offer.title,
+      body: `${offer.body}\n\nIf you do not have it yet, run this later:\n${offer.laterCommand}`,
+      initialValue: false,
+    });
+    if (!importNow) {
+      await this.ui.note({ title: "Import later", body: offer.laterCommand });
+      return null;
+    }
+    const selected = await this.host.chooseFile({ title: offer.title, allowedExtensions: offer.allowedExtensions });
+    if (!selected) {
+      const fallback = await this.ui.text({ title: "Archive path", placeholder: "/path/to/export.zip" });
+      return fallback.trim() || null;
+    }
+    return selected;
+  }
+
+  private async runImports(imports: PendingImport[]): Promise<Array<{ source: SourceId; ok: true } | { source: SourceId; ok: false; finding: HealthFinding }>> {
+    const output: Array<{ source: SourceId; ok: true } | { source: SourceId; ok: false; finding: HealthFinding }> = [];
+    if (!imports.length) return output;
+    const runtime = new TraceRuntime({ root: this.config.root, configPath: this.config.path, registry: this.registry });
+    try {
+      for (const item of imports) {
+        try {
+          await runtime.importProviderExport({
+            source: item.source,
+            path: item.path,
+            dryRun: false,
+            budget: DEFAULT_SYNC_BUDGET,
+          });
+          output.push({ source: item.source, ok: true });
+        } catch (error) {
+          output.push({
+            source: item.source,
+            ok: false,
+            finding: makeFinding("critical", item.source, "setup_archive_import_failed", `${item.source} archive import failed`, {
+              path: item.path,
+              error: String(error),
+            }),
+          });
+        }
+      }
+    } finally {
+      await runtime.close();
+    }
+    return output;
+  }
+
+  private async enableBackgroundAgent(): Promise<SetupReport["backgroundAgent"]> {
+    const appPath = configuredAppPath(this.config);
+    const executable = appExecutable(appPath);
+    if (!existsSync(executable)) return { attempted: true, ok: false, message: "Nutshell.app is not installed", detail: { appPath } };
+    const permission = await this.ensureAppPermission(appPath, executable);
+    if (permission.status.backgroundSync === "enabled" && permission.status.agent === "enabled") {
+      return {
+        attempted: true,
+        ok: true,
+        message: "background agent enabled",
+        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+      };
+    }
+    if (permission.status.fullDiskAccess !== "granted") {
+      return {
+        attempted: true,
+        ok: false,
+        message: "Full Disk Access is required before background sync can be enabled",
+        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+      };
+    }
+    const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
+    const enable = await this.host.run({ command: executable, args: ["enable-sync"], timeoutMs: 30_000 });
+    const status = await inspectNutshellApp(this.config, appPath);
+    const ok = register.code === 0 && enable.code === 0;
+    return {
+      attempted: true,
+      ok,
+      message: ok ? "background agent enabled" : "background agent enablement failed",
+      detail: { register: jsonRunResult(register), enable: jsonRunResult(enable), status: appStatusJson(status) },
+    };
+  }
+
+  private async runSmokeSync(): Promise<SetupReport["smokeSync"]> {
+    const appPath = configuredAppPath(this.config);
+    const executable = appExecutable(appPath);
+    if (!existsSync(executable)) {
+      return {
+        attempted: true,
+        ok: false,
+        message: "Nutshell.app is not installed; app-owned smoke sync could not run",
+        detail: { appPath },
+      };
+    }
+    const status = await inspectNutshellApp(this.config, appPath);
+    if (status.fullDiskAccess !== "granted") {
+      return {
+        attempted: true,
+        ok: false,
+        message: "Full Disk Access is required before app-owned smoke sync can run",
+        detail: { status: appStatusJson(status) },
+      };
+    }
+    const result = await this.host.run({ command: executable, args: ["__sync-once", "all"], timeoutMs: 150_000 });
+    return {
+      attempted: true,
+      ok: result.code === 0,
+      message: result.code === 0 ? "app-owned smoke sync ok" : "app-owned smoke sync failed",
+      detail: jsonRunResult(result),
+    };
+  }
+
+  private async ensureAppPermission(
+    appPath: string,
+    executable: string,
+  ): Promise<{ status: Awaited<ReturnType<typeof inspectNutshellApp>>; setup: { code: number; stdout: string; stderr: string } | null }> {
+    let status = await inspectNutshellApp(this.config, appPath);
+    if (status.fullDiskAccess === "granted") return { status, setup: null };
+    await this.ui.note({
+      title: "macOS permission required",
+      body:
+        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, enable background sync, then close the window to continue.",
+    });
+    const setup = await this.host.run({ command: executable, args: ["setup"], timeoutMs: 15 * 60 * 1000 });
+    status = await inspectNutshellApp(this.config, appPath);
+    return { status, setup };
+  }
+}
+
+function skippedAction(message: string): SetupReport["backgroundAgent"] {
+  return { attempted: false, ok: true, message, detail: {} };
+}
+
+function jsonRunResult(result: { code: number; stdout: string; stderr: string }): JsonObject {
+  return {
+    code: result.code,
+    stdout: redactText(result.stdout),
+    stderr: redactText(result.stderr),
+  };
+}
+
+async function pluginSummary(plugin: TracePlugin, ctx: PluginSetupContext): Promise<PluginSetupSummary> {
+  if (plugin.setup) return plugin.setup.summarize(ctx);
+  return {
+    title: plugin.manifest.displayName,
+    body: "This plugin has no interactive setup. Nutshell will run its health probe.",
+  };
+}
+
+function pluginRuntimeContext(config: TraceConfig, plugin: TracePlugin, logger: JsonlLogger, signal: AbortSignal): PluginContext {
+  return {
+    root: config.root,
+    config: pluginConfig(config, plugin.manifest.id),
+    logger,
+    signal,
+    now: () => new Date(),
+    records: {
+      query: async () => ({ records: [], total: 0, limit: 0, offset: 0 }),
+    },
+    writeArtifact: async () => {
+      throw new Error("setup verification cannot write artifacts");
+    },
+  };
+}
+
+function setupSummaryText(report: SetupReport): string {
+  const ready = report.plugins.filter((item) => item.status === "ready").map((item) => item.displayName);
+  const degraded = report.plugins.filter((item) => item.status === "degraded").map((item) => item.displayName);
+  const disabled = report.plugins.filter((item) => item.status === "disabled").map((item) => item.displayName);
+  return [
+    ready.length ? `Ready: ${ready.join(", ")}` : "Ready: none",
+    degraded.length ? `Degraded: ${degraded.join(", ")}` : "Degraded: none",
+    disabled.length ? `Disabled: ${disabled.join(", ")}` : "Disabled: none",
+    `Background: ${report.backgroundAgent.message}`,
+    `Smoke sync: ${report.smokeSync.message}`,
+  ].join("\n");
+}
+
+export function exitCodeForSetup(report: SetupReport): number {
+  if (report.status === "critical") return 2;
+  if (report.status === "warning") return 1;
+  return 0;
+}
+
+export function setupStatusFromFindings(findings: HealthFinding[]): SetupReport["status"] {
+  return healthReportStatus(findings);
+}
