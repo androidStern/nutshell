@@ -12,7 +12,8 @@ const stage = join(releaseRoot, name);
 const tarball = join(releaseRoot, `${name}.tar.gz`);
 const binary = join(repo, "bin", "nutshell");
 const appBundle = join(repo, "dist", "macos", "Nutshell.app");
-const defaultReleaseBaseUrl = "https://github.com/winterfell/nutshell/releases/download";
+const releaseHomepage = "https://github.com/androidStern/nutshell";
+const defaultReleaseBaseUrl = `${releaseHomepage}/releases/download`;
 
 await run(["bun", "run", "build:compile"]);
 if (process.platform === "darwin") {
@@ -103,7 +104,7 @@ function releaseUrl(version: string, fileName: string): string {
 function homebrewFormula(version: string, url: string, sha256: string): string {
   return `class Nutshell < Formula
   desc "Local personal trace ingestion runtime"
-  homepage "https://github.com/winterfell/nutshell"
+  homepage "${releaseHomepage}"
   url "${url}"
   version "${version}"
   sha256 "${sha256}"
