@@ -3,7 +3,7 @@ class Nutshell < Formula
   homepage "https://github.com/androidStern/nutshell"
   url "https://github.com/androidStern/nutshell/releases/download/v0.1.1/nutshell-0.1.1-darwin-arm64.tar.gz"
   version "0.1.1"
-  sha256 "45f4d56f996f398a85f73a0da26a80b3c8bd4a2fa288fc87d17930dead9de3cc"
+  sha256 "387fc7d8583d8757dbac53ada0e4ff331ba5f713a195c6f8a7b4c655972e111b"
   license "MIT"
 
   def install
