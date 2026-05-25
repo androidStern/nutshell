@@ -12,7 +12,8 @@ It is standalone. It does not require Hermes, BirdClaw, prior generated archives
 - Store: `~/Nutshell/nutshell.sqlite`
 - Secrets: `~/Nutshell/secrets.json`
 - Logs: `~/Nutshell/logs/`
-- macOS app bundle: `/Applications/Nutshell.app`
+- macOS app bundle: installed by the release path; Homebrew stores it inside the
+  `nutshell` prefix, and the tarball installer defaults to `~/Applications/Nutshell.app`
 - app-owned agent label: `com.winterfell.nutshell.agent`
 
 `~/nutconfig.jsonc` controls storage location, enabled plugins, sync schedule, browser profile settings, backfill cutoff, and per-plugin settings. Secret values do not belong in this file. Plugin secrets are stored through the namespaced Nutshell secret store with strict local file permissions.
@@ -24,7 +25,7 @@ control command in PATH:
 
 ```bash
 bun install -g nutshell
-brew install nutshell
+brew install androidStern/nutshell/nutshell
 tar -xzf nutshell-<version>-darwin-<arch>.tar.gz && ./install.sh
 ```
 
