@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const PRODUCT_NAME = "Nutshell";
-export const PRODUCT_VERSION = "0.1.3";
+export const PRODUCT_VERSION = "0.1.4";
 export const CLI_NAME = "nutshell";
 export const CONFIG_FILENAME = "nutconfig.jsonc";
 export const CONFIG_ENV = "NUTSHELL_CONFIG";

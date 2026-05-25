@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -40,12 +40,26 @@ function buildBundle(): void {
   mkdirSync(join(appRoot, "Contents", "Library", "LaunchAgents"), { recursive: true });
   mkdirSync(join(appRoot, "Contents", "Library", "LaunchServices"), { recursive: true });
 
-  cpSync(join(repo, "macos", "Info.plist"), join(appRoot, "Contents", "Info.plist"));
+  writeVersionedInfoPlist(join(appRoot, "Contents", "Info.plist"));
+  cpSync(join(repo, "macos", "Nutshell.icns"), join(appRoot, "Contents", "Resources", "Nutshell.icns"));
   cpSync(
     join(repo, "macos", "com.winterfell.nutshell.agent.plist"),
     join(appRoot, "Contents", "Library", "LaunchAgents", "com.winterfell.nutshell.agent.plist"),
   );
   cpSync(join(repo, "bin", "nutshell"), join(appRoot, "Contents", "Resources", "nutshell-core"));
+}
+
+function writeVersionedInfoPlist(destination: string): void {
+  const source = readFileSync(join(repo, "macos", "Info.plist"), "utf8")
+    .replace(
+      /(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]+(<\/string>)/,
+      `$1${pkg.version}$2`,
+    )
+    .replace(
+      /(<key>CFBundleVersion<\/key>\s*<string>)[^<]+(<\/string>)/,
+      `$1${pkg.version}$2`,
+    );
+  writeFileSync(destination, source);
 }
 
 async function compileSwift(): Promise<void> {

@@ -283,7 +283,12 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
   private let agentValue = NSTextField(labelWithString: "")
   private let syncValue = NSTextField(labelWithString: "")
   private let messageValue = NSTextField(labelWithString: "")
-  private let finishButton = NSButton(title: "Enable background sync", target: nil, action: nil)
+  private let helpTitle = label("", size: 15, weight: .semibold)
+  private let helpBody = wrappingLabel("")
+  private let openButton = NSButton(title: "Open Full Disk Access", target: nil, action: nil)
+  private let revealButton = NSButton(title: "Reveal App", target: nil, action: nil)
+  private let checkButton = NSButton(title: "Check Again", target: nil, action: nil)
+  private let finishButton = NSButton(title: "Finish Setup", target: nil, action: nil)
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     buildWindow()
@@ -326,9 +331,9 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     root.translatesAutoresizingMaskIntoConstraints = false
     content.addSubview(root)
 
-    let title = label("Finish Nutshell Setup", size: 24, weight: .semibold)
+    let title = label("Setup Nutshell Permissions", size: 24, weight: .semibold)
     let intro = wrappingLabel(
-      "Nutshell needs Full Disk Access before the background helper can read protected local data like Podcasts and browser-owned files. macOS will not let an app grant that permission for you, but this window opens the right Settings page and gives you the exact app icon to drag into the list."
+      "Nutshell needs Full Disk Access before the background helper can read protected local data like Podcasts and browser-owned files."
     )
 
     root.addArrangedSubview(title)
@@ -410,8 +415,8 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     copy.orientation = .vertical
     copy.alignment = .leading
     copy.spacing = 5
-    copy.addArrangedSubview(label("Drag Nutshell.app into Full Disk Access", size: 15, weight: .semibold))
-    copy.addArrangedSubview(wrappingLabel("If Nutshell is not already listed in System Settings, drag the app icon from this window into the Full Disk Access list, then turn its switch on."))
+    copy.addArrangedSubview(helpTitle)
+    copy.addArrangedSubview(helpBody)
 
     stack.addArrangedSubview(icon)
     stack.addArrangedSubview(copy)
@@ -433,9 +438,12 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     stack.alignment = .centerY
     stack.spacing = 10
 
-    let openButton = NSButton(title: "Open Full Disk Access", target: self, action: #selector(openAccessSettings))
-    let revealButton = NSButton(title: "Reveal App", target: self, action: #selector(revealApp))
-    let checkButton = NSButton(title: "Check Again", target: self, action: #selector(checkAgain))
+    openButton.target = self
+    openButton.action = #selector(openAccessSettings)
+    revealButton.target = self
+    revealButton.action = #selector(revealApp)
+    checkButton.target = self
+    checkButton.action = #selector(checkAgain)
 
     finishButton.target = self
     finishButton.action = #selector(finishSetup)
@@ -481,6 +489,10 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc private func finishSetup() {
+    if fullDiskAccessGranted() && agentStatusText() == "enabled" && syncEnabled() {
+      NSApplication.shared.terminate(nil)
+      return
+    }
     do {
       if agentStatusText() != "enabled" {
         try registerAgent()
@@ -498,19 +510,34 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     let accessGranted = fullDiskAccessGranted()
     let agentStatus = agentStatusText()
     let enabled = syncEnabled()
+    let complete = accessGranted && agentStatus == "enabled" && enabled
 
     accessValue.stringValue = accessGranted ? "granted" : "not granted"
     accessValue.textColor = accessGranted ? .systemGreen : .systemRed
     agentValue.stringValue = agentStatus
+    agentValue.textColor = agentStatus == "enabled" ? .systemGreen : .secondaryLabelColor
     syncValue.stringValue = enabled ? "enabled" : "disabled"
     syncValue.textColor = enabled ? .systemGreen : .secondaryLabelColor
-    finishButton.isEnabled = accessGranted && !enabled
-    finishButton.title = enabled ? "Background sync enabled" : "Enable background sync"
+    openButton.isHidden = complete
+    revealButton.isHidden = complete
+    checkButton.isHidden = complete
+    finishButton.isEnabled = accessGranted
+    finishButton.title = complete ? "Finish Setup" : "Enable background sync"
 
-    if accessGranted && enabled {
-      showMessage("Setup is complete. You can close this window.")
+    if accessGranted {
+      helpTitle.stringValue = "Quit and Reopen if Prompted"
+      helpBody.stringValue = "If macOS asks, choose Quit & Reopen so the Full Disk Access grant applies to Nutshell."
+    } else {
+      helpTitle.stringValue = "Grant Nutshell Full Disk Access"
+      helpBody.stringValue = "Drag the Nutshell app icon into Full Disk Access if it is missing, then turn its switch on."
+    }
+
+    if complete {
+      showMessage("Setup is complete.")
+    } else if accessGranted && agentStatus == "enabled" {
+      showMessage("Full Disk Access is granted. Finish setup to enable background sync.")
     } else if accessGranted {
-      showMessage("Full Disk Access is granted. Enable background sync when you are ready.")
+      showMessage("Full Disk Access is granted. Finish setup to enable the background helper and sync.")
     } else if messageValue.stringValue.isEmpty {
       showMessage("Open Full Disk Access, drag Nutshell.app into the list if needed, and turn it on.")
     }

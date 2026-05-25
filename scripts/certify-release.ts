@@ -61,13 +61,16 @@ await step("release tarball contains CLI and app bundle", async () => {
   await run(["tar", "-xzf", tarball, "-C", join(tmp)]);
   const extractedRoot = join(tmp, basename(tarball, ".tar.gz"));
   const manifest = JSON.parse(readFileSync(join(extractedRoot, "manifest.json"), "utf8")) as { files: Array<{ path: string }> };
-  const paths = new Set(manifest.files.map((file) => file.path));
-  if (!paths.has("bin/nutshell")) throw new Error("tarball manifest is missing bin/nutshell");
-  if (process.platform === "darwin" && ![...paths].some((path) => path.startsWith("Nutshell.app/"))) {
-    throw new Error("darwin tarball manifest is missing Nutshell.app");
-  }
-  return { tarball, manifestPath, files: paths.size };
-});
+    const paths = new Set(manifest.files.map((file) => file.path));
+    if (!paths.has("bin/nutshell")) throw new Error("tarball manifest is missing bin/nutshell");
+    if (process.platform === "darwin" && ![...paths].some((path) => path.startsWith("Nutshell.app/"))) {
+      throw new Error("darwin tarball manifest is missing Nutshell.app");
+    }
+    if (process.platform === "darwin" && !paths.has("Nutshell.app/Contents/Resources/Nutshell.icns")) {
+      throw new Error("darwin tarball manifest is missing Nutshell.app icon");
+    }
+    return { tarball, manifestPath, files: paths.size };
+  });
 
 await step("app-owned helper surface is present and setup uses it", async () => {
   const appExecutable = join(repo, "dist", "macos", "Nutshell.app", "Contents", "MacOS", "Nutshell");
