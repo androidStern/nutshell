@@ -23,8 +23,7 @@ export async function collectYouTubeFromMyActivityHttp(input: {
   signal: AbortSignal;
 }): Promise<MyActivityHttpResult> {
   const cookies = await readBrowserCookieHeader({
-    url: "https://myactivity.google.com/",
-    origins: ["https://myactivity.google.com/", "https://www.youtube.com/", "https://youtube.com/", "https://accounts.google.com/", "https://google.com/"],
+    url: "https://myactivity.google.com/myactivity?product=26",
     browser: input.cookieBrowser,
     profile: input.cookieProfile || undefined,
     timeoutMs: input.cookieTimeoutMs,
@@ -118,6 +117,9 @@ async function fetchText(cookieHeader: string, url: string, formBody: string | n
 }
 
 function parseSession(html: string): MyActivitySession {
+  if (/FootprintsMyactivitySignedoutUi/i.test(html.slice(0, 500_000))) {
+    throw new Error("Google My Activity returned the signed-out shell for the configured browser profile");
+  }
   if (/accounts\.google\.com\/(?:signin|ServiceLogin)|Sign in/i.test(html.slice(0, 200_000))) {
     throw new Error("Google My Activity returned a signed-out page");
   }

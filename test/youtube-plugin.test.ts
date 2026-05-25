@@ -94,6 +94,20 @@ test("youtube health probe fails closed on unexpected empty access", async () =>
   expect(JSON.stringify(findings[0]?.detail)).toContain("cursor-1");
 });
 
+test("youtube health probe reports collector auth exceptions instead of crashing", async () => {
+  const plugin = new YouTubePlugin(async () => {
+    throw new Error("Google My Activity returned the signed-out shell for the configured browser profile");
+  });
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.level).toBe("critical");
+  expect(findings[0]?.code).toBe("youtube_auth_probe_failed");
+  expect(findings[0]?.message).toContain("Sign into Google My Activity");
+  expect(JSON.stringify(findings[0]?.detail)).toContain("signed-out shell");
+});
+
 function request(mode: "recent" | "backfill", maxRequests: number | null): SyncRequest {
   return {
     source: "youtube",

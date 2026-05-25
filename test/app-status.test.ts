@@ -49,7 +49,7 @@ test("app discovery ignores stale configured paths when an installed app exists"
       path: join(home, "nutconfig.jsonc"),
       data: {
         app: {
-          path: "/opt/homebrew/Cellar/nutshell/0.1.0/Nutshell.app",
+          path: join(home, "stale-cellar", "Nutshell.app"),
         },
       },
     });

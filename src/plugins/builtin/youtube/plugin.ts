@@ -73,7 +73,12 @@ export class YouTubePlugin implements TracePlugin {
     if (cfg.accessMode !== "myactivity_http") {
       return [finding("critical", "youtube", "youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", { accessMode: cfg.accessMode })];
     }
-    const probe = await this.probe(cfg, ctx.signal);
+    let probe: SetupCheck;
+    try {
+      probe = await this.probe(cfg, ctx.signal);
+    } catch (error) {
+      probe = youtubeProbeException(error);
+    }
     return probe.ok ? [] : [finding(probe.level ?? "critical", "youtube", "youtube_auth_probe_failed", probe.message, probe.detail ?? {})];
   }
 
@@ -141,12 +146,7 @@ export class YouTubePlugin implements TracePlugin {
     try {
       return await this.probe(cfg, ctx.signal);
     } catch (error) {
-      return {
-        ok: false,
-        message: "YouTube browser session could not be verified.",
-        level: "critical",
-        detail: { error: String(error) },
-      };
+      return youtubeProbeException(error);
     }
   }
 
@@ -183,6 +183,15 @@ export class YouTubePlugin implements TracePlugin {
       detail: { items: result.items.length, scroll: result.scroll },
     };
   }
+}
+
+function youtubeProbeException(error: unknown): SetupCheck {
+  return {
+    ok: false,
+    message: "YouTube browser session could not be verified. Sign into Google My Activity in the configured Chrome profile and try again.",
+    level: "critical",
+    detail: { error: String(error) },
+  };
 }
 
 export function createYouTubePlugin(): TracePlugin {
