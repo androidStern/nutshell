@@ -359,7 +359,10 @@ export class SetupRuntime {
       body:
         "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, enable background sync, then close the window to continue.",
     });
-    const setup = await this.host.run({ command: executable, args: ["setup"], timeoutMs: 15 * 60 * 1000 });
+    const setup =
+      process.platform === "darwin"
+        ? await this.host.run({ command: "/usr/bin/open", args: ["-W", "-n", appPath, "--args", "setup"], timeoutMs: 15 * 60 * 1000 })
+        : await this.host.run({ command: executable, args: ["setup"], timeoutMs: 15 * 60 * 1000 });
     status = await inspectNutshellApp(this.config, appPath);
     return { status, setup };
   }

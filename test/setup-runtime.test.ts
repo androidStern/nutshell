@@ -330,7 +330,7 @@ exit 0
     const ui = new FakeSetupUI();
     ui.multiselectValues = [["ready"]];
     const host = new FakeHost(null, (run) => {
-      if (run.args[0] === "setup") writeFileSync(grantedMarker, "yes\n");
+      if (run.args.includes("setup")) writeFileSync(grantedMarker, "yes\n");
     });
     const runtime = new SetupRuntime({
       root,
@@ -341,11 +341,13 @@ exit 0
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, smokeSync: true });
+    const setupCommand =
+      process.platform === "darwin" ? ["/usr/bin/open", "-W", "-n", appPath, "--args", "setup"] : [executable, "setup"];
 
     expect(report.backgroundAgent.ok).toBe(true);
     expect(report.smokeSync.ok).toBe(true);
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
-      [executable, "setup"],
+      setupCommand,
       [executable, "__sync-once", "all"],
     ]);
   } finally {
