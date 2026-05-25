@@ -6,12 +6,15 @@ import { expandHome, objectAt, type TraceConfig } from "../config/config";
 import { runProcess } from "../runtime/process";
 
 export function configuredAppPath(config: TraceConfig, explicit?: string): string {
-  const configured = explicit || process.env[APP_PATH_ENV] || stringValue(objectAt(config.data, "app"), "path");
-  if (configured) return resolve(expandHome(configured));
+  const requested = explicit || process.env[APP_PATH_ENV];
+  if (requested) return resolve(expandHome(requested));
+  const configured = stringValue(objectAt(config.data, "app"), "path");
+  const configuredPath = configured ? resolve(expandHome(configured)) : "";
+  if (configuredPath && existsSync(appExecutable(configuredPath))) return configuredPath;
   for (const candidate of appPathCandidates()) {
     if (existsSync(join(candidate, "Contents", "MacOS", "Nutshell"))) return candidate;
   }
-  return DEFAULT_APP_PATH;
+  return configuredPath || DEFAULT_APP_PATH;
 }
 
 export async function inspectNutshellApp(config: TraceConfig, explicit?: string): Promise<AppBackgroundStatus> {

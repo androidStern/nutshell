@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { parseNutshellAppStatus } from "../src/macos/app-status";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { configuredAppPath, parseNutshellAppStatus } from "../src/macos/app-status";
 
 test("app status parser preserves app-owned permission and agent states", () => {
   const missing = parseNutshellAppStatus(
@@ -30,4 +33,31 @@ test("app status parser preserves app-owned permission and agent states", () => 
   expect(enabled.fullDiskAccess).toBe("granted");
   expect(enabled.agent).toBe("enabled");
   expect(enabled.backgroundSync).toBe("enabled");
+});
+
+test("app discovery ignores stale configured paths when an installed app exists", () => {
+  const priorHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "nutshell-app-home-"));
+  try {
+    process.env.HOME = home;
+    const app = join(home, "Applications", "Nutshell.app");
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(app, "Contents", "MacOS", "Nutshell"), "");
+
+    const path = configuredAppPath({
+      root: join(home, "Nutshell"),
+      path: join(home, "nutconfig.jsonc"),
+      data: {
+        app: {
+          path: "/opt/homebrew/Cellar/nutshell/0.1.0/Nutshell.app",
+        },
+      },
+    });
+
+    expect(path).toBe(app);
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
