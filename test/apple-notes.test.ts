@@ -281,7 +281,7 @@ test("apple notes prioritizes never-exported notes before previously failed body
       },
     );
 
-    expect(fetchedIds).toEqual([["fresh-note"]]);
+    expect(fetchedIds).toEqual([["fresh-note"], ["failed-note"]]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -334,7 +334,7 @@ test("apple notes does not rewrite unchanged note artifacts", async () => {
   }
 });
 
-test("apple notes converges body backlog across bounded runs", async () => {
+test("apple notes drains body backlog across safe chunks within one run", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-notes-converge-"));
   try {
     const fetchedIds: string[][] = [];
@@ -350,19 +350,16 @@ test("apple notes converges body backlog across bounded runs", async () => {
     const plugin = new AppleNotesPlugin(() => source);
     const request = { source: "apple_notes" as const, mode: "recent" as const, window: null, collections: [], budget: plugin.manifest.defaultBudget, dryRun: false };
     const first = await plugin.sync(context(root, { config: { batchSize: 1 } }), request, { version: 0, state: {} });
-    const second = await plugin.sync(context(root, { config: { batchSize: 1 } }), request, { version: 1, state: first.nextCheckpoint });
 
     expect(fetchedIds).toEqual([["note-1"], ["note-2"]]);
-    expect(first.partial).toBe(true);
-    expect(first.metrics).toMatchObject({ bodyFetches: 1, bodyBacklog: 1 });
-    expect(second.partial).toBe(false);
-    expect(second.metrics).toMatchObject({ bodyFetches: 1, bodyBacklog: 0 });
+    expect(first.partial).toBe(false);
+    expect(first.metrics).toMatchObject({ bodyFetches: 2, bodyFetchBatches: 2, bodyBacklog: 0 });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("apple notes caps oversized body batches to a safe chunk", async () => {
+test("apple notes splits oversized body exports into safe chunks", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-notes-batch-cap-"));
   try {
     const fetchedIds: string[][] = [];
@@ -382,9 +379,9 @@ test("apple notes caps oversized body batches to a safe chunk", async () => {
       { version: 0, state: {} },
     );
 
-    expect(fetchedIds[0]?.length).toBe(25);
-    expect(result.metrics).toMatchObject({ bodyFetches: 25, bodyBatchSize: 25, bodyBacklog: 15 });
-    expect(result.partial).toBe(true);
+    expect(fetchedIds.map((ids) => ids.length)).toEqual([25, 15]);
+    expect(result.metrics).toMatchObject({ bodyFetches: 40, bodyFetchBatches: 2, bodyBatchSize: 25, bodyBacklog: 0 });
+    expect(result.partial).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

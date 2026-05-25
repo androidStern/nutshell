@@ -161,18 +161,34 @@ export class AppleNotesPlugin implements TracePlugin {
       );
     }
     const bodyBatchSize = Math.max(1, Math.min(cfg.batchSize, MAX_BODY_BATCH_SIZE));
-    const toFetch = hasBodyBudget ? fetchCandidates.slice(0, bodyBatchSize) : [];
-    let bodyMap: Map<string, NoteBody>;
+    const bodyMap = new Map<string, NoteBody>();
+    let bodyFetchBatches = 0;
     try {
-      const fetched = await fetchBodiesResilient(source, toFetch.map((note) => note.id), cfg.osascriptTimeoutMs, ctx.signal, deadlineAt);
-      bodyMap = fetched.bodies;
-      if (fetched.budgetExhausted) {
-        budgetExhausted = true;
-        health.push(
-          finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
-            pendingBodyExports: Math.max(0, fetchCandidates.length - bodyMap.size),
-          }),
-        );
+      if (hasBodyBudget) {
+        for (let offset = 0; offset < fetchCandidates.length; offset += bodyBatchSize) {
+          if (ctx.signal.aborted || remainingMs(deadlineAt, MIN_ARTIFACT_RESERVE_MS) < MIN_BODY_FETCH_MS) {
+            budgetExhausted = true;
+            break;
+          }
+          const batch = fetchCandidates.slice(offset, offset + bodyBatchSize);
+          const fetched = await fetchBodiesResilient(source, batch.map((note) => note.id), cfg.osascriptTimeoutMs, ctx.signal, deadlineAt);
+          bodyFetchBatches += batch.length > 0 ? 1 : 0;
+          for (const [id, body] of fetched.bodies) bodyMap.set(id, body);
+          if (fetched.budgetExhausted) {
+            budgetExhausted = true;
+            break;
+          }
+        }
+      }
+      if (budgetExhausted) {
+        const pendingBodyExports = Math.max(0, fetchCandidates.length - bodyMap.size);
+        if (pendingBodyExports > 0) {
+          health.push(
+            finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
+              pendingBodyExports,
+            }),
+          );
+        }
       }
     } catch (error) {
       const permission = isAppleNotesPermissionError(error);
@@ -195,7 +211,7 @@ export class AppleNotesPlugin implements TracePlugin {
             },
           ),
         ],
-        metrics: { phase: "body_fetch", bodyFetches: toFetch.length },
+        metrics: { phase: "body_fetch", bodyFetches: bodyMap.size, bodyFetchBatches },
         completed: false,
         partial: true,
       };
@@ -388,6 +404,7 @@ export class AppleNotesPlugin implements TracePlugin {
         metadataRows: metadata.length,
         uniqueNotes: unique.length,
         bodyFetches: bodyMap.size,
+        bodyFetchBatches,
         bodyBatchSize,
         bodyBacklog,
         budgetExhausted,
