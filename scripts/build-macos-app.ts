@@ -42,6 +42,7 @@ function buildBundle(): void {
 
   writeVersionedInfoPlist(join(appRoot, "Contents", "Info.plist"));
   cpSync(join(repo, "macos", "Nutshell.icns"), join(appRoot, "Contents", "Resources", "Nutshell.icns"));
+  cpSync(join(repo, "macos", "nutshell-ascii-animation.mp4"), join(appRoot, "Contents", "Resources", "nutshell-ascii-animation.mp4"));
   cpSync(
     join(repo, "macos", "com.winterfell.nutshell.agent.plist"),
     join(appRoot, "Contents", "Library", "LaunchAgents", "com.winterfell.nutshell.agent.plist"),

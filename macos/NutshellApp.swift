@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Darwin
 import Foundation
 import ServiceManagement
@@ -297,17 +298,16 @@ func runOnboardingApp() {
 final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
   private var window: NSWindow?
   private var refreshTimer: Timer?
+  private var backgroundPlayer: AVPlayer?
+  private var backgroundLoopObserver: NSObjectProtocol?
 
   private let accessValue = NSTextField(labelWithString: "")
-  private let agentValue = NSTextField(labelWithString: "")
-  private let syncValue = NSTextField(labelWithString: "")
   private let messageValue = NSTextField(labelWithString: "")
   private let helpTitle = label("", size: 15, weight: .semibold)
   private let helpBody = wrappingLabel("")
-  private let openButton = NSButton(title: "Open Full Disk Access", target: nil, action: nil)
-  private let revealButton = NSButton(title: "Reveal App", target: nil, action: nil)
-  private let checkButton = NSButton(title: "Check Again", target: nil, action: nil)
-  private let finishButton = NSButton(title: "Finish Setup", target: nil, action: nil)
+  private let openButton = PointerButton(title: "Open Full Disk Access", target: nil, action: nil)
+  private let revealButton = PointerButton(title: "Reveal App", target: nil, action: nil)
+  private let checkButton = PointerButton(title: "Check Again", target: nil, action: nil)
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     buildWindow()
@@ -321,6 +321,10 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     refreshTimer?.invalidate()
+    if let backgroundLoopObserver {
+      NotificationCenter.default.removeObserver(backgroundLoopObserver)
+    }
+    backgroundPlayer?.pause()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -329,7 +333,7 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
 
   private func buildWindow() {
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
+      contentRect: NSRect(x: 0, y: 0, width: 900, height: 520),
       styleMask: [.titled, .closable, .miniaturizable],
       backing: .buffered,
       defer: false
@@ -340,78 +344,69 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
 
     let content = NSView()
     content.wantsLayer = true
-    content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    content.layer?.backgroundColor = NSColor.black.cgColor
     window.contentView = content
+    addVideoBackground(to: content)
 
-    let root = NSStackView()
-    root.orientation = .vertical
-    root.alignment = .leading
-    root.spacing = 18
-    root.translatesAutoresizingMaskIntoConstraints = false
-    content.addSubview(root)
-
-    let title = label("Setup Nutshell Permissions", size: 24, weight: .semibold)
+    let title = label("Setup Nutshell Permissions", size: 22, weight: .semibold)
+    title.textColor = .white
     let intro = wrappingLabel(
       "Nutshell needs Full Disk Access before the background helper can read protected local data like Podcasts and browser-owned files."
     )
+    intro.textColor = NSColor.white.withAlphaComponent(0.84)
 
-    root.addArrangedSubview(title)
-    root.addArrangedSubview(intro)
-    root.addArrangedSubview(statusBox())
-    root.addArrangedSubview(dragBox())
-    root.addArrangedSubview(buttonRow())
+    let left = NSStackView()
+    left.orientation = .vertical
+    left.alignment = .leading
+    left.spacing = 12
+    left.translatesAutoresizingMaskIntoConstraints = false
+    left.addArrangedSubview(title)
+    left.addArrangedSubview(intro)
+    let status = statusBox()
+    left.addArrangedSubview(status)
+    left.setCustomSpacing(22, after: intro)
+
+    let right = NSStackView()
+    right.orientation = .vertical
+    right.alignment = .leading
+    right.spacing = 10
+    right.translatesAutoresizingMaskIntoConstraints = false
+    right.addArrangedSubview(dragBox())
+    right.addArrangedSubview(buttonRow())
 
     messageValue.maximumNumberOfLines = 3
     messageValue.lineBreakMode = .byWordWrapping
     messageValue.font = NSFont.systemFont(ofSize: 12)
     messageValue.textColor = .secondaryLabelColor
-    root.addArrangedSubview(messageValue)
+    right.addArrangedSubview(messageValue)
+
+    content.addSubview(left)
+    content.addSubview(right)
 
     NSLayoutConstraint.activate([
-      root.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
-      root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
-      root.topAnchor.constraint(equalTo: content.topAnchor, constant: 26),
-      root.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24),
+      left.widthAnchor.constraint(equalToConstant: 450),
+      right.widthAnchor.constraint(equalToConstant: 360),
+      left.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 36),
+      left.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -34),
+      left.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 220),
+      right.leadingAnchor.constraint(equalTo: left.trailingAnchor, constant: 26),
+      right.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
+      right.bottomAnchor.constraint(equalTo: left.bottomAnchor),
     ])
 
     self.window = window
   }
 
   private func statusBox() -> NSView {
-    let box = NSBox()
-    box.title = ""
-    box.boxType = .custom
-    box.borderType = .lineBorder
-    box.cornerRadius = 10
-    box.contentViewMargins = NSSize(width: 16, height: 14)
-
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 8
-    stack.translatesAutoresizingMaskIntoConstraints = false
-
-    stack.addArrangedSubview(statusLine("Full Disk Access", accessValue))
-    stack.addArrangedSubview(statusLine("Background helper", agentValue))
-    stack.addArrangedSubview(statusLine("Background sync", syncValue))
-
-    box.contentView?.addSubview(stack)
-    NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: box.contentView!.leadingAnchor),
-      stack.trailingAnchor.constraint(equalTo: box.contentView!.trailingAnchor),
-      stack.topAnchor.constraint(equalTo: box.contentView!.topAnchor),
-      stack.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor),
-      box.widthAnchor.constraint(equalToConstant: 564),
-    ])
-    return box
+    let row = statusLine("Full Disk Access", accessValue)
+    row.translatesAutoresizingMaskIntoConstraints = false
+    row.widthAnchor.constraint(equalToConstant: 450).isActive = true
+    return row
   }
 
   private func dragBox() -> NSView {
     let box = NSBox()
-    box.title = ""
-    box.boxType = .custom
-    box.borderType = .lineBorder
-    box.cornerRadius = 10
+    styleCard(box)
     box.contentViewMargins = NSSize(width: 16, height: 16)
 
     let stack = NSStackView()
@@ -446,7 +441,7 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
       stack.trailingAnchor.constraint(equalTo: box.contentView!.trailingAnchor),
       stack.topAnchor.constraint(equalTo: box.contentView!.topAnchor),
       stack.bottomAnchor.constraint(equalTo: box.contentView!.bottomAnchor),
-      box.widthAnchor.constraint(equalToConstant: 564),
+      box.widthAnchor.constraint(equalToConstant: 360),
     ])
     return box
   }
@@ -464,12 +459,8 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     checkButton.target = self
     checkButton.action = #selector(checkAgain)
 
-    finishButton.target = self
-    finishButton.action = #selector(finishSetup)
-    finishButton.bezelStyle = .rounded
-
-    for button in [openButton, revealButton, checkButton, finishButton] {
-      button.bezelStyle = .rounded
+    for button in [openButton, revealButton, checkButton] {
+      button.styleForVideoOverlay()
       stack.addArrangedSubview(button)
     }
     return stack
@@ -482,12 +473,12 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     row.spacing = 12
 
     let titleField = label(title, size: 12, weight: .medium)
-    titleField.textColor = .secondaryLabelColor
+    titleField.textColor = NSColor.white.withAlphaComponent(0.68)
     titleField.translatesAutoresizingMaskIntoConstraints = false
     titleField.widthAnchor.constraint(equalToConstant: 150).isActive = true
 
     value.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    value.textColor = .labelColor
+    value.textColor = .white
 
     row.addArrangedSubview(titleField)
     row.addArrangedSubview(value)
@@ -507,64 +498,76 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     refreshStatus()
   }
 
-  @objc private func finishSetup() {
-    if fullDiskAccessGranted() && agentStatusText() == "enabled" && syncEnabled() {
-      NSApplication.shared.terminate(nil)
-      return
-    }
-    do {
-      if agentStatusText() != "enabled" {
-        try registerAgent()
-      }
-      try enableSync()
-      refreshStatus()
-      showMessage("Nutshell background sync is enabled.")
-    } catch {
-      refreshStatus()
-      showMessage("\(error)", isError: true)
-    }
-  }
-
   private func refreshStatus() {
     let accessGranted = fullDiskAccessGranted()
-    let agentStatus = agentStatusText()
-    let enabled = syncEnabled()
-    let complete = accessGranted && agentStatus == "enabled" && enabled
 
     accessValue.stringValue = accessGranted ? "granted" : "not granted"
     accessValue.textColor = accessGranted ? .systemGreen : .systemRed
-    agentValue.stringValue = agentStatus
-    agentValue.textColor = agentStatus == "enabled" ? .systemGreen : .secondaryLabelColor
-    syncValue.stringValue = enabled ? "enabled" : "disabled"
-    syncValue.textColor = enabled ? .systemGreen : .secondaryLabelColor
-    openButton.isHidden = complete
-    revealButton.isHidden = complete
-    checkButton.isHidden = complete
-    finishButton.isEnabled = accessGranted
-    finishButton.title = complete ? "Finish Setup" : "Enable background sync"
+    openButton.isHidden = accessGranted
+    revealButton.isHidden = accessGranted
+    checkButton.isHidden = accessGranted
 
     if accessGranted {
-      helpTitle.stringValue = "Quit and Reopen if Prompted"
-      helpBody.stringValue = "If macOS asks, choose Quit & Reopen so the Full Disk Access grant applies to Nutshell."
+      helpTitle.stringValue = "You're good."
+      helpBody.stringValue = "You can safely close this window. Return to the terminal."
+      helpTitle.textColor = .white
+      helpBody.textColor = NSColor.white.withAlphaComponent(0.86)
+      messageValue.isHidden = true
     } else {
       helpTitle.stringValue = "Grant Nutshell Full Disk Access"
       helpBody.stringValue = "Drag the Nutshell app icon into Full Disk Access if it is missing, then turn its switch on."
+      helpTitle.textColor = .white
+      helpBody.textColor = NSColor.white.withAlphaComponent(0.78)
+      messageValue.isHidden = false
     }
 
-    if complete {
-      showMessage("Setup is complete.")
-    } else if accessGranted && agentStatus == "enabled" {
-      showMessage("Full Disk Access is granted. Finish setup to enable background sync.")
-    } else if accessGranted {
-      showMessage("Full Disk Access is granted. Finish setup to enable the background helper and sync.")
-    } else if messageValue.stringValue.isEmpty {
+    if !accessGranted && messageValue.stringValue.isEmpty {
       showMessage("Open Full Disk Access, drag Nutshell.app into the list if needed, and turn it on.")
     }
   }
 
   private func showMessage(_ text: String, isError: Bool = false) {
     messageValue.stringValue = text
-    messageValue.textColor = isError ? .systemRed : .secondaryLabelColor
+    messageValue.textColor = isError ? .systemRed : NSColor.white.withAlphaComponent(0.74)
+  }
+
+  private func addVideoBackground(to view: NSView) {
+    guard let url = Bundle.main.url(forResource: "nutshell-ascii-animation", withExtension: "mp4") else { return }
+    let player = AVPlayer(url: url)
+    player.isMuted = true
+    player.actionAtItemEnd = .none
+
+    let playerLayer = AVPlayerLayer(player: player)
+    playerLayer.videoGravity = .resizeAspectFill
+    playerLayer.frame = view.bounds
+    playerLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    view.layer?.addSublayer(playerLayer)
+
+    let overlay = CALayer()
+    overlay.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
+    overlay.frame = view.bounds
+    overlay.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    view.layer?.addSublayer(overlay)
+
+    backgroundLoopObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      player.seek(to: .zero)
+      player.play()
+    }
+    backgroundPlayer = player
+    player.play()
+  }
+
+  private func styleCard(_ box: NSBox) {
+    box.title = ""
+    box.boxType = .custom
+    box.borderType = .lineBorder
+    box.cornerRadius = 10
+    box.fillColor = NSColor.black.withAlphaComponent(0.42)
+    box.borderColor = NSColor.white.withAlphaComponent(0.28)
   }
 }
 
@@ -587,8 +590,52 @@ final class DraggableAppIconView: NSImageView, NSDraggingSource {
     beginDraggingSession(with: [draggingItem], event: event, source: self)
   }
 
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    addCursorRect(bounds, cursor: .pointingHand)
+  }
+
   func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
     .copy
+  }
+}
+
+final class PointerButton: NSButton {
+  override var intrinsicContentSize: NSSize {
+    let base = super.intrinsicContentSize
+    return NSSize(width: base.width + 26, height: max(34, base.height + 14))
+  }
+
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    addCursorRect(bounds, cursor: .pointingHand)
+  }
+
+  override func layout() {
+    super.layout()
+    layer?.cornerRadius = 8
+  }
+
+  func styleForVideoOverlay() {
+    isBordered = false
+    setButtonType(.momentaryChange)
+    font = NSFont.systemFont(ofSize: 12, weight: .medium)
+    alignment = .center
+    lineBreakMode = .byTruncatingTail
+    attributedTitle = NSAttributedString(
+      string: title,
+      attributes: [
+        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.94),
+      ]
+    )
+    wantsLayer = true
+    layer?.cornerRadius = 8
+    layer?.backgroundColor = NSColor.black.withAlphaComponent(0.36).cgColor
+    layer?.borderWidth = 1
+    layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
+    setContentHuggingPriority(.required, for: .horizontal)
+    setContentCompressionResistancePriority(.required, for: .horizontal)
   }
 }
 

@@ -44,7 +44,7 @@ async function main(argv: string[]): Promise<number> {
       json: hasFlag(args, "--json"),
       assumeYes: hasFlag(args, "--yes"),
       backgroundAgent: !hasFlag(args, "--no-background-agent"),
-      smokeSync: !hasFlag(args, "--no-smoke-sync"),
+      syncHandoff: !hasFlag(args, "--no-sync-handoff") && !hasFlag(args, "--no-smoke-sync"),
     });
     if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return exitCodeForSetup(report);

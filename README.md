@@ -58,7 +58,7 @@ nutshell doctor [plugin] [--json]
 nutshell import <plugin> <archive-path> [--dry-run] [--json]
 ```
 
-`nutshell setup` is the normal first-run path. It asks which plugins to enable, runs plugin-owned auth and permission checks, offers optional provider archive imports, enables the app-owned background agent, and runs a smoke sync.
+`nutshell setup` is the normal first-run path. It asks which plugins to enable, runs bounded plugin-owned auth and permission checks, offers optional provider archive imports, and enables the app-owned background agent. It does not run ingestion during setup; the initial data sync is handed off to the background agent or to `nutshell sync`.
 
 Hidden app/helper commands may exist inside the packaged app, but they are not the normal user workflow. There are no normal CLI commands for old-system migration, legacy status, preserved exports, waivers, canonical imports, repair plans, pending imports, or provider-internal step management.
 
@@ -78,6 +78,8 @@ Setup is TUI-first. It uses plugins to run source-specific setup:
 - Twitter/X owns browser-session verification and official X archive import support.
 
 If one selected plugin fails, setup keeps going. The failed plugin is marked `degraded`, not disabled. Disabled means the user chose not to run a plugin. Degraded means the user selected it but Nutshell cannot safely sync it yet.
+
+Core setup is only the coordinator. Plugins own their own setup checks, and core setup enforces an outer timeout around each plugin so setup cannot hang forever. Full backlog ingestion is not a setup step.
 
 Rerun setup any time:
 
@@ -162,7 +164,7 @@ It shows health, app-owned background status, lock/storage status, recent daily 
 the bundled `nutshell-core` executable. It will not sync until Full Disk Access is
 granted and `enable-sync` has created the local enable marker.
 
-`nutshell setup` handles the normal background-agent registration and enablement. The macOS permission helper window opens when a plugin or setup flow needs the user to grant app-level access. It provides a draggable app icon so the user does not have to manually hunt through `/Applications`.
+`nutshell setup` handles the normal background-agent registration and enablement from the terminal flow. The macOS permission helper window is permission-only: it opens Full Disk Access, provides a draggable app icon so the user does not have to manually hunt through `/Applications`, and tells the user to return to the terminal once access is granted.
 
 Do not use a raw shell-owned background job for production macOS protected-data sync.
 

@@ -133,7 +133,7 @@ export interface SetupReport {
     message: string;
     detail: JsonObject;
   };
-  smokeSync: {
+  syncHandoff: {
     attempted: boolean;
     ok: boolean;
     message: string;
@@ -144,6 +144,6 @@ export interface SetupReport {
 export interface SetupRequest {
   json: boolean;
   assumeYes: boolean;
-  smokeSync: boolean;
+  syncHandoff: boolean;
   backgroundAgent: boolean;
 }

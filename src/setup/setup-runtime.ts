@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { HealthFinding, JsonObject, PluginContext, SourceId } from "../core/types";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
-import { loadConfig, logPath, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
+import { loadConfig, logPath, numberAt, objectAt, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
 import { makeFinding, reportStatus as healthReportStatus } from "../health/health";
 import { appExecutable, appStatusJson, configuredAppPath, inspectNutshellApp } from "../macos/app-status";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
@@ -33,6 +33,7 @@ export interface SetupRuntimeOptions {
   ui?: SetupUI;
   host?: HostCapabilities;
   secretStore?: FileSecretStore;
+  setupPluginTimeoutMs?: number;
 }
 
 interface PendingImport {
@@ -52,6 +53,7 @@ export class SetupRuntime {
   readonly host: HostCapabilities;
   readonly logger: JsonlLogger;
   readonly secretStore: FileSecretStore;
+  readonly setupPluginTimeoutMs: number;
 
   constructor(options: SetupRuntimeOptions = {}) {
     const configPath = options.configPath ?? resolveConfigPath(options.root);
@@ -62,6 +64,7 @@ export class SetupRuntime {
     this.host = options.host ?? new DefaultHostCapabilities();
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
+    this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
   }
 
   async run(request: SetupRequest): Promise<SetupReport> {
@@ -128,11 +131,11 @@ export class SetupRuntime {
       if (!imported.ok) report.findings.push(imported.finding);
     }
 
-    const backgroundAgent = request.backgroundAgent ? await this.enableBackgroundAgent() : skippedAction("background agent disabled by request");
-    const smokeSync = request.smokeSync ? await this.runSmokeSync() : skippedAction("smoke sync disabled by request");
+    const backgroundAgent = request.backgroundAgent ? await this.enableBackgroundAgent(request) : skippedAction("background agent disabled by request");
+    const syncHandoff = request.syncHandoff ? syncHandoffAction(backgroundAgent) : skippedAction("background sync handoff disabled by request");
     const finishedAt = new Date();
     const status =
-      reports.some((item) => item.status === "degraded" || item.archiveImport === "failed") || !backgroundAgent.ok || !smokeSync.ok
+      reports.some((item) => item.status === "degraded" || item.archiveImport === "failed") || !backgroundAgent.ok || !syncHandoff.ok
         ? "warning"
         : "ok";
     const report: SetupReport = {
@@ -141,13 +144,13 @@ export class SetupRuntime {
       finishedAt,
       plugins: reports,
       backgroundAgent,
-      smokeSync,
+      syncHandoff,
     };
     this.logger.event("setup: finished", {
       status,
       plugins: reports.map((item) => ({ source: item.source, status: item.status, archiveImport: item.archiveImport })),
       backgroundAgent,
-      smokeSync,
+      syncHandoff,
     });
     await this.ui.note({ title: "Setup complete", body: setupSummaryText(report) });
     return report;
@@ -174,48 +177,83 @@ export class SetupRuntime {
     const started = new Date();
     this.logger.event("setup: plugin started", { source });
     try {
-      const summary = await pluginSummary(plugin, ctx);
-      await this.ui.note({ title: summary.title, body: summary.body });
-      const setupFindings = plugin.setup ? (await plugin.setup.run(ctx)).findings ?? [] : [];
-      const verifyFindings = plugin.setup ? await plugin.setup.verify(ctx) : await this.defaultVerify(plugin);
-      const findings = [...setupFindings, ...verifyFindings];
-      const degraded = findings.some((finding) => finding.level === "critical");
-      const status = degraded ? "degraded" : "ready";
-      const report: SetupPluginReport = {
-        source,
-        displayName: plugin.manifest.displayName,
-        status,
-        findings,
-        archiveImport: summary.archiveImport ? "skipped" : "unavailable",
-        importCommand: summary.archiveImport?.laterCommand ?? null,
-      };
+      const { report, summary } = await this.withPluginSetupDeadline(plugin, ctx, async (deadlineCtx) => {
+        const summary = await pluginSummary(plugin, deadlineCtx);
+        await this.ui.note({ title: summary.title, body: summary.body });
+        const setupFindings = plugin.setup ? (await plugin.setup.run(deadlineCtx)).findings ?? [] : [];
+        const verifyFindings = plugin.setup ? await plugin.setup.verify(deadlineCtx) : await this.defaultVerify(plugin, deadlineCtx.signal);
+        const findings = [...setupFindings, ...verifyFindings];
+        const degraded = findings.some((finding) => finding.level === "critical");
+        const status: SetupPluginReport["status"] = degraded ? "degraded" : "ready";
+        const archiveImport: SetupPluginReport["archiveImport"] = summary.archiveImport ? "skipped" : "unavailable";
+        return {
+          summary,
+          report: {
+            source,
+            displayName: plugin.manifest.displayName,
+            status,
+            findings,
+            archiveImport,
+            importCommand: summary.archiveImport?.laterCommand ?? null,
+          },
+        };
+      });
       this.logger.event("setup: plugin finished", {
         source,
-        status,
+        status: report.status,
         durationMs: Date.now() - started.getTime(),
-        findingCount: findings.length,
+        findingCount: report.findings.length,
       });
       return { report, summary };
     } catch (error) {
-      const finding = makeFinding("critical", source, "plugin_setup_failed", `${plugin.manifest.displayName} setup failed`, { error: String(error) });
+      const timedOut = error instanceof SetupPluginTimeoutError;
+      const finding = makeFinding(
+        "critical",
+        source,
+        timedOut ? "plugin_setup_timeout" : "plugin_setup_failed",
+        timedOut ? `${plugin.manifest.displayName} setup timed out` : `${plugin.manifest.displayName} setup failed`,
+        timedOut ? { timeoutMs: error.timeoutMs } : { error: String(error) },
+      );
       this.logger.error("setup: plugin failed", { source, error: String(error) });
       return {
         summary: { title: plugin.manifest.displayName, body: "Setup failed before the plugin could finish." },
         report: {
-        source,
-        displayName: plugin.manifest.displayName,
-        status: "degraded",
-        findings: [finding],
-        archiveImport: "unavailable",
-        importCommand: null,
+          source,
+          displayName: plugin.manifest.displayName,
+          status: "degraded",
+          findings: [finding],
+          archiveImport: "unavailable",
+          importCommand: null,
         },
       };
     }
   }
 
-  private async defaultVerify(plugin: TracePlugin): Promise<HealthFinding[]> {
-    const ctx = pluginRuntimeContext(this.config, plugin, this.logger, new AbortController().signal);
+  private async defaultVerify(plugin: TracePlugin, signal: AbortSignal): Promise<HealthFinding[]> {
+    const ctx = pluginRuntimeContext(this.config, plugin, this.logger, signal);
     return plugin.check(ctx);
+  }
+
+  private async withPluginSetupDeadline<T>(
+    plugin: TracePlugin,
+    ctx: PluginSetupContext,
+    run: (ctx: PluginSetupContext) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = Math.max(1, Math.trunc(this.setupPluginTimeoutMs));
+    const timeoutController = new AbortController();
+    const timeoutError = new SetupPluginTimeoutError(plugin.manifest.id, timeoutMs);
+    const timeout = setTimeout(() => timeoutController.abort(timeoutError), timeoutMs);
+    const deadlineCtx: PluginSetupContext = { ...ctx, signal: timeoutController.signal };
+    try {
+      return await Promise.race([
+        run(deadlineCtx),
+        new Promise<never>((_, reject) => {
+          timeoutController.signal.addEventListener("abort", () => reject(timeoutError), { once: true });
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private pluginSetupContext(
@@ -286,7 +324,7 @@ export class SetupRuntime {
     return output;
   }
 
-  private async enableBackgroundAgent(): Promise<SetupReport["backgroundAgent"]> {
+  private async enableBackgroundAgent(request: SetupRequest): Promise<SetupReport["backgroundAgent"]> {
     const appPath = configuredAppPath(this.config);
     const executable = appExecutable(appPath);
     if (!existsSync(executable)) return { attempted: true, ok: false, message: "Nutshell.app is not installed", detail: { appPath } };
@@ -307,6 +345,21 @@ export class SetupRuntime {
         detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
       };
     }
+    const confirmed = request.assumeYes
+      ? true
+      : await this.ui.confirm({
+          title: "Do you want to enable the background service now?",
+          body: "Nutshell can keep syncing in the background using the permissions you just granted.",
+          initialValue: true,
+        });
+    if (!confirmed) {
+      return {
+        attempted: true,
+        ok: true,
+        message: "background service left disabled by user choice",
+        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+      };
+    }
     const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
     const enable = await this.host.run({ command: executable, args: ["enable-sync"], timeoutMs: 30_000 });
     const status = await inspectNutshellApp(this.config, appPath);
@@ -319,39 +372,6 @@ export class SetupRuntime {
     };
   }
 
-  private async runSmokeSync(): Promise<SetupReport["smokeSync"]> {
-    const appPath = configuredAppPath(this.config);
-    const executable = appExecutable(appPath);
-    if (!existsSync(executable)) {
-      return {
-        attempted: true,
-        ok: false,
-        message: "Nutshell.app is not installed; app-owned smoke sync could not run",
-        detail: { appPath },
-      };
-    }
-    const status = await inspectNutshellApp(this.config, appPath);
-    if (status.fullDiskAccess !== "granted") {
-      return {
-        attempted: true,
-        ok: false,
-        message: "Full Disk Access is required before app-owned smoke sync can run",
-        detail: { status: appStatusJson(status) },
-      };
-    }
-    await this.ui.note({
-      title: "Running smoke sync",
-      body: "Nutshell is running one app-owned sync through the installed app. This proves the background identity can read protected data before setup finishes.",
-    });
-    const result = await this.host.run({ command: executable, args: ["__sync-once", "all"], timeoutMs: 150_000 });
-    return {
-      attempted: true,
-      ok: result.code === 0,
-      message: result.code === 0 ? "app-owned smoke sync ok" : "app-owned smoke sync failed",
-      detail: jsonRunResult(result),
-    };
-  }
-
   private async ensureAppPermission(
     appPath: string,
     executable: string,
@@ -361,7 +381,7 @@ export class SetupRuntime {
     await this.ui.note({
       title: "macOS permission required",
       body:
-        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, enable background sync, then close the window to continue.",
+        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, close the window, then return here to continue.",
     });
     const setup =
       process.platform === "darwin"
@@ -374,6 +394,23 @@ export class SetupRuntime {
 
 function skippedAction(message: string): SetupReport["backgroundAgent"] {
   return { attempted: false, ok: true, message, detail: {} };
+}
+
+function syncHandoffAction(backgroundAgent: SetupReport["backgroundAgent"]): SetupReport["syncHandoff"] {
+  if (backgroundAgent.message === "background service left disabled by user choice") {
+    return {
+      attempted: false,
+      ok: true,
+      message: "initial sync not scheduled; background service was not enabled",
+      detail: { reason: "background service was not enabled" },
+    };
+  }
+  return {
+    attempted: false,
+    ok: true,
+    message: "initial sync handed off to background agent",
+    detail: { reason: "setup runs bounded plugin checks only; ingestion happens after setup" },
+  };
 }
 
 function jsonRunResult(result: { code: number; stdout: string; stderr: string }): JsonObject {
@@ -417,7 +454,7 @@ function setupSummaryText(report: SetupReport): string {
     degraded.length ? `Degraded: ${degraded.join(", ")}` : "Degraded: none",
     disabled.length ? `Disabled: ${disabled.join(", ")}` : "Disabled: none",
     `Background: ${report.backgroundAgent.message}`,
-    `Smoke sync: ${report.smokeSync.message}`,
+    `Sync: ${report.syncHandoff.message}`,
   ].join("\n");
 }
 
@@ -429,4 +466,17 @@ export function exitCodeForSetup(report: SetupReport): number {
 
 export function setupStatusFromFindings(findings: HealthFinding[]): SetupReport["status"] {
   return healthReportStatus(findings);
+}
+
+function setupPluginTimeoutMs(config: TraceConfig): number {
+  return numberAt(objectAt(config.data, "runtime"), "setupPluginTimeoutMs", 5 * 60_000);
+}
+
+class SetupPluginTimeoutError extends Error {
+  constructor(
+    readonly source: SourceId,
+    readonly timeoutMs: number,
+  ) {
+    super(`${source} setup timed out after ${timeoutMs}ms`);
+  }
 }

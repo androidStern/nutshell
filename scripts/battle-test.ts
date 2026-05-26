@@ -122,8 +122,8 @@ await step("installed app helper reports its protected-access state", async () =
   return parseAppStatus(status);
 });
 
-await step("installed app owns protected smoke syncs", async () => {
-  if (process.platform !== "darwin") return skip("protected smoke sync only runs on Darwin");
+await step("installed app owns explicit protected sync commands", async () => {
+  if (process.platform !== "darwin") return skip("protected sync command only runs on Darwin");
   const product = requireInstalled();
   const env = protectedProductEnv(product);
   const status = parseAppStatus(await runText([product.appExecutable, "status"], env, 30_000));
@@ -138,9 +138,9 @@ await step("installed app owns protected smoke syncs", async () => {
   const results: Array<Record<string, unknown>> = [];
   for (const source of sources) {
     const result = await run([product.appExecutable, "__sync-once", source], env, 180_000);
-    if (result.code !== 0) throw new Error(`${source} protected smoke sync failed\n${result.stdout}${result.stderr}`);
+    if (result.code !== 0) throw new Error(`${source} protected sync command failed\n${result.stdout}${result.stderr}`);
     const sync = parseJson(result.stdout);
-    if (stringAt(sync, "status") === "critical") throw new Error(`${source} protected smoke sync returned critical`);
+    if (stringAt(sync, "status") === "critical") throw new Error(`${source} protected sync command returned critical`);
     const sourceReports = Array.isArray(sync.sources) ? sync.sources : [];
     const sourceReport = sourceReports.find((item) => objectAt(item, "").source === source || (item && typeof item === "object" && "source" in item && item.source === source));
     results.push({

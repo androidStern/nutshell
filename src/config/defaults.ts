@@ -30,6 +30,7 @@ export const DEFAULT_CONFIG: JsonObject = {
     enrichmentMaxRuntimeMs: 120_000,
     enrichmentMinDelayMs: 1_000,
     enrichmentStopOnRateLimit: true,
+    setupPluginTimeoutMs: 5 * 60 * 1000,
     diskWarningBytes: 2_000_000_000,
     diskCriticalBytes: 500_000_000,
     projectionStaleMs: 24 * 60 * 60 * 1000,

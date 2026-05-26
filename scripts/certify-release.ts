@@ -69,6 +69,9 @@ await step("release tarball contains CLI and app bundle", async () => {
     if (process.platform === "darwin" && !paths.has("Nutshell.app/Contents/Resources/Nutshell.icns")) {
       throw new Error("darwin tarball manifest is missing Nutshell.app icon");
     }
+    if (process.platform === "darwin" && !paths.has("Nutshell.app/Contents/Resources/nutshell-ascii-animation.mp4")) {
+      throw new Error("darwin tarball manifest is missing Nutshell.app setup background video");
+    }
     return { tarball, manifestPath, files: paths.size };
   });
 
@@ -86,10 +89,11 @@ await step("app-owned helper surface is present and setup uses it", async () => 
     }
   }
   const setupRuntime = readFileSync(join(repo, "src", "setup", "setup-runtime.ts"), "utf8");
-  for (const expected of ['"register-agent"', '"enable-sync"', '"__sync-once"']) {
+  for (const expected of ['"register-agent"', '"enable-sync"']) {
     if (!setupRuntime.includes(expected)) throw new Error(`setup runtime is missing app-owned command ${expected}`);
   }
-  if (/nutshell\s+sync/.test(setupRuntime)) throw new Error("setup runtime uses raw CLI sync instead of app-owned smoke sync");
+  if (setupRuntime.includes('"__sync-once"')) throw new Error("setup runtime must not run full ingestion during setup");
+  if (/nutshell\s+sync/.test(setupRuntime)) throw new Error("setup runtime must not run full ingestion during setup");
   return { appExecutable };
 });
 
