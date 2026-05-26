@@ -10,7 +10,7 @@ export function configuredAppPath(config: TraceConfig, explicit?: string): strin
   if (requested) return resolve(expandHome(requested));
   const configured = stringValue(objectAt(config.data, "app"), "path");
   const configuredPath = configured ? resolve(expandHome(configured)) : "";
-  if (configuredPath && existsSync(appExecutable(configuredPath))) return configuredPath;
+  if (configuredPath && existsSync(appExecutable(configuredPath)) && !isHomebrewCellarApp(configuredPath)) return configuredPath;
   for (const candidate of appPathCandidates()) {
     if (existsSync(join(candidate, "Contents", "MacOS", "Nutshell"))) return candidate;
   }
@@ -99,4 +99,8 @@ function normalizeAgent(value: string): AppBackgroundStatus["agent"] {
 function stringValue(value: JsonObject, key: string): string {
   const child = value[key];
   return typeof child === "string" ? child : "";
+}
+
+function isHomebrewCellarApp(path: string): boolean {
+  return /\/Cellar\/nutshell\/[^/]+\/Nutshell\.app$/.test(path);
 }

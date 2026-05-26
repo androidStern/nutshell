@@ -61,3 +61,38 @@ test("app discovery ignores stale configured paths when an installed app exists"
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("app discovery prefers the current Homebrew app over an older configured Cellar app", () => {
+  const priorHome = process.env.HOME;
+  const priorArgv = process.argv[1] ?? "";
+  const home = mkdtempSync(join(tmpdir(), "nutshell-app-homebrew-"));
+  try {
+    process.env.HOME = home;
+    const oldApp = join(home, "homebrew", "Cellar", "nutshell", "0.1.5", "Nutshell.app");
+    const currentBin = join(home, "homebrew", "Cellar", "nutshell", "0.1.7", "bin", "nutshell");
+    const currentApp = join(home, "homebrew", "Cellar", "nutshell", "0.1.7", "Nutshell.app");
+    mkdirSync(join(oldApp, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(currentApp, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(currentBin, ".."), { recursive: true });
+    writeFileSync(join(oldApp, "Contents", "MacOS", "Nutshell"), "");
+    writeFileSync(join(currentApp, "Contents", "MacOS", "Nutshell"), "");
+    process.argv[1] = currentBin;
+
+    const path = configuredAppPath({
+      root: join(home, "Nutshell"),
+      path: join(home, "nutconfig.jsonc"),
+      data: {
+        app: {
+          path: oldApp,
+        },
+      },
+    });
+
+    expect(path).toBe(currentApp);
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    process.argv[1] = priorArgv;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
