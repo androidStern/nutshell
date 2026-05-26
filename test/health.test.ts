@@ -271,6 +271,49 @@ exit 64
   }
 });
 
+test("health reports the next background sync from the agent log before any source run exists", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-scheduler-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(root, "logs"), { recursive: true });
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = "status" ]; then
+  echo "Full Disk Access: granted"
+  echo "Agent status: enabled"
+  echo "Background sync: enabled"
+  echo "Data root: ${root}"
+  exit 0
+fi
+exit 64
+`,
+      "utf8",
+    );
+    chmodSync(executable, 0o755);
+    writeFileSync(
+      join(root, "logs", "nutshell-agent.jsonl"),
+      `${JSON.stringify({ timestamp: "2026-05-26T09:01:39.709Z", level: "info", message: "sync disabled; sleeping", detail: {} })}\n`,
+    );
+    const config = loadConfig(root);
+    config.data.app = { path: appPath };
+    config.data.scheduler = { intervalSeconds: 900 };
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([]) });
+
+    const report = await runtime.health();
+
+    expect(report.scheduler.lastRunAt).toBeNull();
+    expect(report.scheduler.nextRunAt).toBe("2026-05-26T09:16:39.709Z");
+    expect(report.scheduler.source).toBe("agent_log");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("source-scoped health runs only the requested plugin probe", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-health-scope-"));
   try {

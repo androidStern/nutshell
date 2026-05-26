@@ -3,6 +3,7 @@ import Foundation
 
 let appBundleID = "com.winterfell.nutshell"
 let defaultIntervalSeconds = 900
+let disabledPollSeconds = 30
 
 struct AgentLog: Encodable {
   let timestamp: String
@@ -14,16 +15,24 @@ struct AgentLog: Encodable {
 func main() {
   writeLog("info", "agent started", [:])
   while true {
+    var sleepSeconds = intervalSeconds()
     autoreleasepool {
       if !syncEnabled() {
-        writeLog("info", "sync disabled; sleeping", [:])
+        sleepSeconds = disabledPollSeconds
+        writeLog("info", "sync disabled; waiting", [:])
       } else if !fullDiskAccessGranted() {
+        sleepSeconds = disabledPollSeconds
         writeLog("warning", "Full Disk Access is not granted; sync skipped", ["bundleId": appBundleID])
       } else {
+        sleepSeconds = intervalSeconds()
         runSync()
       }
     }
-    Thread.sleep(forTimeInterval: TimeInterval(intervalSeconds()))
+    writeLog("info", "next sync scheduled", [
+      "nextRunAt": iso(Date().addingTimeInterval(TimeInterval(sleepSeconds))),
+      "intervalSeconds": String(sleepSeconds),
+    ])
+    Thread.sleep(forTimeInterval: TimeInterval(sleepSeconds))
   }
 }
 
@@ -138,9 +147,13 @@ func writeLog(_ level: String, _ message: String, _ detail: [String: String]) {
 }
 
 func isoNow() -> String {
+  iso(Date())
+}
+
+func iso(_ date: Date) -> String {
   let formatter = ISO8601DateFormatter()
   formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  return formatter.string(from: Date())
+  return formatter.string(from: date)
 }
 
 struct ProcessResult {

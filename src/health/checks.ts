@@ -1,4 +1,4 @@
-import { existsSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TraceConfig } from "../config/config";
 import { logPath, objectAt, pluginConfig } from "../config/config";
@@ -14,6 +14,7 @@ import type {
   JsonObject,
   PluginContext,
   RecentHealthItem,
+  SchedulerHealth,
   SourceId,
 } from "../core/types";
 import { localDateKey } from "../core/time";
@@ -176,7 +177,99 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
 
   findings.push(...checkProjectionFreshness(config.root, snapshot.lastRuns, runtimeCfg));
 
-  return { status: reportStatus(findings), checkedAt, findings, backfill, app };
+  const scheduler = schedulerHealth(config, snapshot.lastRuns, app, checkedAt);
+
+  return { status: reportStatus(findings), checkedAt, findings, backfill, app, scheduler };
+}
+
+function schedulerHealth(config: TraceConfig, lastRuns: Json[], app: AppBackgroundStatus, now: Date): SchedulerHealth {
+  const intervalSeconds = numberAt(objectAt(config.data, "scheduler"), "intervalSeconds", 900);
+  const lastRunAt = latestRecentRunFinishedAt(lastRuns)?.toISOString() ?? null;
+  if (app.backgroundSync !== "enabled" || app.agent !== "enabled") {
+    return {
+      intervalSeconds,
+      lastRunAt,
+      nextRunAt: null,
+      lastAgentEventAt: null,
+      lastAgentMessage: null,
+      source: "disabled",
+    };
+  }
+
+  const event = latestAgentLogEvent(config.root);
+  const agentNext = event ? scheduledTimeFromAgentEvent(event, intervalSeconds) : null;
+  if (agentNext) {
+    return {
+      intervalSeconds,
+      lastRunAt,
+      nextRunAt: agentNext,
+      lastAgentEventAt: event!.timestamp,
+      lastAgentMessage: event!.message,
+      source: "agent_log",
+    };
+  }
+
+  if (lastRunAt) {
+    return {
+      intervalSeconds,
+      lastRunAt,
+      nextRunAt: new Date(Date.parse(lastRunAt) + intervalSeconds * 1000).toISOString(),
+      lastAgentEventAt: event?.timestamp ?? null,
+      lastAgentMessage: event?.message ?? null,
+      source: "last_run",
+    };
+  }
+
+  return {
+    intervalSeconds,
+    lastRunAt,
+    nextRunAt: now.toISOString(),
+    lastAgentEventAt: event?.timestamp ?? null,
+    lastAgentMessage: event?.message ?? null,
+    source: "first_run_due",
+  };
+}
+
+interface AgentLogEvent {
+  timestamp: string;
+  message: string;
+  detail: JsonObject;
+}
+
+function latestAgentLogEvent(root: string): AgentLogEvent | null {
+  const path = join(root, "logs", "nutshell-agent.jsonl");
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").trim().split("\n").reverse();
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as JsonObject;
+      const timestamp = typeof event.timestamp === "string" ? event.timestamp : "";
+      const message = typeof event.message === "string" ? event.message : "";
+      if (!timestamp || !message) continue;
+      return { timestamp, message, detail: objectAt(event, "detail") };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function scheduledTimeFromAgentEvent(event: AgentLogEvent, intervalSeconds: number): string | null {
+  const explicit = typeof event.detail.nextRunAt === "string" ? event.detail.nextRunAt : null;
+  if (explicit && !Number.isNaN(Date.parse(explicit))) return new Date(explicit).toISOString();
+  if (Number.isNaN(Date.parse(event.timestamp))) return null;
+  const eventIntervalSeconds = numberAt(event.detail, "intervalSeconds", intervalSeconds);
+  if (
+    event.message === "next sync scheduled" ||
+    event.message === "sync disabled; sleeping" ||
+    event.message === "sync disabled; waiting" ||
+    event.message === "Full Disk Access is not granted; sync skipped" ||
+    event.message === "sync finished"
+  ) {
+    return new Date(Date.parse(event.timestamp) + eventIntervalSeconds * 1000).toISOString();
+  }
+  return null;
 }
 
 function appFindings(app: AppBackgroundStatus): HealthFinding[] {

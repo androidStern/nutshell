@@ -360,8 +360,8 @@ export class SetupRuntime {
         detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
       };
     }
-    const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
     const enable = await this.host.run({ command: executable, args: ["enable-sync"], timeoutMs: 30_000 });
+    const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
     const status = await inspectNutshellApp(this.config, appPath);
     const ok = register.code === 0 && enable.code === 0;
     return {

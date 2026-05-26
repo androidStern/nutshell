@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config/config";
@@ -24,6 +24,48 @@ test("dashboard status API uses app-owned health and config model", async () => 
     expect(json.health).toBeTruthy();
     expect(json.app).toBeTruthy();
     expect(json).not.toHaveProperty("launchd");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dashboard status API exposes the next scheduled background sync before the first source run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-scheduler-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(root, "logs"), { recursive: true });
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = "status" ]; then
+  echo "Full Disk Access: granted"
+  echo "Agent status: enabled"
+  echo "Background sync: enabled"
+  echo "Data root: ${root}"
+  exit 0
+fi
+exit 64
+`,
+      "utf8",
+    );
+    chmodSync(executable, 0o755);
+    writeFileSync(
+      join(root, "logs", "nutshell-agent.jsonl"),
+      `${JSON.stringify({ timestamp: "2026-05-26T09:01:39.709Z", level: "info", message: "sync disabled; sleeping", detail: {} })}\n`,
+    );
+    const runtime = runtimeFor(root);
+    runtime.config.data.app = { path: appPath };
+    runtime.config.data.scheduler = { intervalSeconds: 900 };
+
+    const response = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/status"));
+    const json = (await response.json()) as { scheduler: { lastRunAt: string | null; nextRunAt: string | null; source: string } };
+
+    expect(json.scheduler.lastRunAt).toBeNull();
+    expect(json.scheduler.nextRunAt).toBe("2026-05-26T09:16:39.709Z");
+    expect(json.scheduler.source).toBe("agent_log");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

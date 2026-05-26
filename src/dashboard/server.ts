@@ -96,9 +96,6 @@ export async function handleDashboardRequest(runtime: TraceRuntime, request: Req
 
 async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, unknown>> {
   const health = await runtime.health();
-  const scheduler = objectAt(runtime.config.data, "scheduler");
-  const intervalSeconds = numberAt(scheduler, "intervalSeconds", 900);
-  const lastRunAt = latestRecentRun(health.backfill);
   const diskFinding = health.findings.find((finding) => finding.source === "system" && finding.code.startsWith("disk_"));
   return {
     product: CLI_NAME,
@@ -108,11 +105,7 @@ async function dashboardStatus(runtime: TraceRuntime): Promise<Record<string, un
     configPath: runtime.config.path,
     health,
     app: health.app,
-    scheduler: {
-      intervalSeconds,
-      lastRunAt,
-      nextRunAt: nextRunAt(lastRunAt, intervalSeconds),
-    },
+    scheduler: health.scheduler,
     disk: {
       status: diskFinding?.level ?? "ok",
       message: diskFinding?.message ?? "disk space ok",
@@ -768,22 +761,6 @@ function parseDateParam(value: string | null): Date | null {
   if (!value) return null;
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value) ? localDayWindow(value).start : new Date(value);
   return Number.isNaN(parsed.valueOf()) ? null : parsed;
-}
-
-function nextRunAt(lastRunAt: string | null, intervalSeconds: number): string | null {
-  if (!lastRunAt) return null;
-  const parsed = new Date(lastRunAt);
-  if (Number.isNaN(parsed.valueOf())) return null;
-  return new Date(parsed.getTime() + intervalSeconds * 1000).toISOString();
-}
-
-function latestRecentRun(backfill: Array<{ recent?: { lastRunAt: string | null } }>): string | null {
-  let latest: string | null = null;
-  for (const item of backfill) {
-    const candidate = item.recent?.lastRunAt;
-    if (candidate && (!latest || candidate > latest)) latest = candidate;
-  }
-  return latest;
 }
 
 function relativeDayLabel(date: string): string {

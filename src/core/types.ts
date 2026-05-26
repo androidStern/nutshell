@@ -142,12 +142,22 @@ export interface AppBackgroundStatus {
   raw: string;
 }
 
+export interface SchedulerHealth {
+  intervalSeconds: number;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  lastAgentEventAt: string | null;
+  lastAgentMessage: string | null;
+  source: "agent_log" | "last_run" | "first_run_due" | "disabled" | "unavailable";
+}
+
 export interface HealthReport {
   status: "ok" | "warning" | "critical";
   checkedAt: Date;
   findings: HealthFinding[];
   backfill: BackfillHealthItem[];
   app: AppBackgroundStatus;
+  scheduler: SchedulerHealth;
 }
 
 export interface SyncRunStart {

@@ -316,8 +316,8 @@ exit 64
     expect(report.syncHandoff.attempted).toBe(false);
     expect((loadConfig(root).data.app as JsonObject).path).toBe(appPath);
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
-      [executable, "register-agent"],
       [executable, "enable-sync"],
+      [executable, "register-agent"],
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -385,8 +385,8 @@ exit 0
     expect(report.syncHandoff.attempted).toBe(false);
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
       setupCommand,
-      [executable, "register-agent"],
       [executable, "enable-sync"],
+      [executable, "register-agent"],
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
