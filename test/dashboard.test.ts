@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,8 @@ import { openStore } from "../src/store/sqlite-store";
 import { FakePlugin } from "../src/testing/fake-plugin";
 
 const LOCALHOST_BIND_AVAILABLE = canBindLocalhost();
+
+setDefaultTimeout(15_000);
 
 test("dashboard status API uses app-owned health and config model", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));

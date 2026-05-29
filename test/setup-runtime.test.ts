@@ -378,7 +378,7 @@ exit 0
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
     const setupCommand =
-      process.platform === "darwin" ? ["/usr/bin/open", "-W", "-n", appPath, "--args", "setup"] : [executable, "setup"];
+      process.platform === "darwin" ? ["/usr/bin/open", "-n", appPath, "--args", "setup"] : [executable, "setup"];
 
     expect(report.backgroundAgent.ok).toBe(true);
     expect(report.syncHandoff.ok).toBe(true);

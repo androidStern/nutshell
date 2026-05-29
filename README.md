@@ -190,6 +190,32 @@ That command must verify the app-owned agent path, not an old raw shell-owned pa
 It should fail if protected sync is owned by Bun, Terminal, Codex, Homebrew
 Cellar paths, or `~/.local/bin/nutshell`.
 
+The full first-user release rehearsal is documented in
+`docs/fresh-install-release-rehearsal.md`. It uses a disposable macOS test
+environment, verifies a clean baseline with no prior Nutshell state or browser
+auth, installs from the published artifact, exercises setup and app permissions,
+imports official provider archives, runs foreground and background sync, and
+records the result with:
+
+```bash
+bun run rehearse:run -- \
+  --release-id <tag-or-artifact-id> \
+  --install-source <public-install-source> \
+  --x-archive <zip> \
+  --youtube-export <zip> \
+  --podcasts-seed <sqlite>
+```
+
+Existing rehearsal evidence must pass the aggregate report audit before it counts:
+
+```bash
+bun run rehearse:audit-report -- --report ~/fresh-install-report.json
+```
+
+Use a fresh report path per attempt. The runner refuses to append a new full
+attempt into an existing report unless `--force-new-report` is used to archive
+the previous evidence first.
+
 Two release gates still require an actual Mac session rather than a script shortcut:
 
 - Fresh macOS user: install from each supported path in a new user account, run `nutshell setup`, and verify no prior `~/nutconfig.jsonc` or `~/Nutshell/` state was required.

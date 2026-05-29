@@ -12,6 +12,7 @@ const distAppRoot = join(repo, "dist", "macos", appName);
 const installPath = "/Applications/Nutshell.app";
 const coreEntitlements = join(repo, "macos", "nutshell-core.entitlements.plist");
 const install = process.argv.includes("--install");
+const swiftTarget = process.env.NUTSHELL_SWIFT_TARGET ?? "arm64-apple-macosx14.0";
 
 await ensureCore();
 buildBundle();
@@ -68,6 +69,8 @@ async function compileSwift(): Promise<void> {
     "xcrun",
     "swiftc",
     "-O",
+    "-target",
+    swiftTarget,
     "-o",
     join(appRoot, "Contents", "MacOS", "Nutshell"),
     join(repo, "macos", "NutshellApp.swift"),
@@ -76,6 +79,8 @@ async function compileSwift(): Promise<void> {
     "xcrun",
     "swiftc",
     "-O",
+    "-target",
+    swiftTarget,
     "-o",
     join(appRoot, "Contents", "Library", "LaunchServices", "NutshellAgent"),
     join(repo, "macos", "NutshellAgent.swift"),

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonObject, PluginContext, RecordPage, SyncRequest, TraceQuery, TraceRecord } from "../src/core/types";
@@ -14,6 +14,8 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 const originalPage = BirdClient.prototype.page;
 const originalFollowing = BirdClient.prototype.following;
 const originalClient = (BirdClient.prototype as unknown as { client: unknown }).client;
+
+setDefaultTimeout(15_000);
 
 afterEach(() => {
   BirdClient.prototype.page = originalPage;

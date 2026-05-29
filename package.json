@@ -1,6 +1,6 @@
 {
   "name": "nutshell",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Local personal trace ingestion runtime for notes, media activity, podcasts, and X.",
   "type": "module",
   "bin": {
@@ -23,6 +23,16 @@
     "build:tarball": "bun run scripts/build-tarball.ts",
     "certify:release": "bun run scripts/certify-release.ts",
     "test:battle": "bun run scripts/battle-test.ts",
+    "rehearse:fresh-install": "bun run scripts/fresh-install-rehearsal.ts",
+    "rehearse:preflight-host": "bun run scripts/fresh-install-rehearsal.ts preflight-host",
+    "rehearse:run": "bun run scripts/fresh-install-rehearsal.ts run",
+    "rehearse:verify-clean": "bun run scripts/fresh-install-rehearsal.ts verify-clean",
+    "rehearse:verify-installed": "bun run scripts/fresh-install-rehearsal.ts verify-installed",
+    "rehearse:verify-unauthenticated": "bun run scripts/fresh-install-rehearsal.ts verify-unauthenticated",
+    "rehearse:verify-authenticated": "bun run scripts/fresh-install-rehearsal.ts verify-authenticated",
+    "rehearse:verify-final": "bun run scripts/fresh-install-rehearsal.ts verify-final",
+    "rehearse:audit-report": "bun run scripts/fresh-install-rehearsal.ts audit-report",
+    "rehearse:snapshot-podcasts": "bun run scripts/fresh-install-rehearsal.ts snapshot-podcasts",
     "prepack": "bun run build:compile"
   },
   "devDependencies": {

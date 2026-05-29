@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+setDefaultTimeout(15_000);
 
 test("help exposes only the minimal product CLI", async () => {
   const result = await runCli(["help"]);

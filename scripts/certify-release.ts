@@ -97,6 +97,21 @@ await step("app-owned helper surface is present and setup uses it", async () => 
   return { appExecutable };
 });
 
+await step("macOS app does not link beta-only Swift runtime libraries", async () => {
+  if (process.platform !== "darwin") return { skipped: "not darwin" };
+  const executables = [
+    join(repo, "dist", "macos", "Nutshell.app", "Contents", "MacOS", "Nutshell"),
+    join(repo, "dist", "macos", "Nutshell.app", "Contents", "Library", "LaunchServices", "NutshellAgent"),
+  ];
+  for (const executable of executables) {
+    const libraries = await runText(["otool", "-L", executable]);
+    if (libraries.includes("libswift_DarwinFoundation2.dylib")) {
+      throw new Error(`${executable} links libswift_DarwinFoundation2.dylib; build with a stable macOS Swift target`);
+    }
+  }
+  return { checked: executables };
+});
+
 await step("packaging does not start protected sync from package manager service", async () => {
   const generatedFormula = join(repo, "dist", "release", "homebrew", "nutshell.rb");
   const sources = [

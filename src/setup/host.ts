@@ -8,6 +8,8 @@ import type { HostCapabilities, HostRunResult, MacAppStatus } from "./types";
 const DEFAULT_APP = DEFAULT_APP_PATH;
 
 export class DefaultHostCapabilities implements HostCapabilities {
+  constructor(private readonly appPath: string = DEFAULT_APP) {}
+
   readonly macos =
     process.platform === "darwin"
       ? {
@@ -16,10 +18,10 @@ export class DefaultHostCapabilities implements HostCapabilities {
             await this.openUrl(target);
           },
           showNutshellPermissionWindow: async () => {
-            await this.openApp(DEFAULT_APP);
+            await this.openApp(this.appPath);
           },
           appStatus: async () => {
-            const status = await inspectNutshellApp({ root: "", path: "", data: { app: { path: DEFAULT_APP } } });
+            const status = await inspectNutshellApp({ root: "", path: "", data: { app: { path: this.appPath } } });
             return {
               installed: status.installed,
               path: status.path,

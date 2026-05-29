@@ -61,7 +61,7 @@ export class SetupRuntime {
     this.config = options.config ?? loadConfig(root, configPath);
     this.registry = options.registry ?? loadBuiltinPlugins();
     this.ui = options.ui ?? new ClackSetupUI();
-    this.host = options.host ?? new DefaultHostCapabilities();
+    this.host = options.host ?? new DefaultHostCapabilities(configuredAppPath(this.config));
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
     this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
@@ -381,15 +381,28 @@ export class SetupRuntime {
     await this.ui.note({
       title: "macOS permission required",
       body:
-        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, close the window, then return here to continue.",
+        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, then return here to continue.",
     });
-    const setup =
-      process.platform === "darwin"
-        ? await this.host.run({ command: "/usr/bin/open", args: ["-W", "-n", appPath, "--args", "setup"], timeoutMs: 15 * 60 * 1000 })
-        : await this.host.run({ command: executable, args: ["setup"], timeoutMs: 15 * 60 * 1000 });
-    status = await inspectNutshellApp(this.config, appPath);
+    const setup = process.platform === "darwin"
+      ? await this.host.run({ command: "/usr/bin/open", args: ["-n", appPath, "--args", "setup"], timeoutMs: 30_000 })
+      : await this.host.run({ command: executable, args: ["setup"], timeoutMs: 30_000 });
+    if (setup.code !== 0) {
+      status = await inspectNutshellApp(this.config, appPath);
+      return { status, setup };
+    }
+    status = await waitForFullDiskAccess(this.config, appPath, 15 * 60_000);
     return { status, setup };
   }
+}
+
+async function waitForFullDiskAccess(config: TraceConfig, appPath: string, timeoutMs: number): Promise<Awaited<ReturnType<typeof inspectNutshellApp>>> {
+  const deadline = Date.now() + timeoutMs;
+  let status = await inspectNutshellApp(config, appPath);
+  while (status.fullDiskAccess !== "granted" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    status = await inspectNutshellApp(config, appPath);
+  }
+  return status;
 }
 
 function skippedAction(message: string): SetupReport["backgroundAgent"] {

@@ -162,7 +162,12 @@ export class TwitterPlugin implements TracePlugin {
           observations.push(...result.observations);
           records.push(...result.records);
           const queued = await enqueueUnresolvedTweetTargets(ctx.records, enrichmentState(state), result.enrichmentTargets);
-          metrics[collection] = result.metrics;
+          metrics[collection] = {
+            ...result.metrics,
+            observations: result.observations.length,
+            records: result.records.length,
+            enrichmentTargets: result.enrichmentTargets.length,
+          };
           (metrics[collection] as JsonObject).enrichmentQueued = queued;
           partial = partial || result.partial;
           const recent = (state.recent ??= {});
@@ -199,7 +204,11 @@ export class TwitterPlugin implements TracePlugin {
       records,
       nextCheckpoint: state as unknown as JsonObject,
       health,
-      metrics,
+      metrics: {
+        ...metrics,
+        observations: observations.length,
+        records: records.length,
+      },
       completed: !partial && !health.some((item) => item.level === "critical"),
       partial,
     };
