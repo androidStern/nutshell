@@ -42,21 +42,16 @@ export class PodcastsPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Apple Podcasts",
       body:
-        "Nutshell reads the local Apple Podcasts library database in read-only mode. On macOS, the installed Nutshell app may need app-data access before the background agent can read it.",
+        "Nutshell reads the local Apple Podcasts library database in read-only mode. The app-owned sync verifies database access after setup so the terminal does not read protected app data.",
     }),
     run: async (ctx: PluginSetupContext) => {
-      const check = await ctx.ui.ensure({
-        title: "Verify Apple Podcasts library access",
-        body: "If macOS blocks the database, use the Nutshell permission window to grant access to the installed app, then verify again.",
-        check: () => this.setupCheck(ctx),
-        repair: async () => {
-          await ctx.host.macos?.showNutshellPermissionWindow().catch(() => undefined);
-          await ctx.host.macos?.openPrivacyPane("Full Disk Access").catch(() => undefined);
-        },
-      });
-      return { findings: setupFindingFromCheck("podcasts_setup_failed", check) };
+      ctx.logger.event("setup: podcasts access verification deferred", { source: "podcasts" });
+      return { findings: [] };
     },
-    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("podcasts_setup_verify_failed", await this.setupCheck(ctx)),
+    verify: async (ctx: PluginSetupContext) => {
+      ctx.logger.event("setup: podcasts access verification deferred", { source: "podcasts" });
+      return [];
+    },
   };
 
   async check(ctx: PluginContext) {

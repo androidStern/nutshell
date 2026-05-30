@@ -6,6 +6,10 @@ import { DEFAULT_SYNC_BUDGET } from "../src/config/defaults";
 import { loadConfig } from "../src/config/config";
 import type { Checkpoint, HealthFinding, JsonObject, PluginContext, PluginManifest, PluginSyncResult, ProviderExportImportRequest, SyncRequest } from "../src/core/types";
 import { makeFinding } from "../src/health/health";
+import { AppleNotesPlugin } from "../src/plugins/builtin/apple-notes/plugin";
+import { PodcastsPlugin } from "../src/plugins/builtin/podcasts/plugin";
+import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
+import { YouTubePlugin } from "../src/plugins/builtin/youtube/plugin";
 import type { TracePlugin } from "../src/plugins/interface";
 import { PluginRegistry } from "../src/plugins/registry";
 import { SetupRuntime } from "../src/setup/setup-runtime";
@@ -265,6 +269,30 @@ test("setup asks a plugin for its summary exactly once", async () => {
   }
 });
 
+test("setup does not probe browser or protected local sources from the CLI", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-protected-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["youtube", "podcasts", "apple_notes", "twitter"]];
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new YouTubePlugin(), new PodcastsPlugin(), new AppleNotesPlugin(), new TwitterPlugin()]),
+      ui,
+      host: new ProtectedAccessFailingHost(),
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("ok");
+    expect(report.plugins.map((plugin) => plugin.status)).toEqual(["ready", "ready", "ready", "ready"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("setup enables background sync through the installed app helper", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-app-owned-"));
   try {
@@ -513,9 +541,9 @@ class FakeHost implements HostCapabilities {
     private readonly onRun: ((run: { command: string; args: string[] }) => void) | null = null,
   ) {}
 
-  async openUrl(): Promise<void> {}
+  async openUrl(_url: string): Promise<void> {}
   async revealPath(): Promise<void> {}
-  async openApp(): Promise<void> {}
+  async openApp(_pathOrBundleId: string): Promise<void> {}
   async chooseFile(): Promise<string | null> {
     return this.file;
   }
@@ -524,6 +552,21 @@ class FakeHost implements HostCapabilities {
     this.runs.push(run);
     this.onRun?.(run);
     return { code: 0, stdout: "", stderr: "" };
+  }
+}
+
+class ProtectedAccessFailingHost extends FakeHost {
+  override async openUrl(url: string): Promise<void> {
+    throw new Error(`setup attempted to open URL during protected-source setup: ${url}`);
+  }
+  override async openApp(pathOrBundleId: string): Promise<void> {
+    throw new Error(`setup attempted to open app during protected-source setup: ${pathOrBundleId}`);
+  }
+  override async chooseFile(): Promise<string | null> {
+    throw new Error("setup attempted to choose an archive file without user confirmation");
+  }
+  override async run(input: { command: string; args: string[] }): Promise<HostRunResult> {
+    throw new Error(`setup attempted to run host command during protected-source setup: ${[input.command, ...input.args].join(" ")}`);
   }
 }
 

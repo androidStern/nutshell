@@ -62,21 +62,16 @@ export class AppleNotesPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Apple Notes",
       body:
-        "Nutshell reads current Notes.app metadata and accessible note bodies through macOS automation. Locked notes are kept as metadata-only when the body is not available.",
+        "Nutshell reads current Notes.app metadata and accessible note bodies through macOS automation. The app-owned sync verifies Notes access after setup so the terminal does not request automation access. Locked notes are kept as metadata-only when the body is not available.",
     }),
     run: async (ctx: PluginSetupContext) => {
-      const check = await ctx.ui.ensure({
-        title: "Verify Apple Notes access",
-        body: "If macOS blocks this, allow the installed Nutshell app or command to control Notes, then try the verification again.",
-        check: () => this.setupCheck(ctx),
-        repair: async () => {
-          await ctx.host.openApp("Notes").catch(() => undefined);
-          await ctx.host.macos?.openPrivacyPane("Automation").catch(() => undefined);
-        },
-      });
-      return { findings: setupFindingFromCheck("apple_notes", "apple_notes_setup_failed", check) };
+      ctx.logger.event("setup: apple notes access verification deferred", { source: "apple_notes" });
+      return { findings: [] };
     },
-    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("apple_notes", "apple_notes_setup_verify_failed", await this.setupCheck(ctx)),
+    verify: async (ctx: PluginSetupContext) => {
+      ctx.logger.event("setup: apple notes access verification deferred", { source: "apple_notes" });
+      return [];
+    },
   };
 
   async check(ctx: PluginContext) {

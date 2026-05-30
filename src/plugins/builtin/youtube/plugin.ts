@@ -43,7 +43,7 @@ export class YouTubePlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "YouTube",
       body:
-        "Nutshell uses your configured browser session for recent YouTube activity. Historical backfill is optional and uses an official Google export.",
+        "Nutshell uses your configured browser session for recent YouTube activity. The app-owned sync verifies browser access after setup so the terminal does not read browser-owned files. Historical backfill is optional and uses an official Google export.",
       archiveImport: {
         title: "Import Google YouTube export now?",
         body: "Use this only if you already have a Google Takeout or Data Portability export containing YouTube activity.",
@@ -52,19 +52,12 @@ export class YouTubePlugin implements TracePlugin {
       },
     }),
     run: async (ctx: PluginSetupContext) => {
-      const check = await ctx.ui.ensure({
-        title: "Verify YouTube browser session",
-        body: "If this fails, sign into Google in the configured browser profile and try again.",
-        check: () => this.setupCheck(ctx),
-        repair: async () => {
-          await ctx.host.openUrl("https://myactivity.google.com/myactivity?product=26");
-        },
-      });
-      return { findings: check.ok ? [] : [finding("critical", "youtube", "youtube_setup_failed", check.message, check.detail ?? {})] };
+      ctx.logger.event("setup: youtube browser verification deferred", { source: "youtube" });
+      return { findings: [] };
     },
     verify: async (ctx: PluginSetupContext) => {
-      const check = await this.setupCheck(ctx);
-      return check.ok ? [] : [finding("critical", "youtube", "youtube_setup_verify_failed", check.message, check.detail ?? {})];
+      ctx.logger.event("setup: youtube browser verification deferred", { source: "youtube" });
+      return [];
     },
   };
 

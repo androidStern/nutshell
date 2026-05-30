@@ -56,7 +56,7 @@ export class TwitterPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Twitter/X",
       body:
-        "Nutshell uses your configured browser session for recent X activity. Historical backfill is optional and uses an official X archive export.",
+        "Nutshell uses your configured browser session for recent X activity. The app-owned sync verifies browser access after setup so the terminal does not read browser-owned files. Historical backfill is optional and uses an official X archive export.",
       archiveImport: {
         title: "Import official X archive now?",
         body: "Use this only if you already have the official X archive export from x.com.",
@@ -65,17 +65,13 @@ export class TwitterPlugin implements TracePlugin {
       },
     }),
     run: async (ctx: PluginSetupContext) => {
-      const check = await ctx.ui.ensure({
-        title: "Verify X browser session",
-        body: "If this fails, sign into X in the configured browser profile and try again.",
-        check: () => this.setupCheck(ctx),
-        repair: async () => {
-          await ctx.host.openUrl("https://x.com/home");
-        },
-      });
-      return { findings: setupFindingFromCheck("twitter_setup_failed", check) };
+      ctx.logger.event("setup: twitter browser verification deferred", { source: "twitter" });
+      return { findings: [] };
     },
-    verify: async (ctx: PluginSetupContext) => setupFindingFromCheck("twitter_setup_verify_failed", await this.setupCheck(ctx)),
+    verify: async (ctx: PluginSetupContext) => {
+      ctx.logger.event("setup: twitter browser verification deferred", { source: "twitter" });
+      return [];
+    },
   };
 
   async check(ctx: PluginContext) {

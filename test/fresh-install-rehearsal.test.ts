@@ -106,6 +106,38 @@ test("clean-state verifier rejects stale Nutshell launch agent plists", async ()
   }
 });
 
+test("clean-state verifier treats missing Full Disk Access bundle as clean", async () => {
+  const home = mkdtempSync(join(tmpdir(), "nutshell-rehearsal-tcc-"));
+  try {
+    const report = await verifyCleanState({
+      paths: {
+        home,
+        configPath: join(home, "nutconfig.jsonc"),
+        root: join(home, "Nutshell"),
+        appPaths: [join(home, "Applications", "Nutshell.app")],
+        launchAgentPlist: join(home, "Library", "LaunchAgents", "com.winterfell.nutshell.agent.plist"),
+        homebrewCellarCandidates: [join(home, "Cellar", "nutshell")],
+      },
+      resetPrivacy: true,
+      cookieProbe: {
+        x: async () => ({ cookies: [], warnings: [] }),
+        google: async () => ({ cookies: [], warnings: [] }),
+      },
+      runner: async (command) =>
+        command[0] === "tccutil"
+          ? commandResult(1, "", 'tccutil: No such bundle identifier "com.winterfell.nutshell"')
+          : cleanRunner(command),
+      env: { HOME: home, PATH: "/usr/bin:/bin" },
+    });
+
+    const check = report.checks.find((item) => item.name === "Full Disk Access grant reset");
+    expect(check?.status).toBe("pass");
+    expect(check?.detail.noExistingGrant).toBe(true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("unauthenticated verifier requires source-specific auth failures", async () => {
   const report = await verifyUnauthenticatedBrowserState({
     runner: async () => commandResult(

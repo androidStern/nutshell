@@ -795,9 +795,15 @@ async function fullDiskAccessCleanCheck(resetPrivacy: boolean, runner: CommandRu
     });
   }
   const result = await runner(["tccutil", "reset", "SystemPolicyAllFiles", BUNDLE_ID], { env, timeoutMs: 30_000 });
-  return result.code === 0
-    ? pass("Full Disk Access grant reset", { bundleId: BUNDLE_ID })
-    : fail("Full Disk Access grant reset", { bundleId: BUNDLE_ID, code: result.code, stderr: result.stderr.trim() });
+  if (result.code === 0) return pass("Full Disk Access grant reset", { bundleId: BUNDLE_ID });
+  if (isMissingTccBundle(result.stderr)) {
+    return pass("Full Disk Access grant reset", { bundleId: BUNDLE_ID, noExistingGrant: true, stderr: result.stderr.trim() });
+  }
+  return fail("Full Disk Access grant reset", { bundleId: BUNDLE_ID, code: result.code, stderr: result.stderr.trim() });
+}
+
+function isMissingTccBundle(stderr: string): boolean {
+  return /No such bundle identifier/i.test(stderr);
 }
 
 async function browserSignedOutCheck(name: string, probe: Promise<{ cookies: string[]; warnings: string[] }>): Promise<RehearsalCheck> {
