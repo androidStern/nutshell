@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredAppPath, parseNutshellAppStatus } from "../src/macos/app-status";
+import { configuredAppPath, ensureStableAppPath, parseNutshellAppStatus } from "../src/macos/app-status";
 
 test("app status parser preserves app-owned permission and agent states", () => {
   const missing = parseNutshellAppStatus(
@@ -89,6 +89,37 @@ test("app discovery prefers the current Homebrew app over an older configured Ce
     });
 
     expect(path).toBe(currentApp);
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    process.argv[1] = priorArgv;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stable app installer promotes the current Homebrew app into user Applications", () => {
+  const priorHome = process.env.HOME;
+  const priorArgv = process.argv[1] ?? "";
+  const home = mkdtempSync(join(tmpdir(), "nutshell-stable-app-homebrew-"));
+  try {
+    process.env.HOME = home;
+    const currentBin = join(home, "homebrew", "Cellar", "nutshell", "0.1.8", "bin", "nutshell");
+    const currentApp = join(home, "homebrew", "Cellar", "nutshell", "0.1.8", "Nutshell.app");
+    const stableApp = join(home, "Applications", "Nutshell.app");
+    mkdirSync(join(currentApp, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(currentBin, ".."), { recursive: true });
+    writeFileSync(join(currentApp, "Contents", "MacOS", "Nutshell"), "homebrew-app");
+    process.argv[1] = currentBin;
+
+    const path = ensureStableAppPath({
+      root: join(home, "Nutshell"),
+      path: join(home, "nutconfig.jsonc"),
+      data: {},
+    });
+
+    expect(path).toBe(stableApp);
+    expect(existsSync(join(stableApp, "Contents", "MacOS", "Nutshell"))).toBe(true);
+    expect(configuredAppPath({ root: join(home, "Nutshell"), path: join(home, "nutconfig.jsonc"), data: {} })).toBe(stableApp);
   } finally {
     if (priorHome === undefined) delete process.env.HOME;
     else process.env.HOME = priorHome;

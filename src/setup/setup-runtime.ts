@@ -3,7 +3,7 @@ import type { HealthFinding, JsonObject, PluginContext, SourceId } from "../core
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
 import { loadConfig, logPath, numberAt, objectAt, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
 import { makeFinding, reportStatus as healthReportStatus } from "../health/health";
-import { appExecutable, appStatusJson, configuredAppPath, inspectNutshellApp } from "../macos/app-status";
+import { appExecutable, appStatusJson, ensureStableAppPath, inspectNutshellApp } from "../macos/app-status";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
 import type { TracePlugin } from "../plugins/interface";
 import { redactText } from "../core/redaction";
@@ -61,7 +61,7 @@ export class SetupRuntime {
     this.config = options.config ?? loadConfig(root, configPath);
     this.registry = options.registry ?? loadBuiltinPlugins();
     this.ui = options.ui ?? new ClackSetupUI();
-    this.host = options.host ?? new DefaultHostCapabilities(configuredAppPath(this.config));
+    this.host = options.host ?? new DefaultHostCapabilities(ensureStableAppPath(this.config));
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
     this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
@@ -83,7 +83,7 @@ export class SetupRuntime {
 
     const selected = await this.selectPlugins(draft);
     const selectedIds = new Set(selected.map((plugin) => plugin.manifest.id));
-    const installedAppPath = configuredAppPath(this.config);
+    const installedAppPath = ensureStableAppPath(this.config);
     if (existsSync(appExecutable(installedAppPath))) {
       const appConfig = draft.data.app && typeof draft.data.app === "object" && !Array.isArray(draft.data.app) ? (draft.data.app as JsonObject) : {};
       draft.data.app = { ...appConfig, path: installedAppPath };
@@ -325,7 +325,7 @@ export class SetupRuntime {
   }
 
   private async enableBackgroundAgent(request: SetupRequest): Promise<SetupReport["backgroundAgent"]> {
-    const appPath = configuredAppPath(this.config);
+    const appPath = ensureStableAppPath(this.config);
     const executable = appExecutable(appPath);
     if (!existsSync(executable)) return { attempted: true, ok: false, message: "Nutshell.app is not installed", detail: { appPath } };
     const permission = await this.ensureAppPermission(appPath, executable);

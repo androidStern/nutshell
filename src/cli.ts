@@ -9,7 +9,7 @@ import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
 import { runProcess } from "./runtime/process";
-import { configuredAppPath } from "./macos/app-status";
+import { configuredAppPath, ensureStableAppPath } from "./macos/app-status";
 import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sqlite-worker";
 import { serveDashboard } from "./dashboard/server";
 import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
@@ -268,7 +268,7 @@ function appCommandPath(rawPath: string | undefined, root: string, configPath: s
 
 function appBundlePath(rawPath: string | undefined, root: string, configPath: string): string {
   if (rawPath || process.env[APP_PATH_ENV]) return resolve(expandHome(rawPath || process.env[APP_PATH_ENV] || DEFAULT_APP_PATH));
-  return configuredAppPath(loadConfig(root, configPath));
+  return ensureStableAppPath(loadConfig(root, configPath));
 }
 
 function helpText(): string {
