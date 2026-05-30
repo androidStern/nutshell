@@ -95,8 +95,8 @@ The phase commands above are useful when manually debugging one part of the flow
 ```bash
 bun run rehearse:run -- \
   --reset-privacy \
-  --expected-version 0.1.10 \
-  --release-id v0.1.10 \
+  --expected-version 0.1.11 \
+  --release-id v0.1.11 \
   --install-source androidStern/nutshell/nutshell \
   --x-archive /path/to/twitter-archive.zip \
   --youtube-export /path/to/google-or-youtube-export.zip \

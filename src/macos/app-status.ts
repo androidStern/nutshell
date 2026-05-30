@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { AppBackgroundStatus, JsonObject } from "../core/types";
 import { APP_PATH_ENV, DEFAULT_APP_PATH } from "../core/product";
@@ -25,19 +25,23 @@ export function ensureStableAppPath(config: TraceConfig, explicit?: string): str
   if (requested) return resolve(expandHome(requested));
 
   const current = configuredAppPath(config);
-  if (!isHomebrewCellarApp(current)) return current;
+  const packaged = packageManagedAppPathCandidates().find((candidate) => existsSync(appExecutable(candidate)));
+  if (!isHomebrewCellarApp(current)) {
+    if (packaged && isStableAppPath(current) && packagedVersionDiffers(current, packaged)) {
+      copyAppBundle(packaged, current);
+    }
+    return current;
+  }
 
   const target = userApplicationsAppPath();
-  if (existsSync(appExecutable(target))) return target;
+  if (existsSync(appExecutable(target)) && !packagedVersionDiffers(target, current)) return target;
 
-  mkdirSync(dirname(target), { recursive: true });
-  rmSync(target, { recursive: true, force: true });
-  cpSync(current, target, { recursive: true, force: true });
+  copyAppBundle(current, target);
   return target;
 }
 
 export async function inspectNutshellApp(config: TraceConfig, explicit?: string): Promise<AppBackgroundStatus> {
-  const path = configuredAppPath(config, explicit);
+  const path = explicit ? configuredAppPath(config, explicit) : ensureStableAppPath(config);
   const executable = appExecutable(path);
   if (!existsSync(executable)) {
     return {
@@ -97,6 +101,11 @@ function stableAppPathCandidates(): string[] {
   ].filter(Boolean);
 }
 
+function isStableAppPath(path: string): boolean {
+  const normalized = resolve(expandHome(path));
+  return stableAppPathCandidates().some((candidate) => resolve(candidate) === normalized);
+}
+
 function packageManagedAppPathCandidates(): string[] {
   const executableDir = dirname(process.execPath || process.argv[1] || "");
   const scriptDir = dirname(process.argv[1] || process.execPath || "");
@@ -104,6 +113,36 @@ function packageManagedAppPathCandidates(): string[] {
     resolve(executableDir, "..", "Nutshell.app"),
     resolve(scriptDir, "..", "Nutshell.app"),
   ].filter(Boolean);
+}
+
+function packagedVersionDiffers(stablePath: string, packagedPath: string): boolean {
+  if (!existsSync(appExecutable(packagedPath))) return false;
+  if (!existsSync(appExecutable(stablePath))) return true;
+  const stableVersion = appBundleVersion(stablePath);
+  const packagedVersion = appBundleVersion(packagedPath);
+  return Boolean(packagedVersion && stableVersion !== packagedVersion);
+}
+
+function appBundleVersion(appPath: string): string | null {
+  const infoPath = join(appPath, "Contents", "Info.plist");
+  if (!existsSync(infoPath)) return null;
+  const text = readFileSync(infoPath, "utf8");
+  return (
+    valueForPlistKey(text, "CFBundleShortVersionString") ||
+    valueForPlistKey(text, "CFBundleVersion")
+  );
+}
+
+function valueForPlistKey(text: string, key: string): string | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(new RegExp(`<key>${escaped}</key>\\s*<string>([^<]+)</string>`));
+  return match?.[1]?.trim() || null;
+}
+
+function copyAppBundle(from: string, to: string): void {
+  mkdirSync(dirname(to), { recursive: true });
+  rmSync(to, { recursive: true, force: true });
+  cpSync(from, to, { recursive: true, force: true });
 }
 
 function userApplicationsAppPath(): string {

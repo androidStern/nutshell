@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configuredAppPath, ensureStableAppPath, parseNutshellAppStatus } from "../src/macos/app-status";
@@ -127,3 +127,56 @@ test("stable app installer promotes the current Homebrew app into user Applicati
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("stable app installer refreshes an older stable app from the current Homebrew app", () => {
+  const priorHome = process.env.HOME;
+  const priorArgv = process.argv[1] ?? "";
+  const home = mkdtempSync(join(tmpdir(), "nutshell-stable-app-refresh-"));
+  try {
+    process.env.HOME = home;
+    const currentBin = join(home, "homebrew", "Cellar", "nutshell", "0.1.10", "bin", "nutshell");
+    const currentApp = join(home, "homebrew", "Cellar", "nutshell", "0.1.10", "Nutshell.app");
+    const stableApp = join(home, "Applications", "Nutshell.app");
+    writeAppBundle(currentApp, "0.1.10", "new-app");
+    writeAppBundle(stableApp, "0.1.9", "old-app");
+    mkdirSync(join(currentBin, ".."), { recursive: true });
+    process.argv[1] = currentBin;
+
+    const path = ensureStableAppPath({
+      root: join(home, "Nutshell"),
+      path: join(home, "nutconfig.jsonc"),
+      data: {
+        app: {
+          path: stableApp,
+        },
+      },
+    });
+
+    expect(path).toBe(stableApp);
+    expect(readFileSync(join(stableApp, "Contents", "MacOS", "Nutshell"), "utf8")).toBe("new-app");
+    expect(readFileSync(join(stableApp, "Contents", "Info.plist"), "utf8")).toContain("<string>0.1.10</string>");
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    process.argv[1] = priorArgv;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+function writeAppBundle(path: string, version: string, executableText: string): void {
+  mkdirSync(join(path, "Contents", "MacOS"), { recursive: true });
+  writeFileSync(join(path, "Contents", "MacOS", "Nutshell"), executableText);
+  writeFileSync(
+    join(path, "Contents", "Info.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key>
+  <string>${version}</string>
+  <key>CFBundleVersion</key>
+  <string>${version}</string>
+</dict>
+</plist>
+`,
+  );
+}
