@@ -363,7 +363,7 @@ export class SetupRuntime {
     const enable = await this.host.run({ command: executable, args: ["enable-sync"], timeoutMs: 30_000 });
     const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
     const status = await inspectNutshellApp(this.config, appPath);
-    const ok = register.code === 0 && enable.code === 0;
+    const ok = register.code === 0 && enable.code === 0 && status.agent === "enabled" && status.backgroundSync === "enabled";
     return {
       attempted: true,
       ok,
@@ -410,6 +410,14 @@ function skippedAction(message: string): SetupReport["backgroundAgent"] {
 }
 
 function syncHandoffAction(backgroundAgent: SetupReport["backgroundAgent"]): SetupReport["syncHandoff"] {
+  if (!backgroundAgent.ok) {
+    return {
+      attempted: false,
+      ok: false,
+      message: "initial sync not handed off; background agent is not enabled",
+      detail: { reason: backgroundAgent.message, backgroundAgent: backgroundAgent.detail },
+    };
+  }
   if (backgroundAgent.message === "background service left disabled by user choice") {
     return {
       attempted: false,

@@ -421,6 +421,53 @@ exit 0
   }
 });
 
+test("setup refuses to claim handoff when app-owned status stays disabled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-background-fail-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+if [ "$1" = "status" ]; then
+  echo "Full Disk Access: granted"
+  echo "Agent status: notRegistered"
+  echo "Background sync: disabled"
+  echo "Data root: ${root}/Nutshell"
+  exit 0
+fi
+exit 0
+`,
+      "utf8",
+    );
+    chmodSync(executable, 0o755);
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    config.data.app = { path: appPath };
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["ready"]];
+    ui.confirms = [true];
+    const host = new FakeHost();
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new SetupPlugin("ready")]),
+      ui,
+      host,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
+
+    expect(report.status).toBe("warning");
+    expect(report.backgroundAgent.ok).toBe(false);
+    expect(report.syncHandoff.ok).toBe(false);
+    expect(report.syncHandoff.message).toContain("not handed off");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 class SetupPlugin implements TracePlugin {
   importedPath: string | null = null;
   summarizeCount = 0;
