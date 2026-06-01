@@ -12,6 +12,7 @@ import type {
   HealthScope,
   Json,
   JsonObject,
+  PluginManifest,
   PluginContext,
   RecentHealthItem,
   SchedulerHealth,
@@ -67,6 +68,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
 
   const enabledSources = registry.enabled(config).map((plugin) => plugin.manifest.id).filter((source) => !scope.source || source === scope.source);
   const latestFindingBySource = rowBySource(snapshot.latestFindings);
+  const recentRunBySource = rowBySource(snapshot.lastRuns);
   const backfill = evaluateBackfill(config, enabledSources, snapshot.recordCounts, snapshot.lastRuns, snapshot.lastBackfillRuns, snapshot.sourceStates, snapshot.latestFindings, checkedAt);
   for (const item of backfill) {
     if (item.status === "backfill_incomplete" || item.status === "backfill_partial") {
@@ -155,6 +157,11 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
       );
       continue;
     }
+    if (plugin.manifest.authKind === "local_os" && app.installed) {
+      const appOwnedFinding = localOsAppOwnedHealthFinding(plugin.manifest, recentRunBySource.get(plugin.manifest.id));
+      if (appOwnedFinding) findings.push(appOwnedFinding);
+      continue;
+    }
     const ctx: PluginContext = {
       root: config.root,
       config: pluginConfig(config, plugin.manifest.id),
@@ -180,6 +187,14 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   const scheduler = schedulerHealth(config, snapshot.lastRuns, app, checkedAt);
 
   return { status: reportStatus(findings), checkedAt, findings, backfill, app, scheduler };
+}
+
+function localOsAppOwnedHealthFinding(manifest: PluginManifest, latestRun: JsonObject | undefined): HealthFinding | null {
+  if (latestRun) return null;
+  return makeFinding("warning", manifest.id, "app_owned_sync_not_verified", `${manifest.displayName} has not been verified by an app-owned sync yet`, {
+    reason: "This source depends on macOS app permissions, so terminal health avoids probing it directly.",
+    nextAction: `${CLI_NAME} sync ${manifest.id} --mode recent --json, or wait for the app-owned background sync to run.`,
+  });
 }
 
 function schedulerHealth(config: TraceConfig, lastRuns: Json[], app: AppBackgroundStatus, now: Date): SchedulerHealth {

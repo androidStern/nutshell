@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config/config";
-import type { JsonObject, PluginSyncResult, TraceRecord } from "../src/core/types";
+import type { HealthFinding, JsonObject, PluginSyncResult, TraceRecord } from "../src/core/types";
 import { PluginRegistry } from "../src/plugins/registry";
 import { TraceRuntime } from "../src/runtime/trace-runtime";
 import { FakePlugin } from "../src/testing/fake-plugin";
@@ -350,6 +350,114 @@ test("source-scoped health runs only the requested plugin probe", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("health uses app-owned run history for local OS sources instead of terminal probes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-local-os-"));
+  try {
+    const appPath = writeHealthyApp(root);
+    const config = loadConfig(root);
+    config.data.app = { path: appPath };
+    config.data.plugins = { apple_notes: { enabled: true } };
+    const store = openStore(join(root, "trace.sqlite"));
+    const checkpoint = await store.loadCheckpoint("apple_notes");
+    await store.commitSync({
+      source: "apple_notes",
+      run: { id: "ok-notes", command: "test", mode: "recent", startedAt: new Date("2026-05-21T12:00:00Z") },
+      result: resultWithRecords("apple_notes", [record("apple_note", "note-1", "notes", "2026-05-21T12:00:00Z", "apple_notes")]),
+      expectedCheckpointVersion: checkpoint.version,
+    });
+    let checked = false;
+    const plugin = localOsPlugin("apple_notes", "Apple Notes", async () => {
+      checked = true;
+      return [
+        {
+          level: "critical",
+          source: "apple_notes",
+          code: "apple_notes_access_probe_failed",
+          message: "Terminal should not probe Notes",
+          detail: {},
+          observedAt: new Date(),
+        },
+      ];
+    });
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([plugin]) });
+
+    const report = await runtime.health();
+
+    expect(checked).toBe(false);
+    expect(report.findings.some((item) => item.code === "apple_notes_access_probe_failed")).toBe(false);
+    expect(report.findings.some((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified")).toBe(false);
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health warns when a local OS source has not yet run through the app", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-local-os-unverified-"));
+  try {
+    const appPath = writeHealthyApp(root);
+    const config = loadConfig(root);
+    config.data.app = { path: appPath };
+    config.data.plugins = { apple_notes: { enabled: true } };
+    let checked = false;
+    const plugin = localOsPlugin("apple_notes", "Apple Notes", async () => {
+      checked = true;
+      return [];
+    });
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([plugin]) });
+
+    const report = await runtime.health();
+
+    expect(checked).toBe(false);
+    const finding = report.findings.find((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified");
+    expect(finding?.level).toBe("warning");
+    expect(String((finding?.detail as JsonObject).reason)).toContain("terminal health avoids probing");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function writeHealthyApp(root: string): string {
+  const appPath = join(root, "Applications", "Nutshell.app");
+  const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+if [ "$1" = "status" ]; then
+  echo "Full Disk Access: granted"
+  echo "Agent status: enabled"
+  echo "Background sync: enabled"
+  echo "Data root: ${root}"
+  exit 0
+fi
+exit 64
+`,
+    "utf8",
+  );
+  chmodSync(executable, 0o755);
+  return appPath;
+}
+
+function localOsPlugin(id: string, displayName: string, check: () => Promise<HealthFinding[]>) {
+  return {
+    manifest: {
+      id,
+      displayName,
+      authKind: "local_os" as const,
+      collections: ["default"],
+      supportsBackfill: true,
+      defaultBudget: { maxRuntimeMs: 10_000, maxRequests: null, minDelayMs: 0, stopOnRateLimit: true },
+    },
+    check,
+    async sync() {
+      return resultWithRecords(id, []);
+    },
+  };
+}
 
 function resultWithRecords(source: string, records: TraceRecord[]): PluginSyncResult {
   return {
