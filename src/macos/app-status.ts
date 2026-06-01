@@ -1,9 +1,16 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppBackgroundStatus, JsonObject } from "../core/types";
 import { APP_PATH_ENV, DEFAULT_APP_PATH } from "../core/product";
 import { expandHome, objectAt, type TraceConfig } from "../config/config";
-import { runProcess } from "../runtime/process";
+import { runProcess, type RunProcessResult } from "../runtime/process";
+
+interface AppCommandResult {
+  code?: unknown;
+  stdout?: unknown;
+  stderr?: unknown;
+}
 
 export function configuredAppPath(config: TraceConfig, explicit?: string): string {
   const requested = explicit || process.env[APP_PATH_ENV];
@@ -55,9 +62,49 @@ export async function inspectNutshellApp(config: TraceConfig, explicit?: string)
       raw: "",
     };
   }
-  const result = await runProcess([executable, "status"], { timeoutMs: 30_000 });
+  const result = await runNutshellAppCommand(path, ["status"], 30_000);
   const raw = `${result.stdout}\n${result.stderr}`.trim();
   return parseNutshellAppStatus(raw, path, executable);
+}
+
+export async function runNutshellAppCommand(appPath: string, args: string[], timeoutMs = 30_000): Promise<RunProcessResult> {
+  const executable = appExecutable(appPath);
+  if (process.platform !== "darwin" || !existsSync(join(appPath, "Contents", "Info.plist"))) {
+    return runProcess([executable, ...args], { timeoutMs });
+  }
+
+  const tempDir = mkdtempSync(join(tmpdir(), "nutshell-app-command-"));
+  const resultPath = join(tempDir, "result.json");
+  try {
+    const launched = await runProcess([
+      "/usr/bin/open",
+      "-W",
+      "-n",
+      appPath,
+      "--args",
+      ...args,
+      "--result-file",
+      resultPath,
+    ], { timeoutMs });
+    if (launched.code !== 0 || launched.timedOut) return launched;
+    if (!existsSync(resultPath)) {
+      return {
+        code: 70,
+        stdout: launched.stdout,
+        stderr: launched.stderr || `Nutshell.app did not write command result: ${resultPath}`,
+        timedOut: false,
+      };
+    }
+    const parsed = JSON.parse(readFileSync(resultPath, "utf8")) as AppCommandResult;
+    return {
+      code: typeof parsed.code === "number" ? parsed.code : 70,
+      stdout: typeof parsed.stdout === "string" ? parsed.stdout : "",
+      stderr: typeof parsed.stderr === "string" ? parsed.stderr : "",
+      timedOut: false,
+    };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 export function parseNutshellAppStatus(raw: string, path: string, executable = appExecutable(path)): AppBackgroundStatus {

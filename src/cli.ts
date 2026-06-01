@@ -9,7 +9,7 @@ import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
 import { runProcess } from "./runtime/process";
-import { configuredAppPath, ensureStableAppPath } from "./macos/app-status";
+import { ensureStableAppPath, runNutshellAppCommand } from "./macos/app-status";
 import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sqlite-worker";
 import { serveDashboard } from "./dashboard/server";
 import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
@@ -256,7 +256,7 @@ async function runAppCommand(args: string[], root: string, configPath: string): 
   }
   const allowed = new Set(["status", "register-agent", "unregister-agent", "enable-sync", "disable-sync", "open-full-disk-access", "verify", "help"]);
   if (!allowed.has(sub)) throw new UsageError(`${CLI_NAME} app requires setup, status, register-agent, unregister-agent, enable-sync, disable-sync, open-full-disk-access, verify, or path`);
-  const result = await runProcess([appExecutable, sub === "help" ? "help" : sub], { timeoutMs: sub === "verify" ? 120_000 : 30_000 });
+  const result = await runNutshellAppCommand(appPath, [sub === "help" ? "help" : sub], sub === "verify" ? 120_000 : 30_000);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   return result.code;

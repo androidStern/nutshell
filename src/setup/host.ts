@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { expandHome } from "../config/config";
 import { DEFAULT_APP_PATH } from "../core/product";
-import { inspectNutshellApp } from "../macos/app-status";
+import { appExecutable, inspectNutshellApp, runNutshellAppCommand } from "../macos/app-status";
 import { runProcess } from "../runtime/process";
 import type { HostCapabilities, HostRunResult, MacAppStatus } from "./types";
 
@@ -65,6 +65,11 @@ export class DefaultHostCapabilities implements HostCapabilities {
   }
 
   async run(input: { command: string; args: string[]; timeoutMs?: number }): Promise<HostRunResult> {
+    const appPath = resolve(expandHome(this.appPath));
+    if (process.platform === "darwin" && input.command === appExecutable(appPath)) {
+      const result = await runNutshellAppCommand(appPath, input.args, input.timeoutMs ?? 30_000);
+      return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+    }
     return runProcess([input.command, ...input.args], { timeoutMs: input.timeoutMs ?? 30_000 });
   }
 }

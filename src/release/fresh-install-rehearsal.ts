@@ -671,7 +671,14 @@ async function commandAvailableCheck(name: string, command: string[], runner: Co
 async function vmManagerCheck(allowFallback: boolean, runner: CommandRunner, env: Record<string, string>): Promise<RehearsalCheck> {
   const tart = await runner(["sh", "-lc", "command -v tart"], { env, timeoutMs: 30_000 });
   if (tart.code === 0 && tart.stdout.trim()) return pass("disposable macOS VM manager is available", { manager: "tart", path: tart.stdout.trim() });
-  const virtualBuddy = await runner(["sh", "-lc", "test -d /Applications/VirtualBuddy.app && printf /Applications/VirtualBuddy.app || test -d \"$HOME/Applications/VirtualBuddy.app\" && printf \"$HOME/Applications/VirtualBuddy.app\""], { env, timeoutMs: 30_000 });
+  const virtualBuddy = await runner(
+    [
+      "sh",
+      "-lc",
+      'if [ -d /Applications/VirtualBuddy.app ]; then printf /Applications/VirtualBuddy.app; elif [ -d "$HOME/Applications/VirtualBuddy.app" ]; then printf "$HOME/Applications/VirtualBuddy.app"; fi',
+    ],
+    { env, timeoutMs: 30_000 },
+  );
   if (virtualBuddy.code === 0 && virtualBuddy.stdout.trim()) return pass("disposable macOS VM manager is available", { manager: "VirtualBuddy", path: virtualBuddy.stdout.trim() });
   return allowFallback
     ? skip("disposable macOS VM manager is available", { reason: "explicit_test_account_fallback_allowed" })

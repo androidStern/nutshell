@@ -31,6 +31,12 @@ struct ProcessResult {
   let output: String
 }
 
+struct AppCommandResult: Encodable {
+  let code: Int32
+  let stdout: String
+  let stderr: String
+}
+
 func usage() -> String {
   """
   Nutshell.app
@@ -51,109 +57,158 @@ func usage() -> String {
 }
 
 var retainedOnboardingDelegate: OnboardingAppDelegate?
+let appCommandResultFile = resultFilePath(from: CommandLine.arguments)
 
 func main() throws {
   guard let command = requestedCommand() else {
     runOnboardingApp()
     return
   }
+  let output: String
   switch command {
   case "help", "--help", "-h":
-    print(usage())
+    output = usage()
   case "setup", "onboard":
     runOnboardingApp()
+    return
   case "status":
-    try printStatus()
+    output = try statusText()
   case "register-agent":
-    try registerAgent()
+    output = try registerAgent()
   case "unregister-agent":
-    try unregisterAgent()
+    output = try unregisterAgent()
   case "enable-sync":
-    try enableSync()
+    output = try enableSync()
   case "disable-sync":
-    try disableSync()
+    output = try disableSync()
   case "open-full-disk-access":
-    openFullDiskAccess()
+    output = openFullDiskAccess() ? "opened Full Disk Access settings\n" : "could not open Full Disk Access settings\n"
   case "verify":
-    try verify()
+    output = try verify()
   case "__sync-once":
-    try syncOnce()
+    output = try syncOnce()
   default:
     throw AppError.unsupported("Unknown Nutshell.app command: \(command)\n\n\(usage())")
   }
+  try emit(output)
 }
 
 func requestedCommand() -> String? {
-  guard let first = CommandLine.arguments.dropFirst().first else { return nil }
+  guard let first = commandArguments().first else { return nil }
   return first.hasPrefix("-psn_") ? nil : first
 }
 
-func printStatus() throws {
-  print("App: \(Bundle.main.bundleURL.path)")
-  print("Bundle ID: \(Bundle.main.bundleIdentifier ?? "unknown")")
-  print("Agent: \(agentLabel)")
-  print("Agent status: \(agentStatusText())")
-  print("Full Disk Access: \(fullDiskAccessGranted() ? "granted" : "not granted")")
-  print("Background sync: \(syncEnabled() ? "enabled" : "disabled")")
-  print("Data root: \(dataRoot().path)")
+func commandArguments() -> [String] {
+  var output: [String] = []
+  var skipNext = false
+  for argument in CommandLine.arguments.dropFirst() {
+    if skipNext {
+      skipNext = false
+      continue
+    }
+    if argument == "--result-file" {
+      skipNext = true
+      continue
+    }
+    output.append(argument)
+  }
+  return output
 }
 
-func registerAgent() throws {
+func resultFilePath(from arguments: [String]) -> String? {
+  for (index, argument) in arguments.enumerated() where argument == "--result-file" {
+    guard index + 1 < arguments.count else { return nil }
+    return NSString(string: arguments[index + 1]).expandingTildeInPath
+  }
+  return nil
+}
+
+func emit(_ stdout: String) throws {
+  if let path = appCommandResultFile {
+    try writeCommandResult(AppCommandResult(code: 0, stdout: stdout, stderr: ""), to: path)
+    return
+  }
+  FileHandle.standardOutput.write(Data(stdout.utf8))
+}
+
+func writeCommandResult(_ result: AppCommandResult, to path: String) throws {
+  let url = URL(fileURLWithPath: path)
+  try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let data = try JSONEncoder().encode(result)
+  try data.write(to: url, options: .atomic)
+}
+
+func statusText() throws -> String {
+  [
+    "App: \(Bundle.main.bundleURL.path)",
+    "Bundle ID: \(Bundle.main.bundleIdentifier ?? "unknown")",
+    "Agent: \(agentLabel)",
+    "Agent status: \(agentStatusText())",
+    "Full Disk Access: \(fullDiskAccessGranted() ? "granted" : "not granted")",
+    "Background sync: \(syncEnabled() ? "enabled" : "disabled")",
+    "Data root: \(dataRoot().path)",
+  ].joined(separator: "\n") + "\n"
+}
+
+func registerAgent() throws -> String {
   if #available(macOS 13.0, *) {
     try SMAppService.agent(plistName: agentPlistName).register()
-    print("registered \(agentLabel)")
-    print("Agent status: \(agentStatusText())")
+    var lines = [
+      "registered \(agentLabel)",
+      "Agent status: \(agentStatusText())",
+    ]
     if !fullDiskAccessGranted() {
-      print("Full Disk Access is not granted. Run `Nutshell.app open-full-disk-access`, grant access to Nutshell.app, then run `Nutshell.app enable-sync`.")
+      lines.append("Full Disk Access is not granted. Run `Nutshell.app open-full-disk-access`, grant access to Nutshell.app, then run `Nutshell.app enable-sync`.")
     }
+    return lines.joined(separator: "\n") + "\n"
   } else {
     throw AppError.unsupported("SMAppService requires macOS 13 or newer.")
   }
 }
 
-func unregisterAgent() throws {
+func unregisterAgent() throws -> String {
   if #available(macOS 13.0, *) {
     try SMAppService.agent(plistName: agentPlistName).unregister()
     try? removeSyncMarker()
-    print("unregistered \(agentLabel)")
+    return "unregistered \(agentLabel)\n"
   } else {
     throw AppError.unsupported("SMAppService requires macOS 13 or newer.")
   }
 }
 
-func enableSync() throws {
+func enableSync() throws -> String {
   if !fullDiskAccessGranted() {
-    openFullDiskAccess()
+    _ = openFullDiskAccess()
     throw AppError.unsupported("Full Disk Access is not granted to \(productName). Grant it, then run enable-sync again.")
   }
   try FileManager.default.createDirectory(at: dataRoot(), withIntermediateDirectories: true)
   try "enabled\n".write(to: syncMarker(), atomically: true, encoding: .utf8)
-  print("background sync enabled")
+  return "background sync enabled\n"
 }
 
-func disableSync() throws {
+func disableSync() throws -> String {
   try? removeSyncMarker()
-  print("background sync disabled")
+  return "background sync disabled\n"
 }
 
-func verify() throws {
+func verify() throws -> String {
   let result = try runCore(["health", "--json"])
-  print(result.output)
   if result.code != 0 {
     throw AppError.processFailed("nutshell-core health", result.code, result.output)
   }
+  return result.output
 }
 
-func syncOnce() throws {
+func syncOnce() throws -> String {
   if !fullDiskAccessGranted() {
     throw AppError.unsupported("Full Disk Access is not granted to \(productName).")
   }
-  let source = CommandLine.arguments.dropFirst(2).first ?? "all"
+  let source = commandArguments().dropFirst().first ?? "all"
   let result = try runCore(["sync", source, "--mode", "recent", "--json"], timeoutSeconds: 120)
-  print(result.output)
   if result.code >= 2 {
     throw AppError.processFailed("nutshell-core sync \(source)", result.code, result.output)
   }
+  return result.output
 }
 
 func agentStatusText() -> String {
@@ -174,15 +229,16 @@ func agentStatusText() -> String {
   return "unsupported"
 }
 
-func openFullDiskAccess() {
+func openFullDiskAccess() -> Bool {
   let urls = [
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "x-apple.systempreferences:com.apple.preference.security",
   ]
   for value in urls {
     guard let url = URL(string: value) else { continue }
-    if NSWorkspace.shared.open(url) { return }
+    if NSWorkspace.shared.open(url) { return true }
   }
+  return false
 }
 
 func runCore(_ arguments: [String], timeoutSeconds: TimeInterval? = nil) throws -> ProcessResult {
@@ -486,7 +542,7 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc private func openAccessSettings() {
-    openFullDiskAccess()
+    _ = openFullDiskAccess()
     showMessage("System Settings is open. Add or enable Nutshell.app in Full Disk Access, then come back here. This window will notice automatically.")
   }
 
@@ -659,6 +715,11 @@ func wrappingLabel(_ text: String) -> NSTextField {
 do {
   try main()
 } catch {
-  fputs("\(error)\n", stderr)
+  let message = "\(error)\n"
+  if let path = appCommandResultFile {
+    try? writeCommandResult(AppCommandResult(code: 1, stdout: "", stderr: message), to: path)
+  } else {
+    fputs(message, stderr)
+  }
   exit(1)
 }
