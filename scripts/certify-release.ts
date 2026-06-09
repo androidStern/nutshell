@@ -26,13 +26,18 @@ await step("build, tests, macOS app, and tarball", async () => {
 
 await step("public CLI surface", async () => {
   const help = await runText(["bun", "run", "src/cli.ts", "help"]);
+  const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
+  const sourceVersion = (await runText(["bun", "run", "src/cli.ts", "--version"])).trim();
+  const compiledVersion = (await runText([join(repo, "bin", "nutshell"), "--version"])).trim();
+  if (sourceVersion !== `nutshell ${pkg.version}`) throw new Error(`source CLI version mismatch: ${sourceVersion} vs ${pkg.version}`);
+  if (compiledVersion !== `nutshell ${pkg.version}`) throw new Error(`compiled CLI version mismatch: ${compiledVersion} vs ${pkg.version}`);
   for (const expected of ["nutshell setup", "nutshell sync", "nutshell health", "nutshell dashboard", "nutshell doctor", "nutshell import"]) {
     if (!help.includes(expected)) throw new Error(`help is missing ${expected}`);
   }
   for (const word of forbiddenUserSurfaceWords()) {
     if (help.includes(word)) throw new Error(`help exposes removed user surface: ${word}`);
   }
-  return { helpLines: help.trim().split("\n").length };
+  return { helpLines: help.trim().split("\n").length, version: pkg.version };
 });
 
 await step("removed commands fail", async () => {
@@ -130,6 +135,7 @@ await step("packaging does not start protected sync from package manager service
 });
 
 await step("package tarball installs command into path", async () => {
+  const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
   const packDir = join(tmp, "pack");
   mkdirSync(packDir, { recursive: true });
   await run(["bun", "pm", "pack", "--destination", packDir]);
@@ -148,7 +154,13 @@ await step("package tarball installs command into path", async () => {
     BUN_INSTALL: bunInstall,
     PATH: `${join(bunInstall, "bin")}:${process.env.PATH ?? ""}`,
   })).trim();
-  return { command };
+  const version = (await runText(["nutshell", "--version"], {
+    HOME: home,
+    BUN_INSTALL: bunInstall,
+    PATH: `${join(bunInstall, "bin")}:${process.env.PATH ?? ""}`,
+  })).trim();
+  if (version !== `nutshell ${pkg.version}`) throw new Error(`package install version mismatch: ${version} vs ${pkg.version}`);
+  return { command, version };
 });
 
 const failed = report.filter((item) => item.status === "fail");

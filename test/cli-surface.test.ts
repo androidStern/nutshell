@@ -1,5 +1,5 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shouldUseAppHandoff } from "../src/cli";
@@ -65,6 +65,13 @@ test("version command uses the public nutshell name", async () => {
   const result = await runCli(["--version"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout.startsWith("nutshell ")).toBe(true);
+});
+
+test("version command matches package version", async () => {
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version: string };
+  const result = await runCli(["--version"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.trim()).toBe(`nutshell ${pkg.version}`);
 });
 
 test("packaged macOS protected commands hand off to Nutshell.app", () => {

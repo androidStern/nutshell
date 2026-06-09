@@ -104,6 +104,7 @@ Use this sequence before running product checks:
 - In setup, skip provider imports. The strict rehearsal proves official X and Google/YouTube imports in the dedicated import phase.
 - If setup fails only because the harness rejects valid ServiceManagement launchctl evidence, freeze that attempt as a harness failure, patch the harness, and restart from a clean clone.
 - Attempt `nutshell-strict-attempt-v0.1.14-20260609e` failed after user-completed Google/X login because Chrome Safe Storage keychain reads timed out from the product browser-auth path. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.14-tart-run-20260609e.failed-frozen.json` as a failed `0.1.14` rehearsal. The fix is not to patch that VM; publish a new artifact and start a new clean clone.
+- Attempt `nutshell-strict-attempt-v0.1.15-20260609a` failed at `published-install`: Homebrew installed formula `0.1.15`, but the installed command printed `nutshell 0.1.14` because `PRODUCT_VERSION` was still hardcoded. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.15-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Release certification now checks source, compiled, and package-installed CLI versions against `package.json`.
 
 ## Attention Triggers
 
