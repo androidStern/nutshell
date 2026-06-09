@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   auditRehearsalReport,
+  classifySourceState,
   podcastSnapshotManifestPath,
   prepareFreshInstallReportPath,
   snapshotPodcastDatabase,
+  verifyAuthenticatedBrowserState,
   verifyCleanState,
   verifyFinalReleaseState,
   verifyHostPreflight,
@@ -15,6 +17,7 @@ import {
   type CommandResult,
   type RehearsalReport,
 } from "../src/release/fresh-install-rehearsal";
+import type { HealthFinding, HealthReport, SourceId } from "../src/core/types";
 
 test("clean-state verifier fails on reused local Nutshell state", async () => {
   const home = mkdtempSync(join(tmpdir(), "nutshell-rehearsal-clean-"));
@@ -163,6 +166,87 @@ test("unauthenticated verifier requires source-specific auth failures", async ()
   expect(report.status).toBe("fail");
   expect(report.checks.find((check) => check.name === "youtube signed-out state is explicit")?.status).toBe("fail");
   expect(report.checks.find((check) => check.name === "twitter signed-out state is explicit")?.status).toBe("fail");
+});
+
+test("authenticated verifier classifies cookies plus keychain timeout as product bug", async () => {
+  const report = await verifyAuthenticatedBrowserState({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SID"], warnings: ["Chrome Safe Storage keychain read timed out"] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    runner: async (command) => {
+      const source = command.includes("youtube") ? "youtube" : "twitter";
+      return commandResult(
+        2,
+        JSON.stringify({
+          status: "critical",
+          checkedAt: "2026-05-28T00:00:00.000Z",
+          findings: [
+            {
+              level: "critical",
+              source,
+              code: source === "youtube" ? "youtube_auth_probe_failed" : "twitter_auth",
+              message: `${source} browser session check failed`,
+              detail: { error: "Chrome Safe Storage keychain read timed out" },
+              observedAt: "2026-05-28T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.contract.observedState).toBe("blocked_bug");
+  expect(report.evidence.youtubeState).toBe("blocked_bug");
+  expect(report.checks.find((check) => check.name === "Google/YouTube browser auth cookies present after login")?.detail.observedState).toBe("blocked_bug");
+});
+
+test("authenticated verifier classifies unreadable cookies plus keychain timeout as product bug", async () => {
+  const report = await verifyAuthenticatedBrowserState({
+    cookieProbe: {
+      google: async () => ({ cookies: [], warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 30000ms"] }),
+      x: async () => ({ cookies: [], warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 30000ms"] }),
+    },
+    runner: async (command) => {
+      const source = command.includes("youtube") ? "youtube" : "twitter";
+      return commandResult(
+        2,
+        JSON.stringify({
+          status: "critical",
+          checkedAt: "2026-05-28T00:00:00.000Z",
+          findings: [
+            {
+              level: "critical",
+              source,
+              code: source === "youtube" ? "youtube_auth_probe_failed" : "twitter_auth",
+              message: `${source} browser session check failed`,
+              detail: { error: "Timed out after 30000ms reading Chrome Safe Storage" },
+              observedAt: "2026-05-28T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.contract.observedState).toBe("blocked_bug");
+  expect(report.contract.blockerKind).toBe("product_bug");
+  expect(report.evidence.youtubeState).toBe("blocked_bug");
+  expect(report.evidence.twitterState).toBe("blocked_bug");
+});
+
+test("source-state classifier separates auth permission empty data and records", () => {
+  expect(classifySourceState({ health: null, source: "youtube" })).toBe("blocked_bug");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth", "sign in required")]), source: "youtube" })).toBe("needs_auth");
+  expect(classifySourceState({ health: healthReport("critical", [finding("apple_notes", "apple_notes_permission", "Not authorized to send Apple events")]), source: "apple_notes" })).toBe("needs_permission");
+  expect(classifySourceState({ health: healthReport("ok", []), source: "youtube" })).toBe("ready_empty");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: ["SID"] })).toBe("blocked_bug");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: [] })).toBe("blocked_bug");
+  expect(classifySourceState({ health: healthReport("critical", []), source: "youtube", recordCount: 1 })).toBe("ready_with_data");
 });
 
 test("podcast snapshot uses SQLite and produces a readable copy", () => {
@@ -380,6 +464,49 @@ test("aggregate report audit fails when provider import proof is incomplete", ()
   expect(report.checks.find((check) => check.name === "required check passed: youtube official provider archive imports")?.status).toBe("fail");
 });
 
+test("aggregate report audit rejects browser login before setup", () => {
+  const runs = requiredAggregateReports();
+  const setupIndex = runs.findIndex((run) => run.phase === "setup-flow");
+  const loginIndex = runs.findIndex((run) => run.phase === "browser-login-handoff");
+  if (setupIndex === -1 || loginIndex === -1) throw new Error("test fixture missing setup or login phase");
+  const [setup] = runs.splice(setupIndex, 1);
+  const adjustedLoginIndex = runs.findIndex((run) => run.phase === "browser-login-handoff");
+  runs.splice(adjustedLoginIndex + 1, 0, setup!);
+
+  const report = auditRehearsalReport({ runs });
+
+  expect(report.status).toBe("fail");
+  expect(report.checks.find((check) => check.name === "required phases appear in release-flow order")?.status).toBe("fail");
+});
+
+test("aggregate report audit rejects diagnostic actions as release proof", () => {
+  const runs = requiredAggregateReports();
+  const final = runs.find((run) => run.phase === "final-release-state");
+  if (!final) throw new Error("test fixture missing final-release-state");
+  final.contract.diagnosticAction = "Manually queried the store to prove data exists.";
+  final.contract.pass = false;
+  final.contract.blockerKind = "diagnostic_only";
+
+  const report = auditRehearsalReport({ runs });
+
+  expect(report.status).toBe("fail");
+  expect(report.checks.find((check) => check.name === "no phase uses blockers or diagnostic actions as release proof")?.status).toBe("fail");
+});
+
+test("aggregate report audit rejects skipped checks in a final report", () => {
+  const runs = requiredAggregateReports();
+  const imports = runs.find((run) => run.phase === "provider-archive-imports");
+  if (!imports) throw new Error("test fixture missing provider-archive-imports");
+  const youtubeImport = imports.checks.find((check) => check.name === "youtube official provider archive imports");
+  if (!youtubeImport) throw new Error("test fixture missing youtube import check");
+  youtubeImport.status = "skip";
+
+  const report = auditRehearsalReport({ runs });
+
+  expect(report.status).toBe("fail");
+  expect(report.checks.find((check) => check.name === "no manual skipped or failed checks are counted in final report")?.status).toBe("fail");
+});
+
 test("aggregate report audit fails when podcast seed staging proof is incomplete", () => {
   const runs = requiredAggregateReports();
   const stage = runs.find((run) => run.phase === "stage-podcast-seed");
@@ -527,16 +654,6 @@ function requiredAggregateReports(): RehearsalReport[] {
       "youtube signed-out state is explicit",
       "twitter signed-out state is explicit",
     ]),
-    fakeReport("browser-login-handoff", ["browser-login-handoff"]),
-    fakeReport("authenticated-browser-state", [
-      "youtube auth state is usable",
-      "twitter auth state is usable",
-    ]),
-    fakeReport("stage-podcast-seed", [
-      "Apple Podcasts seed exists",
-      "Apple Podcasts seed has SQLite-safe snapshot provenance",
-      "Apple Podcasts seed staged at normal plugin path",
-    ]),
     fakeReport("setup-flow", [
       "nutshell setup completes",
       "Full Disk Access is granted to Nutshell.app",
@@ -544,6 +661,18 @@ function requiredAggregateReports(): RehearsalReport[] {
       "background agent is enabled",
       "loaded background agent target is app-owned",
       "loaded background agent target is not raw CLI",
+    ]),
+    fakeReport("browser-login-handoff", ["browser-login-handoff"]),
+    fakeReport("authenticated-browser-state", [
+      "Google/YouTube browser auth cookies present after login",
+      "youtube auth state is usable",
+      "X browser auth cookies present after login",
+      "twitter auth state is usable",
+    ]),
+    fakeReport("stage-podcast-seed", [
+      "Apple Podcasts seed exists",
+      "Apple Podcasts seed has SQLite-safe snapshot provenance",
+      "Apple Podcasts seed staged at normal plugin path",
     ]),
     fakeReport("provider-archive-imports", [
       "twitter official provider archive imports",
@@ -587,8 +716,39 @@ function fakeReport(phase: string, checkNames: string[]): RehearsalReport {
     generatedAt: "2026-05-28T00:00:00.000Z",
     phase,
     status: "pass",
+    contract: {
+      userStory: "test fixture",
+      expectedState: "ready_with_data",
+      observedState: "ready_with_data",
+      source: "all",
+      pass: true,
+      blockerKind: "none",
+      diagnosticAction: null,
+    },
     checks: checkNames.map((name) => ({ name, status: "pass", detail: {} })),
     evidence: evidenceForPhase(phase),
+  };
+}
+
+function healthReport(status: HealthReport["status"], findings: HealthFinding[]): HealthReport {
+  return {
+    status,
+    findings,
+    checkedAt: new Date("2026-05-28T00:00:00.000Z"),
+    app: { installed: true, path: "/Applications/Nutshell.app", executable: "", fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled", dataRoot: null, raw: "" },
+    scheduler: { intervalSeconds: 900, lastRunAt: null, nextRunAt: null, lastAgentEventAt: null, lastAgentMessage: null, source: "unavailable" },
+    backfill: [],
+  };
+}
+
+function finding(source: SourceId, code: string, message: string): HealthFinding {
+  return {
+    level: "critical",
+    source,
+    code,
+    message,
+    detail: {},
+    observedAt: new Date("2026-05-28T00:00:00.000Z"),
   };
 }
 

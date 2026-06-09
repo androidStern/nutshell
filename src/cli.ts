@@ -9,7 +9,7 @@ import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
 import { runProcess } from "./runtime/process";
-import { ensureStableAppPath, runNutshellAppCommand } from "./macos/app-status";
+import { appExecutable, ensureStableAppPath, runNutshellAppCommand } from "./macos/app-status";
 import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sqlite-worker";
 import { serveDashboard } from "./dashboard/server";
 import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
@@ -57,7 +57,10 @@ async function main(argv: string[]): Promise<number> {
   };
   try {
     if (command === "sync") {
+      const originalArgs = [...args];
       const request = parseSync(args);
+      const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, request.budget.maxRuntimeMs + 180_000);
+      if (appExit !== null) return appExit;
       const runtime = getRuntime();
       const report = await runtime.sync(request);
       print(args, report);
@@ -65,6 +68,8 @@ async function main(argv: string[]): Promise<number> {
       return report.status === "critical" ? 2 : report.status === "warning" ? 1 : 0;
     }
     if (command === "health") {
+      const appExit = await runProtectedCommandViaApp(command, args, root, configFile, 120_000);
+      if (appExit !== null) return appExit;
       const runtime = getRuntime();
       const report = await runtime.health();
       if (hasFlag(args, "--json")) {
@@ -75,6 +80,9 @@ async function main(argv: string[]): Promise<number> {
       return exitCodeForHealth(report);
     }
     if (command === "doctor") {
+      const originalArgs = [...args];
+      const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, 120_000);
+      if (appExit !== null) return appExit;
       const source = args[0] && !args[0].startsWith("--") ? (args.shift() as SourceId) : undefined;
       const runtime = getRuntime();
       const report = await runtime.health(source ? { source } : {});
@@ -254,12 +262,36 @@ async function runAppCommand(args: string[], root: string, configPath: string): 
     if (result.stderr) process.stderr.write(result.stderr);
     return result.code;
   }
-  const allowed = new Set(["status", "register-agent", "unregister-agent", "enable-sync", "disable-sync", "open-full-disk-access", "verify", "help"]);
-  if (!allowed.has(sub)) throw new UsageError(`${CLI_NAME} app requires setup, status, register-agent, unregister-agent, enable-sync, disable-sync, open-full-disk-access, verify, or path`);
-  const result = await runNutshellAppCommand(appPath, [sub === "help" ? "help" : sub], sub === "verify" ? 120_000 : 30_000);
+  const allowed = new Set(["status", "register-agent", "unregister-agent", "enable-sync", "disable-sync", "open-full-disk-access", "verify", "health", "doctor", "sync", "help"]);
+  if (!allowed.has(sub)) throw new UsageError(`${CLI_NAME} app requires setup, status, register-agent, unregister-agent, enable-sync, disable-sync, open-full-disk-access, verify, health, doctor, sync, or path`);
+  const timeoutMs = sub === "sync" ? 10 * 60_000 : sub === "verify" || sub === "health" || sub === "doctor" ? 120_000 : 30_000;
+  const result = await runNutshellAppCommand(appPath, [sub === "help" ? "help" : sub, ...args], timeoutMs);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   return result.code;
+}
+
+async function runProtectedCommandViaApp(command: string, args: string[], root: string, configPath: string, timeoutMs: number): Promise<number | null> {
+  if (!shouldUseAppHandoff(command)) return null;
+  const appPath = ensureStableAppPath(loadConfig(root, configPath));
+  if (!existsSync(appExecutable(appPath))) return null;
+  const result = await runNutshellAppCommand(appPath, [command, ...args], timeoutMs);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  return result.code;
+}
+
+export function shouldUseAppHandoff(
+  command: string,
+  env: Record<string, string | undefined> = process.env,
+  argv1 = process.argv[1] ?? "",
+  platform = process.platform,
+): boolean {
+  if (platform !== "darwin") return false;
+  if (env.NUTSHELL_APP_BUNDLE_ID === "com.winterfell.nutshell") return false;
+  if (env.NUTSHELL_DISABLE_APP_HANDOFF === "1") return false;
+  if (!["health", "doctor", "sync"].includes(command)) return false;
+  return !/(^|[/\\])src[/\\]cli\.ts$/.test(argv1);
 }
 
 function appCommandPath(rawPath: string | undefined, root: string, configPath: string): string {

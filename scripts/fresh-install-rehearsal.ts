@@ -1,9 +1,11 @@
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   appendReport,
   auditRehearsalReportFile,
   defaultRehearsalPaths,
+  makeRehearsalReport,
   podcastSeedProvenanceCheck,
   podcastSnapshotManifestPath,
   prepareFreshInstallReportPath,
@@ -134,6 +136,7 @@ async function runFullRehearsal(argv: string[]): Promise<boolean> {
   phases.push(() => verifyInstalledProduct(options));
   phases.push(() => verifyAppDoesNotAlreadyHaveFullDiskAccess());
   phases.push(() => verifyUnauthenticatedBrowserState(options));
+  phases.push(() => runSetupFlow());
   phases.push(async () => {
     if (nonInteractive) return phaseReport("browser-login-handoff", false, { error: "manual browser login required in non-interactive mode" });
     await openBrowserUrl("https://myactivity.google.com/myactivity?product=26", options.browser?.browser);
@@ -149,7 +152,6 @@ async function runFullRehearsal(argv: string[]): Promise<boolean> {
   });
   phases.push(() => verifyAuthenticatedBrowserState(options));
   phases.push(() => stagePodcastSeed(podcastsSeed));
-  phases.push(() => runSetupFlow());
   phases.push(() => importProviderExports(xArchive, youtubeExport));
   phases.push(async () => {
     if (nonInteractive) return phaseReport("apple-notes-handoff", false, { error: "manual Apple Notes test data step required in non-interactive mode" });
@@ -208,20 +210,29 @@ function optionsFromArgs(argv: string[]): RehearsalOptions {
 
 async function localReleaseChecks(): Promise<RehearsalReport> {
   const checks: RehearsalReport["checks"] = [];
-  for (const command of [
-    ["bun", "run", "typecheck"],
-    ["bun", "test"],
-    ["bun", "run", "lint"],
-    ["bun", "run", "build:compile"],
-    ["bun", "run", "certify:release"],
-  ]) {
-    const result = await runCommand(command, { timeoutMs: 20 * 60_000 });
-    checks.push(
-      result.code === 0
-        ? { name: command.join(" "), status: "pass", detail: { code: result.code } }
-        : { name: command.join(" "), status: "fail", detail: commandDetail(result) },
-    );
-    if (result.code !== 0) break;
+  const isolatedHome = mkdtempSync(join(tmpdir(), "nutshell-local-release-checks-"));
+  const env = {
+    ...process.env,
+    HOME: isolatedHome,
+  } as Record<string, string>;
+  try {
+    for (const command of [
+      ["bun", "run", "typecheck"],
+      ["bun", "test"],
+      ["bun", "run", "lint"],
+      ["bun", "run", "build:compile"],
+      ["bun", "run", "certify:release"],
+    ]) {
+      const result = await runCommand(command, { env, timeoutMs: 20 * 60_000 });
+      checks.push(
+        result.code === 0
+          ? { name: command.join(" "), status: "pass", detail: { code: result.code, isolatedHome } }
+          : { name: command.join(" "), status: "fail", detail: { ...commandDetail(result), isolatedHome } },
+      );
+      if (result.code !== 0) break;
+    }
+  } finally {
+    rmSync(isolatedHome, { recursive: true, force: true });
   }
   return aggregateReport("local-release-checks", checks, {});
 }
@@ -325,7 +336,11 @@ async function appOwnedLaunchAgentChecks(): Promise<{ checks: RehearsalReport["c
   const result = await runCommand(["/bin/launchctl", "print", `gui/${uid}/${label}`], { timeoutMs: 30_000 });
   const raw = `${result.stdout}\n${result.stderr}`.trim();
   const targetText = raw.toLowerCase();
-  const appOwned = result.code === 0 && targetText.includes("nutshell.app/contents/library/launchservices/nutshellagent");
+  const fullAppPathTarget = targetText.includes("nutshell.app/contents/library/launchservices/nutshellagent");
+  const serviceManagementTarget =
+    targetText.includes("program identifier = contents/library/launchservices/nutshellagent") &&
+    targetText.includes("parent bundle identifier = com.winterfell.nutshell");
+  const appOwned = result.code === 0 && (fullAppPathTarget || serviceManagementTarget);
   const rawCliMarkers = [
     "/bin/zsh",
     "/bin/bash",
@@ -338,7 +353,7 @@ async function appOwnedLaunchAgentChecks(): Promise<{ checks: RehearsalReport["c
   return {
     checks: [
       appOwned
-        ? { name: "loaded background agent target is app-owned", status: "pass", detail: { label } }
+        ? { name: "loaded background agent target is app-owned", status: "pass", detail: { label, mode: fullAppPathTarget ? "bundle_path" : "service_management_parent_bundle" } }
         : { name: "loaded background agent target is app-owned", status: "fail", detail: { label, command: commandDetail(result), raw: tail(raw, 2000) } },
       rawCliMarkers.length === 0
         ? { name: "loaded background agent target is not raw CLI", status: "pass", detail: { label } }
@@ -414,13 +429,7 @@ function persistReport(argv: string[], report: RehearsalReport): void {
 }
 
 function aggregateReport(phase: string, checks: RehearsalReport["checks"], evidence: RehearsalReport["evidence"]): RehearsalReport {
-  return {
-    generatedAt: new Date().toISOString(),
-    phase,
-    status: checks.some((check) => check.status === "fail") ? "fail" : "pass",
-    checks,
-    evidence,
-  };
+  return makeRehearsalReport(phase, checks, evidence);
 }
 
 function phaseReport(phase: string, ok: boolean, detail: RehearsalReport["evidence"]): RehearsalReport {

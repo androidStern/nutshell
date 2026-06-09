@@ -2,12 +2,41 @@
 
 This rehearsal proves the released Nutshell artifact works for a real first-time user. It is not a source-tree smoke test. The supported isolation strategy is a disposable macOS VM restored from a known baseline snapshot. Tart or VirtualBuddy are acceptable VM managers. A separate macOS test account is a fallback only if the clean-state verifier passes before install.
 
+Before operating the VM, read `docs/vm-rehearsal-operations-playbook.md`. It records the current VirtualBuddy gotchas: the named clean VM can be dirty, clipboard paste into the guest may not work, shifted shell symbols can be mangled, `/Volumes/Guest` may only be the VirtualBuddy guest tools image, and enabling SSH can require guest Terminal Full Disk Access.
+
 The rehearsal has two environments:
 
 1. Host Mac: used only to build/publish releases and create private test seeds such as a safe Apple Podcasts database snapshot.
 2. Test Mac: the clean environment where the public artifact is installed and exercised through the normal user flow.
 
 Private seed files must stay outside git. Do not commit Apple Podcasts databases, X archives, Google exports, browser profiles, or rehearsal reports with private account data.
+
+## Product Contract
+
+The rehearsal validates product behavior from user-visible states, not from implementation convenience. Every phase in the machine-readable report records a product validation contract with `userStory`, `expectedState`, `observedState`, `source`, `pass`, `blockerKind`, and optional `diagnosticAction`.
+
+The allowed source states are:
+
+- `not_configured`: the user did not enable the source.
+- `needs_auth`: browser or provider login is missing.
+- `needs_permission`: macOS or app permission is missing.
+- `ready_empty`: auth and permissions work, but the provider has no data in scope.
+- `ready_with_data`: auth and permissions work, and canonical records exist.
+- `blocked_bug`: the product cannot inspect or sync a state that should be valid.
+
+A diagnostic action can explain what the agent did to understand a failure, but it cannot satisfy a release pass. Any failed, skipped, manual, warning, unknown, diagnostic-only, missing-input, or workaround-backed phase blocks the release rehearsal.
+
+Required user stories:
+
+1. A fresh user installs the published app with no old Nutshell app, config, data, agents, permissions, Google cookies, or X cookies.
+2. Before login, YouTube and X fail explicitly as `needs_auth`, not as a generic critical result, empty success, or keychain mystery.
+3. After the user signs into Google and X in the VM Chrome profile, YouTube and X doctors pass without Chrome Safe Storage or Keychain timeout warnings.
+4. If browser cookies exist but the doctor still fails, classify the result as `blocked_bug`, stop the release claim, fix the product, publish a new artifact, and rerun from clean.
+5. Before permissions, Full Disk Access and Notes automation failures are `needs_permission`; after permissions, `Nutshell.app` owns the permission and sync succeeds.
+6. Official X archive import and official Google/YouTube export import both run through public import commands and produce canonical records.
+7. Apple Podcasts uses only a SQLite-safe snapshot seed with `.snapshot.json` provenance, read through the normal plugin path.
+8. Foreground sync and one app-owned scheduled background sync produce records and scheduler timestamps.
+9. The dashboard shows nonzero records for every enabled source and final health is `ok`.
 
 ## Host Preflight
 
@@ -88,6 +117,8 @@ bun run rehearse:verify-installed -- --report ~/fresh-install-report.json --appe
 
 The installed command must be on `PATH`, the version must match the release, and health must see the installed app bundle.
 
+On macOS, the public installed commands `nutshell health`, `nutshell doctor`, and `nutshell sync` are still the user-facing commands, but protected source access must execute through `Nutshell.app` when the app is installed. Browser cookies, Chrome Safe Storage, Full Disk Access, Notes automation, Podcasts, and scheduled sync proof must not depend on Bun, Terminal, Tart exec, or a Homebrew Cellar process owning protected access. A keychain or Safe Storage timeout after visible browser login is `blocked_bug`, not `needs_auth`.
+
 ## One-Pass Rehearsal Runner
 
 The phase commands above are useful when manually debugging one part of the flow. The release gate should normally use the orchestrated runner:
@@ -106,7 +137,7 @@ bun run rehearse:run -- \
 
 `--reset-privacy` is intentionally required in the disposable test environment so the rehearsal can prove no old Full Disk Access grant is being reused. Do not run that flag on a machine whose current Nutshell install you want to preserve.
 
-The runner performs the same checks in order: local release checks, clean baseline verification, published install, installed-product verification, pre-permission Full Disk Access check, signed-out YouTube and X proof, manual browser-login handoff, authenticated proof, Apple Podcasts seed staging, normal `nutshell setup`, official archive imports, Apple Notes handoff, foreground sync, scheduled background sync, and final dashboard-backed verification.
+The runner performs the same checks in order: local release checks, clean baseline verification, published install, installed-product verification, pre-permission Full Disk Access check, signed-out YouTube and X proof, normal `nutshell setup`, manual browser-login handoff, authenticated proof, Apple Podcasts seed staging, official archive imports, Apple Notes handoff, foreground sync, scheduled background sync, and final dashboard-backed verification.
 
 The report audit requires release identity evidence. Pass `--release-id` for the release tag or artifact identifier being rehearsed. Pass `--install-source` when the public artifact source is not obvious from the install command.
 
@@ -138,11 +169,15 @@ nutshell setup
 
 Enable the plugins under test. When YouTube and Twitter need browser auth, sign into Google and X in the configured Chrome profile. When the macOS helper opens, grant Full Disk Access to `Nutshell.app`, return to the terminal, and enable the background service from the terminal prompt.
 
+If macOS shows the first-run "downloaded from the internet" prompt for Google Chrome, treat it as a user handoff. The user must click `Open`, or explicitly authorize the agent to click it, before browser-login proof can continue. Do not treat a blocked Chrome launch as an auth failure or a product sync failure.
+
 After login, verify browser auth:
 
 ```bash
 bun run rehearse:verify-authenticated -- --report ~/fresh-install-report.json --append
 ```
+
+This verifier runs the installed public doctor commands. Passing evidence requires the app-owned handoff to return usable YouTube and X doctors with no Chrome Safe Storage or Keychain timeout warnings.
 
 ## Official Archive Imports
 
@@ -164,6 +199,8 @@ nutshell sync all --json
 ```
 
 Then wait for one scheduled background sync. The final health check must show a known last sync and a known next sync.
+
+If the test VM is rebooted or powered off during the rehearsal, unlock the test user's desktop session before judging app-owned agent health. A locked macOS user session can make `gui/<uid>` launchctl and app-status probes report unknown even when the app-owned agent returns normally after login. Record both the locked-session failure and the unlocked recheck if this happens.
 
 Run the final verifier:
 

@@ -50,6 +50,9 @@ func usage() -> String {
     disable-sync            Disable background sync without unregistering the agent.
     open-full-disk-access   Open macOS Full Disk Access settings.
     verify                  Run Nutshell health through the bundled core.
+    health                  Run app-owned health through the bundled core.
+    doctor                  Run app-owned source doctor through the bundled core.
+    sync                    Run app-owned sync through the bundled core.
 
   The CLI should call this app for protected Mac access. Do not run protected sync
   from Homebrew, Bun, Terminal, or temporary build paths in production.
@@ -85,6 +88,9 @@ func main() throws {
     output = openFullDiskAccess() ? "opened Full Disk Access settings\n" : "could not open Full Disk Access settings\n"
   case "verify":
     output = try verify()
+  case "health", "doctor", "sync":
+    try emit(try runCore(commandArguments()))
+    return
   case "__sync-once":
     output = try syncOnce()
   default:
@@ -129,6 +135,15 @@ func emit(_ stdout: String) throws {
     return
   }
   FileHandle.standardOutput.write(Data(stdout.utf8))
+}
+
+func emit(_ result: ProcessResult) throws {
+  if let path = appCommandResultFile {
+    try writeCommandResult(AppCommandResult(code: result.code, stdout: result.output, stderr: ""), to: path)
+    return
+  }
+  FileHandle.standardOutput.write(Data(result.output.utf8))
+  exit(result.code)
 }
 
 func writeCommandResult(_ result: AppCommandResult, to path: String) throws {

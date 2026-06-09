@@ -8,6 +8,31 @@ import { CONFIG_ENV, ROOT_ENV } from "../core/product";
 import type { HealthReport, JsonObject, SourceId } from "../core/types";
 
 export type RehearsalStatus = "pass" | "fail" | "manual" | "skip";
+export type RehearsalSourceState =
+  | "not_configured"
+  | "needs_auth"
+  | "needs_permission"
+  | "ready_empty"
+  | "ready_with_data"
+  | "blocked_bug";
+export type RehearsalBlockerKind =
+  | "none"
+  | "auth"
+  | "permission"
+  | "missing_input"
+  | "product_bug"
+  | "release_process"
+  | "diagnostic_only";
+
+export interface RehearsalContract {
+  userStory: string;
+  expectedState: RehearsalSourceState | "clean_baseline" | "installed" | "handoff" | "complete";
+  observedState: RehearsalSourceState | "clean_baseline" | "installed" | "handoff" | "complete";
+  source: SourceId | "system" | "all" | null;
+  pass: boolean;
+  blockerKind: RehearsalBlockerKind;
+  diagnosticAction?: string | null;
+}
 
 export interface RehearsalCheck {
   name: string;
@@ -19,6 +44,7 @@ export interface RehearsalReport {
   generatedAt: string;
   phase: string;
   status: "pass" | "fail";
+  contract: RehearsalContract;
   checks: RehearsalCheck[];
   evidence: JsonObject;
 }
@@ -58,6 +84,11 @@ export interface BrowserAuthOptions {
   timeoutMs: number;
 }
 
+interface BrowserProbeResult {
+  cookies: string[];
+  warnings: string[];
+}
+
 export interface RehearsalOptions {
   paths?: Partial<RehearsalPaths>;
   browser?: Partial<BrowserAuthOptions>;
@@ -65,8 +96,8 @@ export interface RehearsalOptions {
   runner?: CommandRunner;
   resetPrivacy?: boolean;
   cookieProbe?: {
-    x?: () => Promise<{ cookies: string[]; warnings: string[] }>;
-    google?: () => Promise<{ cookies: string[]; warnings: string[] }>;
+    x?: () => Promise<BrowserProbeResult>;
+    google?: () => Promise<BrowserProbeResult>;
   };
 }
 
@@ -110,10 +141,10 @@ const REQUIRED_FULL_REHEARSAL_PHASES = [
   "installed-product",
   "pre-permission-app-state",
   "unauthenticated-browser-state",
+  "setup-flow",
   "browser-login-handoff",
   "authenticated-browser-state",
   "stage-podcast-seed",
-  "setup-flow",
   "provider-archive-imports",
   "apple-notes-handoff",
   "foreground-sync",
@@ -216,7 +247,9 @@ const REQUIRED_UNAUTHENTICATED_CHECK_NAMES = [
 ] as const;
 
 const REQUIRED_AUTHENTICATED_CHECK_NAMES = [
+  "Google/YouTube browser auth cookies present after login",
   "youtube auth state is usable",
+  "X browser auth cookies present after login",
   "twitter auth state is usable",
 ] as const;
 
@@ -311,23 +344,36 @@ export async function verifyUnauthenticatedBrowserState(options: RehearsalOption
   return reportFor("unauthenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
     twitterExitCode: twitter.result.code,
+    youtubeState: classifySourceState({ health: youtube.value, source: "youtube" }),
+    twitterState: classifySourceState({ health: twitter.value, source: "twitter" }),
   });
 }
 
 export async function verifyAuthenticatedBrowserState(options: RehearsalOptions = {}): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
+  const browser = mergeBrowser(options.browser);
+  const googleCookies = await browserProbeResult(options.cookieProbe?.google ? options.cookieProbe.google() : googleCookieProbe(browser));
+  const xCookies = await browserProbeResult(options.cookieProbe?.x ? options.cookieProbe.x() : xCookieProbe(browser));
   const youtube = await runJsonCommand<HealthReport>(["nutshell", "doctor", "youtube", "--json"], runner, env, 60_000);
   const twitter = await runJsonCommand<HealthReport>(["nutshell", "doctor", "twitter", "--json"], runner, env, 60_000);
   const checks = [
+    browserCookiesPresentCheck("Google/YouTube browser auth cookies present after login", googleCookies),
     jsonCommandCheck("youtube doctor returns JSON after login", youtube),
-    noAuthFailureCheck("youtube auth state is usable", youtube.value, ["youtube_auth", "youtube_auth_probe_failed", "plugin_setup_degraded"]),
+    authenticatedSourceUsableCheck("youtube auth state is usable", youtube.value, googleCookies, "youtube", ["youtube_auth", "youtube_auth_probe_failed", "plugin_setup_degraded"]),
+    browserCookiesPresentCheck("X browser auth cookies present after login", xCookies),
     jsonCommandCheck("twitter doctor returns JSON after login", twitter),
-    noAuthFailureCheck("twitter auth state is usable", twitter.value, ["twitter_auth", "twitter_auth_probe_failed", "plugin_setup_degraded"]),
+    authenticatedSourceUsableCheck("twitter auth state is usable", twitter.value, xCookies, "twitter", ["twitter_auth", "twitter_auth_probe_failed", "plugin_setup_degraded"]),
   ];
   return reportFor("authenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
     twitterExitCode: twitter.result.code,
+    youtubeState: classifySourceState({ health: youtube.value, source: "youtube", browserCookies: googleCookies.cookies }),
+    twitterState: classifySourceState({ health: twitter.value, source: "twitter", browserCookies: xCookies.cookies }),
+    browserWarnings: {
+      google: googleCookies.warnings,
+      x: xCookies.warnings,
+    },
   });
 }
 
@@ -460,6 +506,7 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
       ? pass("no failed phases are present in final report", { phaseCount: runs.length })
       : fail("no failed phases are present in final report", { failedPhases: failedRuns.map((run) => run.phase) }),
   );
+  checks.push(...releaseContractChecks(runs));
 
   const local = runs.find((run) => run.phase === "local-release-checks");
   checks.push(...requiredChecksPassed(local, REQUIRED_LOCAL_RELEASE_CHECK_NAMES));
@@ -517,6 +564,38 @@ function requiredReleaseEvidencePassed(runs: RehearsalReport[]): RehearsalCheck[
     evidenceNestedStringCheck(final, "final report records the dashboard URL", ["dashboard", "url"]),
     evidenceObjectHasKeyCheck(final, "final report records source counts", "recordCounts"),
   ];
+}
+
+function releaseContractChecks(runs: RehearsalReport[]): RehearsalCheck[] {
+  const checks: RehearsalCheck[] = [];
+  const missingContract = runs.filter((run) => !run.contract);
+  checks.push(
+    missingContract.length
+      ? fail("every phase records a product validation contract", { phases: missingContract.map((run) => run.phase) })
+      : pass("every phase records a product validation contract", { phaseCount: runs.length }),
+  );
+  const contractFailures = runs
+    .filter((run) => run.contract)
+    .filter((run) => run.contract.pass !== true || run.contract.blockerKind !== "none" || Boolean(run.contract.diagnosticAction));
+  checks.push(
+    contractFailures.length
+      ? fail("no phase uses blockers or diagnostic actions as release proof", {
+          phases: contractFailures.map((run) => ({
+            phase: run.phase,
+            pass: run.contract.pass,
+            blockerKind: run.contract.blockerKind,
+            diagnosticAction: run.contract.diagnosticAction ?? null,
+          })),
+        })
+      : pass("no phase uses blockers or diagnostic actions as release proof", { phaseCount: runs.length }),
+  );
+  const nonPassingChecks = runs.flatMap((run) => run.checks.filter((check) => check.status !== "pass").map((check) => `${run.phase}:${check.status}:${check.name}`));
+  checks.push(
+    nonPassingChecks.length
+      ? fail("no manual skipped or failed checks are counted in final report", { checks: nonPassingChecks })
+      : pass("no manual skipped or failed checks are counted in final report", { phaseCount: runs.length }),
+  );
+  return checks;
 }
 
 function evidenceStringCheck(report: RehearsalReport | undefined, name: string, key: string): RehearsalCheck {
@@ -877,7 +956,7 @@ function authFailureCheck(name: string, health: HealthReport | null, acceptedCod
   if (!health) return fail(name, { reason: "missing_health_json" });
   const codes = health.findings.map((finding) => finding.code);
   const matched = codes.filter((code) => acceptedCodes.includes(code));
-  return matched.length ? pass(name, { matched, codes }) : fail(name, { acceptedCodes, codes });
+  return matched.length ? pass(name, { matched, codes, observedState: "needs_auth" }) : fail(name, { acceptedCodes, codes, observedState: classifySourceState({ health, source: "system" }) });
 }
 
 function noAuthFailureCheck(name: string, health: HealthReport | null, authCodes: string[]): RehearsalCheck {
@@ -885,6 +964,77 @@ function noAuthFailureCheck(name: string, health: HealthReport | null, authCodes
   const codes = health.findings.map((finding) => finding.code);
   const matched = codes.filter((code) => authCodes.includes(code));
   return matched.length ? fail(name, { authCodes: matched, codes }) : pass(name, { codes });
+}
+
+async function browserProbeResult(probe: Promise<BrowserProbeResult>): Promise<BrowserProbeResult> {
+  try {
+    return await probe;
+  } catch (error) {
+    return { cookies: [], warnings: [String(error)] };
+  }
+}
+
+function browserCookiesPresentCheck(name: string, probe: BrowserProbeResult): RehearsalCheck {
+  const warningText = probe.warnings.join("\n");
+  const keychainWarnings = keychainOrSafeStorageWarnings(probe.warnings);
+  if (keychainWarnings.length) {
+    return fail(name, { cookies: probe.cookies, warnings: probe.warnings, keychainWarnings, observedState: "blocked_bug" });
+  }
+  return probe.cookies.length
+    ? pass(name, { cookies: probe.cookies, warnings: probe.warnings, observedState: "ready_with_data" })
+    : fail(name, { cookies: [], warnings: probe.warnings, warningText, observedState: "needs_auth" });
+}
+
+function authenticatedSourceUsableCheck(
+  name: string,
+  health: HealthReport | null,
+  probe: BrowserProbeResult,
+  source: SourceId,
+  authCodes: string[],
+): RehearsalCheck {
+  if (!health) return fail(name, { reason: "missing_health_json", observedState: "blocked_bug" });
+  const codes = health.findings.map((finding) => finding.code);
+  const authMatches = codes.filter((code) => authCodes.includes(code));
+  const keychainWarnings = keychainOrSafeStorageWarnings(probe.warnings.concat(findingTexts(health)));
+  const observedState = classifySourceState({ health, source, browserCookies: probe.cookies });
+  if (keychainWarnings.length) {
+    return fail(name, { codes, keychainWarnings, observedState: "blocked_bug" });
+  }
+  if (authMatches.length) {
+    return fail(name, { authCodes: authMatches, codes, observedState });
+  }
+  return health.status === "ok"
+    ? pass(name, { codes, observedState })
+    : fail(name, { codes, status: health.status, findings: health.findings as unknown as JsonObject[], observedState });
+}
+
+export function classifySourceState(input: {
+  health: HealthReport | null;
+  source: SourceId | "system";
+  browserCookies?: string[];
+  recordCount?: number;
+}): RehearsalSourceState {
+  if ((input.recordCount ?? 0) > 0) return "ready_with_data";
+  if (!input.health) return "blocked_bug";
+  const relevant = input.health.findings.filter((finding) => input.source === "system" || finding.source === input.source || finding.source === "system");
+  const text = findingTexts({ ...input.health, findings: relevant });
+  if (keychainOrSafeStorageWarnings(text).length) return "blocked_bug";
+  if (relevant.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
+    return "needs_permission";
+  }
+  if (relevant.some((finding) => /auth|cookie|signed.?out|login/i.test(`${finding.code} ${finding.message}`))) {
+    return input.browserCookies?.length ? "blocked_bug" : "needs_auth";
+  }
+  if (input.health.status === "ok") return "ready_empty";
+  return "blocked_bug";
+}
+
+function findingTexts(health: HealthReport): string[] {
+  return health.findings.map((finding) => `${finding.code}\n${finding.message}\n${JSON.stringify(finding.detail)}`);
+}
+
+function keychainOrSafeStorageWarnings(warnings: readonly string[]): string[] {
+  return warnings.filter((warning) => /keychain|safe storage|Chrome Safe Storage|decrypt|security.*find-generic-password|timeout/i.test(warning));
 }
 
 function finalHealthCheck(health: HealthReport | null): RehearsalCheck {
@@ -1115,14 +1265,92 @@ async function exited(proc: Bun.Subprocess<"ignore", "pipe", "pipe">): Promise<b
   return Promise.race([proc.exited.then(() => true), delay(0).then(() => false)]);
 }
 
-function reportFor(phase: string, checks: RehearsalCheck[], evidence: JsonObject): RehearsalReport {
+export function makeRehearsalReport(phase: string, checks: RehearsalCheck[], evidence: JsonObject): RehearsalReport {
+  const pass = !checks.some((check) => check.status === "fail");
   return {
     generatedAt: new Date().toISOString(),
     phase,
-    status: checks.some((check) => check.status === "fail") ? "fail" : "pass",
+    status: pass ? "pass" : "fail",
+    contract: contractForPhase(phase, pass, evidence),
     checks,
     evidence,
   };
+}
+
+function reportFor(phase: string, checks: RehearsalCheck[], evidence: JsonObject): RehearsalReport {
+  return makeRehearsalReport(phase, checks, evidence);
+}
+
+function contractForPhase(phase: string, phasePassed: boolean, evidence: JsonObject): RehearsalContract {
+  const expected = expectedContractForPhase(phase);
+  const diagnosticAction = typeof evidence.diagnosticAction === "string" ? evidence.diagnosticAction : null;
+  const blockerKind = phasePassed && !diagnosticAction ? "none" : blockerKindForPhase(phase, evidence, diagnosticAction);
+  return {
+    ...expected,
+    observedState: phasePassed ? expected.expectedState : observedStateForFailedPhase(phase, evidence),
+    pass: phasePassed && !diagnosticAction,
+    blockerKind,
+    diagnosticAction,
+  };
+}
+
+function expectedContractForPhase(phase: string): Omit<RehearsalContract, "observedState" | "pass" | "blockerKind" | "diagnosticAction"> {
+  switch (phase) {
+    case "clean-state":
+      return { userStory: "Fresh user starts without old Nutshell app, state, permissions, agents, or browser auth.", expectedState: "clean_baseline", source: "system" };
+    case "host-preflight":
+      return { userStory: "The host has every private input required before a strict VM rehearsal starts.", expectedState: "ready_empty", source: "system" };
+    case "published-install":
+    case "installed-product":
+      return { userStory: "Fresh user installs the public release artifact and sees the installed app/CLI.", expectedState: "installed", source: "system" };
+    case "pre-permission-app-state":
+      return { userStory: "Before permission grant, the app does not reuse stale Full Disk Access.", expectedState: "needs_permission", source: "system" };
+    case "unauthenticated-browser-state":
+      return { userStory: "Signed-out browser-backed sources fail explicitly as missing auth.", expectedState: "needs_auth", source: "all" };
+    case "browser-login-handoff":
+      return { userStory: "User signs into Google and X in the VM browser profile.", expectedState: "handoff", source: "all" };
+    case "authenticated-browser-state":
+      return { userStory: "Signed-in browser-backed sources are usable without keychain or Safe Storage failures.", expectedState: "ready_empty", source: "all" };
+    case "stage-podcast-seed":
+      return { userStory: "Apple Podcasts uses a declared SQLite-safe seed through the normal plugin path.", expectedState: "ready_empty", source: "podcasts" };
+    case "setup-flow":
+      return { userStory: "Setup grants permissions to Nutshell.app and enables app-owned background sync.", expectedState: "ready_empty", source: "system" };
+    case "provider-archive-imports":
+      return { userStory: "Official provider archives import through public import commands.", expectedState: "ready_with_data", source: "all" };
+    case "apple-notes-handoff":
+      return { userStory: "User allows Notes automation for the installed app path.", expectedState: "handoff", source: "apple_notes" };
+    case "foreground-sync":
+      return { userStory: "Foreground sync produces live records for every enabled source.", expectedState: "ready_with_data", source: "all" };
+    case "background-sync":
+      return { userStory: "The app-owned background agent runs a scheduled sync.", expectedState: "ready_with_data", source: "all" };
+    case "final-release-state":
+      return { userStory: "Final health and dashboard prove all enabled sources are healthy with real trace data.", expectedState: "ready_with_data", source: "all" };
+    case "complete":
+      return { userStory: "The aggregate audit verifies the whole release rehearsal.", expectedState: "complete", source: "all" };
+    default:
+      return { userStory: "Release rehearsal phase completes without hidden local shortcuts.", expectedState: "complete", source: "system" };
+  }
+}
+
+function observedStateForFailedPhase(phase: string, evidence: JsonObject): RehearsalContract["observedState"] {
+  if (phase.includes("auth") || phase.includes("browser")) {
+    const states = [evidence.youtubeState, evidence.twitterState].filter((value): value is RehearsalSourceState => typeof value === "string");
+    if (states.includes("blocked_bug")) return "blocked_bug";
+    if (states.includes("needs_auth")) return "needs_auth";
+  }
+  if (phase.includes("permission") || phase.includes("setup") || phase.includes("notes")) return "needs_permission";
+  if (phase.includes("import") || phase.includes("preflight")) return "blocked_bug";
+  return "blocked_bug";
+}
+
+function blockerKindForPhase(phase: string, evidence: JsonObject, diagnosticAction: string | null): RehearsalBlockerKind {
+  if (diagnosticAction) return "diagnostic_only";
+  const text = JSON.stringify(evidence);
+  if (/missing|not found|export|archive|seed/i.test(text)) return "missing_input";
+  if (/permission|Full Disk Access|automation|not authorized/i.test(text)) return "permission";
+  if (/auth|cookie|signed.?out|login/i.test(text)) return "auth";
+  if (/clean|install|release|published|Homebrew/i.test(phase + text)) return "release_process";
+  return "product_bug";
 }
 
 function delay(ms: number): Promise<void> {

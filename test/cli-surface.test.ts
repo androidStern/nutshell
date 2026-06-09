@@ -2,6 +2,7 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { shouldUseAppHandoff } from "../src/cli";
 
 setDefaultTimeout(15_000);
 
@@ -64,6 +65,16 @@ test("version command uses the public nutshell name", async () => {
   const result = await runCli(["--version"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout.startsWith("nutshell ")).toBe(true);
+});
+
+test("packaged macOS protected commands hand off to Nutshell.app", () => {
+  expect(shouldUseAppHandoff("health", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
+  expect(shouldUseAppHandoff("doctor", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
+  expect(shouldUseAppHandoff("sync", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
+  expect(shouldUseAppHandoff("import", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(false);
+  expect(shouldUseAppHandoff("doctor", { NUTSHELL_APP_BUNDLE_ID: "com.winterfell.nutshell" }, "/opt/homebrew/bin/nutshell", "darwin")).toBe(false);
+  expect(shouldUseAppHandoff("doctor", {}, "src/cli.ts", "darwin")).toBe(false);
+  expect(shouldUseAppHandoff("doctor", {}, "/opt/homebrew/bin/nutshell", "linux")).toBe(false);
 });
 
 test("subcommand help is side-effect free", async () => {
