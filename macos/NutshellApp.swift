@@ -665,13 +665,37 @@ final class DraggableAppIconView: NSImageView, NSDraggingSource {
     self.appURL = appURL
     super.init(frame: .zero)
     isEditable = false
+    addDragBadge()
   }
 
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
   }
 
+  // Persistent visual cue that the icon is draggable: a small move-arrows
+  // badge pinned to the corner, in addition to the open-hand hover cursor.
+  // Users should not have to hover to discover the affordance.
+  private func addDragBadge() {
+    let symbol = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right", accessibilityDescription: "Draggable")
+    let badge = NSImageView()
+    badge.image = symbol
+    badge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+    badge.contentTintColor = .white
+    badge.wantsLayer = true
+    badge.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+    badge.layer?.cornerRadius = 9
+    badge.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(badge)
+    NSLayoutConstraint.activate([
+      badge.widthAnchor.constraint(equalToConstant: 18),
+      badge.heightAnchor.constraint(equalToConstant: 18),
+      badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 2),
+      badge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 2),
+    ])
+  }
+
   override func mouseDown(with event: NSEvent) {
+    NSCursor.closedHand.set()
     let draggingItem = NSDraggingItem(pasteboardWriter: appURL as NSURL)
     draggingItem.setDraggingFrame(bounds, contents: image)
     beginDraggingSession(with: [draggingItem], event: event, source: self)
@@ -679,7 +703,9 @@ final class DraggableAppIconView: NSImageView, NSDraggingSource {
 
   override func resetCursorRects() {
     super.resetCursorRects()
-    addCursorRect(bounds, cursor: .pointingHand)
+    // Open-hand is the macOS-standard "grab to drag" cursor (vs pointingHand,
+    // which reads as "click").
+    addCursorRect(bounds, cursor: .openHand)
   }
 
   func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {

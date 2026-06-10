@@ -75,7 +75,7 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
 
       const steps: JourneyStep[] = [
         { waitFor: "Choose which sources", send: "enter" },
-        { waitFor: "YouTube My Activity needs attention" },
+        { waitFor: "needs login" },
         { waitFor: "What do you want to do?", send: "enter" }, // Retry (first option)
         { waitFor: "YouTube My Activity verified" },
         { waitFor: "Import Google YouTube export now?", send: "no" },
@@ -91,7 +91,9 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
       // The failure rendered honestly, with the finding's own fix text.
       expect(result.text).toContain("YouTube browser session is signed out");
       expect(result.text).toContain("Fix: Open youtube.com in Chrome and sign into your Google account, then retry.");
-      expect(result.text).toContain("Check: nutshell doctor youtube");
+      // The interactive loop intentionally omits the confirm command — Retry is
+      // the check; the command lives on doctor/health instead.
+      expect(result.text).not.toContain("Check: nutshell doctor youtube");
       expect(result.text).toContain("✓ YouTube My Activity verified");
 
       // Exactly two probes: the failing one and the retry that passed.
@@ -110,7 +112,7 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
 
       const firstRun = await journey.runSetup([
         { waitFor: "Choose which sources", send: "enter" },
-        { waitFor: "YouTube My Activity needs attention" },
+        { waitFor: "needs login" },
         { waitFor: "What do you want to do?", send: "down-enter" }, // Skip for now
         { waitFor: "Twitter/X verified" },
         { waitFor: "Import official X archive now?", send: "no" },
@@ -150,7 +152,7 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
       const secondRun = await journey.runSetup([
         { waitFor: "of 4 sources working" },
         { waitFor: "What do you want to do?", send: "enter" }, // Fix YouTube My Activity now
-        { waitFor: "YouTube My Activity needs attention" },
+        { waitFor: "needs login" },
         { waitFor: "What do you want to do?", send: "enter" }, // Retry
         { waitFor: "YouTube My Activity verified" },
         { waitFor: "Import Google YouTube export now?", send: "no" },
@@ -168,9 +170,11 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
       expect(secondRun.text).toContain("Fix YouTube My Activity now");
       expect(secondRun.text).not.toContain("Nutshell setup\n"); // intro title absent
       expect(secondRun.text).not.toContain("Choose which sources");
-      expect(secondRun.text).not.toContain("Apple Podcasts needs attention");
-      expect(secondRun.text).not.toContain("Apple Notes needs attention");
-      expect(secondRun.text).not.toContain("Twitter/X needs attention");
+      // The already-verified sources appear as verified in the re-run table and
+      // are never walked through the fix loop (probe accounting below confirms).
+      expect(secondRun.text).toContain("✓ Apple Podcasts — verified");
+      expect(secondRun.text).toContain("✓ Apple Notes — verified");
+      expect(secondRun.text).toContain("✓ Twitter/X — verified");
 
       // Probe accounting proves "resumes on that source only": every source
       // got exactly one review probe; only youtube got a setup retry probe.

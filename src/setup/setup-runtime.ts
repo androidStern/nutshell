@@ -426,9 +426,13 @@ export class SetupRuntime {
         return findings;
       }
       const lead = problems[0]!;
-      const body = [lead.message];
-      if (lead.guidance) body.push("", `Fix: ${lead.guidance.fix}`, `Check: ${lead.guidance.confirm}`);
-      await this.ui.note({ title: `${plugin.manifest.displayName} needs attention`, body: body.join("\n") });
+      // Title names the state ("not signed in" / "needs permission" / …) so the
+      // user knows what kind of problem this is at a glance. Body is the
+      // problem in plain words, then the one action. The confirm command is
+      // omitted here — Retry below IS the check; the command belongs on the
+      // non-interactive surfaces (doctor/health) instead.
+      const body = lead.guidance ? `${lead.message}\n\nFix: ${lead.guidance.fix}` : lead.message;
+      await this.ui.note({ title: `${plugin.manifest.displayName} — ${stateWord([lead])}`, body });
 
       type Choice = "open" | "retry" | "skip";
       const url = lead.guidance?.url;
