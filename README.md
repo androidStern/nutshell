@@ -24,10 +24,12 @@ Supported release paths on macOS install the app bundle and put a thin `nutshell
 control command in PATH:
 
 ```bash
-bun install -g nutshell
 brew install androidStern/nutshell/nutshell
 tar -xzf nutshell-<version>-darwin-<arch>.tar.gz && ./install.sh
 ```
+
+The npm/Bun registry path (`bun install -g nutshell`) is deferred and not
+currently published or validated; do not use it as an install path.
 
 The background sync must be owned by `Nutshell.app`, not by Bun, zsh, Codex, a
 Homebrew Cellar executable, or a development checkout. Protected macOS reads
@@ -51,14 +53,24 @@ The normal CLI surface is intentionally small:
 
 ```bash
 nutshell setup
-nutshell sync [all|plugin] [--json]
+nutshell sync [all|source] [--json]
 nutshell health [--json]
 nutshell dashboard [--no-open] [--host 127.0.0.1] [--port 0]
-nutshell doctor [plugin] [--json]
-nutshell import <plugin> <archive-path> [--dry-run] [--json]
+nutshell doctor [source] [--json]
+nutshell import <source> <archive-path> [--dry-run] [--json]
 ```
 
-`nutshell setup` is the normal first-run path. It asks which plugins to enable, runs bounded plugin-owned auth and permission checks, offers optional provider archive imports, and enables the app-owned background agent. It does not run ingestion during setup; the initial data sync is handed off to the background agent or to `nutshell sync`.
+Source names accept obvious aliases: `x` for `twitter`, `notes` for
+`apple_notes`, `podcast` for `podcasts`. An unknown name lists the valid ones.
+`sync` prints a human summary (skipped sources first, with their fix); pass
+`--json` for the machine report.
+
+`nutshell setup` is the normal first-run path and the one canonical fix-it
+flow — it is safe to re-run anytime. It asks which sources to enable, sorts
+out app permissions, verifies each source with its real probe, offers optional
+provider archive imports, enables the app-owned background agent, and finishes
+with one bounded smoke sync through the app so the final summary reports a
+real result. Full ingestion happens after setup, in the background.
 
 Hidden app/helper commands may exist inside the packaged app, but they are not the normal user workflow. There are no normal CLI commands for old-system migration, legacy status, preserved exports, waivers, canonical imports, repair plans, pending imports, or provider-internal step management.
 
@@ -70,24 +82,41 @@ Run:
 nutshell setup
 ```
 
-Setup is TUI-first. It uses plugins to run source-specific setup:
+Setup is TUI-first. The flow:
 
-- Apple Notes owns Notes.app automation checks and repair guidance.
-- Apple Podcasts owns local database access checks and permission guidance.
-- YouTube owns browser-session verification and official Google export import support.
-- Twitter/X owns browser-session verification and official X archive import support.
+1. First run: choose which sources to enable. Re-run: setup opens with a
+   status table refreshed by real probes (current truth, not stored state) and
+   offers to fix only what fails — no intro ceremony, no re-selection.
+2. App permission step, before any source verification: on macOS, source
+   probes run through the `Nutshell.app` identity, so Full Disk Access is
+   sorted out first via the permission window.
+3. Each selected source is verified with its own real probe — one loop, three
+   verbs: probe, retry (optionally opening the sign-in page), or skip. A
+   failing probe shows what is wrong in plain words plus the exact fix and the
+   command that confirms it. Nothing polls and nothing times out while you
+   read; probes themselves are bounded.
+4. `ready` means proven: a source is recorded ready only when its probe
+   passed. Skipping records the honest state (`needs login`,
+   `needs permission`, `blocked`) with the fix attached, and the final summary
+   prints the comeback command. Disabled means you chose not to sync a source.
 
-If one selected plugin fails, setup keeps going. The failed plugin is marked `degraded`, not disabled. Disabled means the user chose not to run a plugin. Degraded means the user selected it but Nutshell cannot safely sync it yet.
+Plugins own their probes, fix text, and archive support:
 
-Core setup is only the coordinator. Plugins own their own setup checks, and core setup enforces an outer timeout around each plugin so setup cannot hang forever. Full backlog ingestion is not a setup step.
+- Apple Notes owns Notes.app automation checks.
+- Apple Podcasts owns local database access checks.
+- YouTube and Twitter/X own browser-session verification and official
+  provider-export import support.
+
+Auth state is measured, never stored: the probe setup uses is the same probe
+`doctor`, `health`, and the scheduler use. If you skip a source and sign in
+days later, the next scheduled sync probes, heals the status, and ingests —
+no setup re-run required.
 
 Rerun setup any time:
 
 ```bash
 nutshell setup
 ```
-
-Health and scheduled sync respect setup state. A degraded plugin is reported clearly and is not treated as healthy by background sync.
 
 ## Backfill
 
@@ -134,6 +163,15 @@ nutshell health --json
 
 Health checks data-root writability, disk free space, SQLite quick_check, lock presence, app-owned background agent state, Full Disk Access state, plugin auth/dependency checks, rate-limit markers, configured backfill coverage, source freshness, and projection freshness.
 
+Every problem finding carries its own fix: a user-state classification
+(`needs_auth`, `needs_permission`, `blocked_bug`, …), the concrete human
+action, and the command that confirms it — rendered on every surface (health,
+doctor, sync output, setup summary, dashboard). Doctor output is
+root-cause-first: when the app or Full Disk Access is missing, that leads and
+downstream permission symptoms collapse into one line instead of four. Sources
+waiting on a provider export keep a standing line with the exact import
+command until the import completes.
+
 If macOS blocks access to Apple Podcasts, browser cookie stores, or Apple Notes,
 the production fix is Full Disk Access for `Nutshell.app`. Do not grant access to
 Bun, zsh, Codex, Terminal, Homebrew Cellar paths, or temporary build products.
@@ -164,7 +202,12 @@ It shows health, app-owned background status, lock/storage status, recent daily 
 the bundled `nutshell-core` executable. It will not sync until Full Disk Access is
 granted and `enable-sync` has created the local enable marker.
 
-`nutshell setup` handles the normal background-agent registration and enablement from the terminal flow. The macOS permission helper window is permission-only: it opens Full Disk Access, provides a draggable app icon so the user does not have to manually hunt through `/Applications`, and tells the user to return to the terminal once access is granted.
+`nutshell setup` handles the normal background-agent registration and enablement from the terminal flow, then runs one bounded smoke sync through the app identity and reports its real result. The macOS permission helper window is permission-only: it opens Full Disk Access, provides a draggable app icon so the user does not have to manually hunt through `/Applications`, and tells the user to return to the terminal once access is granted.
+
+The scheduler self-heals degraded sources: each scheduled run gives a degraded
+source one bounded probe — a passing probe flips it back to ready and syncs;
+a failing probe refreshes the stored finding and skips the expensive sync.
+Provider rate limits back off instead of probing.
 
 Do not use a raw shell-owned background job for production macOS protected-data sync.
 
@@ -172,9 +215,15 @@ Do not use a raw shell-owned background job for production macOS protected-data 
 
 Before a release is considered production-ready, verify each install path in a clean environment:
 
-- `bun install -g nutshell`
 - Homebrew install plus `nutshell setup`
 - Tarball copy/install flow without Bun installed
+
+Release validation runs as split gates with three-way failure verdicts
+(`product_fail`, `harness_fail`, `fixture_stale`); a stale auth fixture queues
+a gate instead of failing the candidate, and a release is never declared
+validated while a required gate is queued. See
+`docs/release-validation-gates.md` for the gate list, fixture preflight, and
+the snapshot keep-alive job.
 
 For each path, verify `command -v nutshell`, `nutshell --version`, `nutshell setup`,
 Full Disk Access onboarding, manual sync, restart survival, upgrade survival, and

@@ -238,6 +238,9 @@ test("cancelled setup does not commit the config draft", async () => {
 
     await expect(runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false })).rejects.toThrow("setup cancelled");
     expect(readFileSync(config.path, "utf8")).toBe(before);
+    // honest-setup #9: secrets are also untouched — the secret draft commits
+    // only after the plugin loop, which the cancel never reached.
+    expect(existsSync(join(root, "Nutshell", "secrets.json"))).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

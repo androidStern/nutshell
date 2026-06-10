@@ -91,6 +91,25 @@ test("doctor resolves the x alias to twitter on the real binary", async () => {
   }
 });
 
+test("doctor with no argument works on the real binary", async () => {
+  // honest-setup #13: the no-argument path must always do the right thing —
+  // typing a source name is optional, never required.
+  const root = mkdtempSync(join(tmpdir(), "nutshell-doctor-bare-"));
+  try {
+    writeFileSync(
+      join(root, "nutconfig.jsonc"),
+      `${JSON.stringify({ plugins: { youtube: { enabled: false }, podcasts: { enabled: false }, apple_notes: { enabled: false }, twitter: { enabled: false } } }, null, 2)}\n`,
+    );
+    const result = await runCli(["--root", root, "doctor", "--json"]);
+    expect(result.stderr).not.toContain("unknown source");
+    expect([0, 1, 2]).toContain(result.exitCode);
+    const report = JSON.parse(result.stdout) as { findings: unknown[] };
+    expect(Array.isArray(report.findings)).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("doctor with an unknown source exits nonzero and lists valid sources", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-doctor-unknown-"));
   try {
