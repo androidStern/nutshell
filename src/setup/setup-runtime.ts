@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
-import type { HealthFinding, JsonObject, PluginContext, SourceId } from "../core/types";
+import type { HealthFinding, JsonObject, SourceId, UserState } from "../core/types";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
-import { loadConfig, logPath, numberAt, objectAt, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
+import { loadConfig, logPath, numberAt, objectAt, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
+import { CLI_NAME, PRODUCT_NAME } from "../core/product";
 import { reportStatus as healthReportStatus } from "../health/health";
 import { setupFinding } from "./setup-findings";
-import { appExecutable, appStatusJson, ensureStableAppPath, inspectNutshellApp } from "../macos/app-status";
+import { appExecutable, ensureStableAppPath } from "../macos/app-status";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
 import type { TracePlugin } from "../plugins/interface";
 import { redactText } from "../core/redaction";
@@ -13,10 +14,12 @@ import { TraceRuntime } from "../runtime/trace-runtime";
 import { JsonConfigDraft } from "./config-draft";
 import { defaultSecretStore, type FileSecretStore } from "./secret-store";
 import { DefaultHostCapabilities } from "./host";
+import { DefaultSetupProber, type SetupProber } from "./probe";
 import { ClackSetupUI } from "./ui-clack";
 import type {
   ConfigDraft,
   HostCapabilities,
+  MacAppStatus,
   PluginArchiveImportOffer,
   PluginSetupContext,
   PluginSetupSummary,
@@ -34,11 +37,16 @@ export interface SetupRuntimeOptions {
   ui?: SetupUI;
   host?: HostCapabilities;
   secretStore?: FileSecretStore;
+  prober?: SetupProber;
   setupPluginTimeoutMs?: number;
   permissionHandoffTimeoutMs?: number;
 }
 
 export const DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS = 60 * 60_000;
+
+// Humans never hit this; it exists so a misbehaving scripted UI (tests,
+// automation) fails loudly instead of spinning forever.
+const RUNAWAY_LOOP_LIMIT = 100;
 
 interface PendingImport {
   source: SourceId;
@@ -50,6 +58,24 @@ interface PluginSetupOutcome {
   summary: PluginSetupSummary;
 }
 
+interface AppPermissionOutcome {
+  attempted: boolean;
+  status: MacAppStatus | null;
+  granted: boolean;
+  // true when this run performed the grant flow (window opened), meaning any
+  // probe results captured before it are stale.
+  changed: boolean;
+}
+
+type ReviewAction = "fix" | "change" | "reverify" | "exit";
+
+interface StateReview {
+  action: ReviewAction;
+  enabled: TracePlugin[];
+  failing: TracePlugin[];
+  findings: Map<SourceId, HealthFinding[]>;
+}
+
 export class SetupRuntime {
   readonly config: TraceConfig;
   readonly registry: PluginRegistry;
@@ -57,6 +83,7 @@ export class SetupRuntime {
   readonly host: HostCapabilities;
   readonly logger: JsonlLogger;
   readonly secretStore: FileSecretStore;
+  readonly prober: SetupProber;
   readonly setupPluginTimeoutMs: number;
   readonly permissionHandoffTimeoutMs: number;
 
@@ -69,6 +96,7 @@ export class SetupRuntime {
     this.host = options.host ?? new DefaultHostCapabilities(ensureStableAppPath(this.config));
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
+    this.prober = options.prober ?? new DefaultSetupProber(this.config, this.logger);
     this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
     this.permissionHandoffTimeoutMs = options.permissionHandoffTimeoutMs ?? permissionHandoffTimeoutMs();
   }
@@ -81,36 +109,68 @@ export class SetupRuntime {
     const reports: SetupPluginReport[] = [];
     const pendingImports: PendingImport[] = [];
 
-    this.logger.event("setup: started", {});
-    await this.ui.intro({
-      title: "Nutshell setup",
-      body: `Data root: ${this.config.root}\nConfig: ${this.config.path}`,
-    });
+    const rerun = this.isRerun(draft);
+    this.logger.event("setup: started", { rerun });
+    if (!rerun) {
+      await this.ui.intro({
+        title: `${PRODUCT_NAME} setup`,
+        body: `Data root: ${this.config.root}\nConfig: ${this.config.path}`,
+      });
+    }
 
-    const selected = await this.selectPlugins(draft);
-    const selectedIds = new Set(selected.map((plugin) => plugin.manifest.id));
     const installedAppPath = ensureStableAppPath(this.config);
     if (existsSync(appExecutable(installedAppPath))) {
       const appConfig = draft.data.app && typeof draft.data.app === "object" && !Array.isArray(draft.data.app) ? (draft.data.app as JsonObject) : {};
       draft.data.app = { ...appConfig, path: installedAppPath };
     }
+
+    // Selection. Re-runs open with a probed status table and only walk through
+    // what needs attention; first runs ask which sources to enable.
+    let toSetup: TracePlugin[];
+    let priorFindings = new Map<SourceId, HealthFinding[]>();
+    if (rerun) {
+      const review = await this.reviewCurrentState(draft, controller.signal);
+      priorFindings = review.findings;
+      if (review.action === "exit") {
+        return this.finishAtReview(startedAt, draft, secretDraft, review);
+      }
+      if (review.action === "change") {
+        toSetup = await this.selectPlugins(draft);
+        priorFindings = new Map();
+      } else if (review.action === "reverify") {
+        toSetup = review.enabled;
+        priorFindings = new Map();
+      } else {
+        toSetup = review.failing;
+        for (const plugin of review.enabled) {
+          if (review.failing.includes(plugin)) continue;
+          const findings = review.findings.get(plugin.manifest.id) ?? [];
+          draft.setPluginSetupStatus(plugin.manifest.id, "ready", findings);
+          reports.push(this.pluginReport(plugin, "ready", findings));
+        }
+      }
+    } else {
+      toSetup = await this.selectPlugins(draft);
+    }
+
+    const setupIds = new Set(toSetup.map((plugin) => plugin.manifest.id));
     for (const plugin of this.registry.list()) {
-      draft.setPluginEnabled(plugin.manifest.id, selectedIds.has(plugin.manifest.id));
-      if (!selectedIds.has(plugin.manifest.id)) {
-        reports.push({
-          source: plugin.manifest.id,
-          displayName: plugin.manifest.displayName,
-          status: "disabled",
-          findings: [],
-          archiveImport: "unavailable",
-          importCommand: null,
-        });
+      const enabled = setupIds.has(plugin.manifest.id) || reports.some((report) => report.source === plugin.manifest.id && report.status !== "disabled");
+      draft.setPluginEnabled(plugin.manifest.id, enabled);
+      if (!enabled) {
+        reports.push(this.pluginReport(plugin, "disabled", []));
       }
     }
 
-    for (const plugin of selected) {
+    // App/permission step runs before any plugin verification: on macOS the
+    // probes execute through the Nutshell.app identity, so Full Disk Access
+    // must be sorted out first.
+    const appPermission = await this.prepareAppPermission(request);
+    if (appPermission.changed) priorFindings = new Map();
+
+    for (const plugin of toSetup) {
       const ctx = this.pluginSetupContext(plugin, draft, secretDraft.plugin(plugin.manifest.id), controller.signal);
-      const { report, summary } = await this.setupPlugin(plugin, ctx);
+      const { report, summary } = await this.setupPlugin(plugin, ctx, priorFindings.get(plugin.manifest.id));
       reports.push(report);
       draft.setPluginSetupStatus(plugin.manifest.id, report.status, report.findings);
       if (report.status === "ready" && report.importCommand && plugin.importProviderExport) {
@@ -127,7 +187,7 @@ export class SetupRuntime {
 
     await secretDraft.commit();
     await draft.commit();
-    this.logger.event("setup: config committed", { selectedPlugins: [...selectedIds] });
+    this.logger.event("setup: config committed", { setupPlugins: [...setupIds] });
 
     const imports = await this.runImports(pendingImports);
     for (const imported of imports) {
@@ -137,7 +197,9 @@ export class SetupRuntime {
       if (!imported.ok) report.findings.push(imported.finding);
     }
 
-    const backgroundAgent = request.backgroundAgent ? await this.enableBackgroundAgent(request) : skippedAction("background agent disabled by request");
+    const backgroundAgent = request.backgroundAgent
+      ? await this.enableBackgroundAgent(request, appPermission)
+      : skippedAction("background agent disabled by request");
     const syncHandoff = request.syncHandoff ? syncHandoffAction(backgroundAgent) : skippedAction("background sync handoff disabled by request");
     const finishedAt = new Date();
     const status =
@@ -158,15 +220,110 @@ export class SetupRuntime {
       backgroundAgent,
       syncHandoff,
     });
-    await this.ui.note({ title: "Setup complete", body: setupSummaryText(report) });
+    await this.ui.note({ title: "Setup complete", body: formatSetupSummaryText(report) });
     return report;
+  }
+
+  private isRerun(draft: ConfigDraft): boolean {
+    return this.registry.list().some((plugin) => {
+      const setup = draft.pluginConfig(plugin.manifest.id).setup;
+      return Boolean(setup && typeof setup === "object" && !Array.isArray(setup) && typeof (setup as JsonObject).status === "string");
+    });
+  }
+
+  // Re-run entry: probe every enabled source so the table shows current truth,
+  // then let the user fix what fails, change sources, or leave.
+  private async reviewCurrentState(draft: ConfigDraft, signal: AbortSignal): Promise<StateReview> {
+    const enabled = this.registry.list().filter((plugin) => draft.pluginConfig(plugin.manifest.id).enabled !== false);
+    const findings = new Map<SourceId, HealthFinding[]>();
+    for (const plugin of enabled) {
+      findings.set(plugin.manifest.id, await this.runProbe(plugin, signal));
+    }
+    const failing = enabled.filter((plugin) => hasCritical(findings.get(plugin.manifest.id) ?? []));
+    const working = enabled.length - failing.length;
+    const lines = enabled.map((plugin) => {
+      const pluginFindings = findings.get(plugin.manifest.id) ?? [];
+      const ok = !hasCritical(pluginFindings);
+      return `${ok ? "✓" : "✗"} ${plugin.manifest.displayName} — ${stateWord(pluginFindings)}`;
+    });
+    await this.ui.note({
+      title: `${working} of ${enabled.length} ${enabled.length === 1 ? "source" : "sources"} working`,
+      body: lines.join("\n") || "No sources are enabled yet.",
+    });
+
+    const options: Array<{ label: string; value: ReviewAction; hint?: string }> = [];
+    if (failing.length) {
+      const names = failing.map((plugin) => plugin.manifest.displayName).join(", ");
+      options.push({ label: `Fix ${names} now`, value: "fix" });
+    } else if (enabled.length) {
+      options.push({ label: "Finish — everything is verified", value: "exit" });
+    }
+    options.push({ label: "Change which sources are enabled", value: "change" });
+    if (!failing.length && enabled.length) {
+      options.push({ label: "Re-verify all sources", value: "reverify" });
+    }
+    if (failing.length) {
+      options.push({ label: "Exit — leave everything as is", value: "exit", hint: `come back anytime with: ${CLI_NAME} setup` });
+    }
+    if (!enabled.length) {
+      return { action: "change", enabled, failing, findings };
+    }
+    const action = await this.ui.select<ReviewAction>({ title: "What do you want to do?", options });
+    return { action, enabled, failing, findings };
+  }
+
+  private async finishAtReview(
+    startedAt: Date,
+    draft: JsonConfigDraft,
+    secretDraft: Awaited<ReturnType<FileSecretStore["draft"]>>,
+    review: StateReview,
+  ): Promise<SetupReport> {
+    const reports: SetupPluginReport[] = [];
+    for (const plugin of this.registry.list()) {
+      if (review.enabled.includes(plugin)) {
+        const findings = review.findings.get(plugin.manifest.id) ?? [];
+        const status = hasCritical(findings) ? "degraded" : "ready";
+        draft.setPluginSetupStatus(plugin.manifest.id, status, findings);
+        reports.push(this.pluginReport(plugin, status, findings));
+      } else {
+        reports.push(this.pluginReport(plugin, "disabled", []));
+      }
+    }
+    await secretDraft.commit();
+    await draft.commit();
+    const backgroundAgent = skippedAction("not changed at the status review");
+    const report: SetupReport = {
+      status: reports.some((item) => item.status === "degraded") ? "warning" : "ok",
+      startedAt,
+      finishedAt: new Date(),
+      plugins: reports,
+      backgroundAgent,
+      syncHandoff: skippedAction("not changed at the status review"),
+    };
+    this.logger.event("setup: finished at review", {
+      status: report.status,
+      plugins: reports.map((item) => ({ source: item.source, status: item.status })),
+    });
+    await this.ui.note({ title: "Status recorded", body: formatSetupSummaryText(report) });
+    return report;
+  }
+
+  private pluginReport(plugin: TracePlugin, status: SetupPluginReport["status"], findings: HealthFinding[]): SetupPluginReport {
+    return {
+      source: plugin.manifest.id,
+      displayName: plugin.manifest.displayName,
+      status,
+      findings,
+      archiveImport: "unavailable",
+      importCommand: null,
+    };
   }
 
   private async selectPlugins(draft: ConfigDraft): Promise<TracePlugin[]> {
     const plugins = this.registry.list();
     const initialValues = plugins.filter((plugin) => draft.pluginConfig(plugin.manifest.id).enabled !== false).map((plugin) => plugin.manifest.id);
     const selectedIds = await this.ui.multiselect<SourceId>({
-      title: "Choose plugins to enable",
+      title: `Choose which sources ${PRODUCT_NAME} should sync`,
       options: plugins.map((plugin) => ({
         label: plugin.manifest.displayName,
         value: plugin.manifest.id,
@@ -178,62 +335,124 @@ export class SetupRuntime {
     return plugins.filter((plugin) => selected.has(plugin.manifest.id));
   }
 
-  private async setupPlugin(plugin: TracePlugin, ctx: PluginSetupContext): Promise<PluginSetupOutcome> {
+  private async setupPlugin(plugin: TracePlugin, ctx: PluginSetupContext, prior?: HealthFinding[]): Promise<PluginSetupOutcome> {
     const source = plugin.manifest.id;
     const started = new Date();
     this.logger.event("setup: plugin started", { source });
+    let summary: PluginSetupSummary;
     try {
-      const { report, summary } = await this.withPluginSetupDeadline(plugin, ctx, async (deadlineCtx) => {
-        const summary = await pluginSummary(plugin, deadlineCtx);
-        await this.ui.note({ title: summary.title, body: summary.body });
-        const setupFindings = plugin.setup ? (await plugin.setup.run(deadlineCtx)).findings ?? [] : [];
-        const verifyFindings = plugin.setup ? await plugin.setup.verify(deadlineCtx) : await this.defaultVerify(plugin, deadlineCtx.signal);
-        const findings = [...setupFindings, ...verifyFindings];
-        const degraded = findings.some((finding) => finding.level === "critical");
-        const status: SetupPluginReport["status"] = degraded ? "degraded" : "ready";
-        const archiveImport: SetupPluginReport["archiveImport"] = summary.archiveImport ? "skipped" : "unavailable";
-        return {
-          summary,
-          report: {
-            source,
-            displayName: plugin.manifest.displayName,
-            status,
-            findings,
-            archiveImport,
-            importCommand: summary.archiveImport?.laterCommand ?? null,
-          },
-        };
-      });
-      this.logger.event("setup: plugin finished", {
-        source,
-        status: report.status,
-        durationMs: Date.now() - started.getTime(),
-        findingCount: report.findings.length,
-      });
-      return { report, summary };
+      summary = await pluginSummary(plugin, ctx);
+    } catch (error) {
+      summary = { title: plugin.manifest.displayName, body: "" };
+      this.logger.error("setup: plugin summary failed", { source, error: String(error) });
+    }
+    if (summary.body) await this.ui.note({ title: summary.title, body: summary.body });
+
+    let findings: HealthFinding[];
+    try {
+      const custom = plugin.setup?.run
+        ? await this.withPluginSetupDeadline(plugin, ctx, (deadlineCtx) => plugin.setup!.run!(deadlineCtx))
+        : { findings: [] };
+      const customFindings = custom.findings ?? [];
+      const probeFindings = await this.probeLoop(plugin, ctx, prior);
+      findings = [...customFindings, ...probeFindings];
     } catch (error) {
       const timedOut = error instanceof SetupPluginTimeoutError;
-      const finding = timedOut
-        ? setupFinding("plugin_setup_timeout", source, `${plugin.manifest.displayName} setup timed out`, { timeoutMs: error.timeoutMs })
-        : setupFinding("plugin_setup_failed", source, `${plugin.manifest.displayName} setup failed`, { error: String(error) });
+      findings = [
+        timedOut
+          ? setupFinding("plugin_setup_timeout", source, `${plugin.manifest.displayName} setup timed out`, { timeoutMs: error.timeoutMs })
+          : setupFinding("plugin_setup_failed", source, `${plugin.manifest.displayName} setup failed`, { error: String(error) }),
+      ];
       this.logger.error("setup: plugin failed", { source, error: String(error) });
-      return {
-        summary: { title: plugin.manifest.displayName, body: "Setup failed before the plugin could finish." },
-        report: {
-          source,
-          displayName: plugin.manifest.displayName,
-          status: "degraded",
-          findings: [finding],
-          archiveImport: "unavailable",
-          importCommand: null,
-        },
-      };
+    }
+
+    const status: SetupPluginReport["status"] = hasCritical(findings) ? "degraded" : "ready";
+    const archiveImport: SetupPluginReport["archiveImport"] = summary.archiveImport ? "skipped" : "unavailable";
+    const report: SetupPluginReport = {
+      source,
+      displayName: plugin.manifest.displayName,
+      status,
+      findings,
+      archiveImport,
+      importCommand: summary.archiveImport?.laterCommand ?? null,
+    };
+    this.logger.event("setup: plugin finished", {
+      source,
+      status: report.status,
+      durationMs: Date.now() - started.getTime(),
+      findingCount: report.findings.length,
+    });
+    return { report, summary };
+  }
+
+  // One loop, three verbs: probe, then on a critical finding offer retry
+  // (optionally opening the page that fixes it) or skip. The user drives the
+  // loop; nothing polls and nothing times out while they think.
+  private async probeLoop(plugin: TracePlugin, ctx: PluginSetupContext, prior?: HealthFinding[]): Promise<HealthFinding[]> {
+    let findings = prior ?? (await this.runProbe(plugin, ctx.signal, ctx));
+    for (let iteration = 0; ; iteration += 1) {
+      if (iteration >= RUNAWAY_LOOP_LIMIT) throw new Error(`${plugin.manifest.id} setup retry loop exceeded ${RUNAWAY_LOOP_LIMIT} iterations; a scripted UI is misbehaving`);
+      const problems = findings.filter((finding) => finding.level === "critical");
+      if (!problems.length) {
+        await this.ui.note({ title: plugin.manifest.displayName, body: `✓ ${plugin.manifest.displayName} verified` });
+        return findings;
+      }
+      const lead = problems[0]!;
+      const body = [lead.message];
+      if (lead.guidance) body.push("", `Fix: ${lead.guidance.fix}`, `Check: ${lead.guidance.confirm}`);
+      await this.ui.note({ title: `${plugin.manifest.displayName} needs attention`, body: body.join("\n") });
+
+      type Choice = "open" | "retry" | "skip";
+      const url = lead.guidance?.url;
+      const options: Array<{ label: string; value: Choice; hint?: string }> = [
+        ...(url ? [{ label: `Open ${displayUrl(url)} and retry`, value: "open" as Choice }] : []),
+        { label: "Retry", value: "retry" as Choice },
+        { label: "Skip for now", value: "skip" as Choice, hint: `finish later with: ${CLI_NAME} setup` },
+      ];
+      const choice = await this.ui.select<Choice>({ title: "What do you want to do?", options });
+      if (choice === "skip") {
+        this.logger.event("setup: plugin skipped by user", { source: plugin.manifest.id, code: lead.code });
+        return findings;
+      }
+      if (choice === "open" && url) await this.host.openUrl(url);
+      findings = await this.runProbe(plugin, ctx.signal, ctx);
     }
   }
 
-  private async defaultVerify(plugin: TracePlugin, signal: AbortSignal): Promise<HealthFinding[]> {
-    const ctx = pluginRuntimeContext(this.config, plugin, this.logger, signal);
-    return plugin.check(ctx);
+  private async runProbe(plugin: TracePlugin, signal: AbortSignal, ctx?: PluginSetupContext): Promise<HealthFinding[]> {
+    const source = plugin.manifest.id;
+    try {
+      return await this.ui.spinner({
+        title: `Checking ${plugin.manifest.displayName}`,
+        run: () =>
+          this.withProbeDeadline(source, async (deadlineSignal) => {
+            if (plugin.setup?.verify && ctx) return plugin.setup.verify({ ...ctx, signal: deadlineSignal });
+            return this.prober.probe(plugin, deadlineSignal);
+          }),
+      });
+    } catch (error) {
+      if (error instanceof SetupPluginTimeoutError) {
+        return [setupFinding("plugin_setup_timeout", source, `${plugin.manifest.displayName} verification timed out`, { timeoutMs: error.timeoutMs })];
+      }
+      return [setupFinding("plugin_setup_failed", source, `${plugin.manifest.displayName} verification failed`, { error: String(error) })];
+    }
+  }
+
+  private async withProbeDeadline<T>(source: SourceId, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const timeoutMs = Math.max(1, Math.trunc(this.setupPluginTimeoutMs));
+    const timeoutController = new AbortController();
+    const timeoutError = new SetupPluginTimeoutError(source, timeoutMs);
+    const timeout = setTimeout(() => timeoutController.abort(timeoutError), timeoutMs);
+    try {
+      return await Promise.race([
+        run(timeoutController.signal),
+        new Promise<never>((_, reject) => {
+          timeoutController.signal.addEventListener("abort", () => reject(timeoutError), { once: true });
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async withPluginSetupDeadline<T>(
@@ -275,6 +494,71 @@ export class SetupRuntime {
       signal,
       now: () => new Date(),
     };
+  }
+
+  // Full Disk Access handoff, before plugin verification. Interactive runs use
+  // a user-driven check loop (no polling while the user reads instructions);
+  // --yes runs keep the bounded poll for unattended automation.
+  private async prepareAppPermission(request: SetupRequest): Promise<AppPermissionOutcome> {
+    const macos = this.host.macos;
+    if (!macos) return { attempted: false, status: null, granted: false, changed: false };
+    let status: MacAppStatus;
+    try {
+      status = await macos.appStatus();
+    } catch (error) {
+      this.logger.error("setup: app status failed", { error: String(error) });
+      return { attempted: true, status: null, granted: false, changed: false };
+    }
+    if (!status.installed) {
+      await this.ui.note({
+        title: `${PRODUCT_NAME}.app is not installed`,
+        body: `Protected sources cannot be verified until ${PRODUCT_NAME}.app is installed. Reinstall ${PRODUCT_NAME} (brew reinstall nutshell or the tarball installer), then rerun ${CLI_NAME} setup.`,
+      });
+      return { attempted: true, status, granted: false, changed: false };
+    }
+    if (status.fullDiskAccess === "granted") {
+      return { attempted: true, status, granted: true, changed: false };
+    }
+    await this.ui.note({
+      title: "macOS permission required",
+      body: `${PRODUCT_NAME}.app needs Full Disk Access to read protected local data (Podcasts, browser sessions, Notes). The ${PRODUCT_NAME} window will open now — grant access there, then return here.`,
+    });
+    await macos.showNutshellPermissionWindow();
+    if (request.assumeYes) {
+      status = await this.waitForFullDiskAccess(macos);
+      return { attempted: true, status, granted: status.fullDiskAccess === "granted", changed: true };
+    }
+    for (let iteration = 0; ; iteration += 1) {
+      if (iteration >= RUNAWAY_LOOP_LIMIT) throw new Error(`permission check loop exceeded ${RUNAWAY_LOOP_LIMIT} iterations; a scripted UI is misbehaving`);
+      const choice = await this.ui.select<"check" | "skip">({
+        title: "Grant Full Disk Access in the Nutshell window, then continue.",
+        options: [
+          { label: "I granted it — check again", value: "check" },
+          { label: "Skip for now", value: "skip", hint: "protected sources will stay unverified" },
+        ],
+      });
+      if (choice === "skip") break;
+      status = await this.ui.spinner({ title: "Checking Full Disk Access", run: () => macos.appStatus() });
+      if (status.fullDiskAccess === "granted") {
+        await this.ui.note({ title: "Full Disk Access", body: "✓ Full Disk Access granted" });
+        break;
+      }
+      await this.ui.note({
+        title: "Not granted yet",
+        body: `Full Disk Access is still missing for ${PRODUCT_NAME}.app. In the ${PRODUCT_NAME} window, drag the app icon into the Full Disk Access list and turn its switch on.`,
+      });
+    }
+    return { attempted: true, status, granted: status.fullDiskAccess === "granted", changed: true };
+  }
+
+  private async waitForFullDiskAccess(macos: NonNullable<HostCapabilities["macos"]>): Promise<MacAppStatus> {
+    const deadline = Date.now() + this.permissionHandoffTimeoutMs;
+    let status = await macos.appStatus();
+    while (status.fullDiskAccess !== "granted" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      status = await macos.appStatus();
+    }
+    return status;
   }
 
   private async offerArchiveImport(offer: PluginArchiveImportOffer): Promise<string | null> {
@@ -326,32 +610,32 @@ export class SetupRuntime {
     return output;
   }
 
-  private async enableBackgroundAgent(request: SetupRequest): Promise<SetupReport["backgroundAgent"]> {
+  private async enableBackgroundAgent(request: SetupRequest, permission: AppPermissionOutcome): Promise<SetupReport["backgroundAgent"]> {
     const appPath = ensureStableAppPath(this.config);
     const executable = appExecutable(appPath);
-    if (!existsSync(executable)) return { attempted: true, ok: false, message: "Nutshell.app is not installed", detail: { appPath } };
-    const permission = await this.ensureAppPermission(appPath, executable);
-    if (permission.status.backgroundSync === "enabled" && permission.status.agent === "enabled") {
+    if (!existsSync(executable)) return { attempted: true, ok: false, message: `${PRODUCT_NAME}.app is not installed`, detail: { appPath } };
+    const status = permission.status;
+    if (status && status.backgroundSync === "enabled" && status.agent === "enabled") {
       return {
         attempted: true,
         ok: true,
         message: "background agent enabled",
-        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+        detail: { status: macStatusJson(status) },
       };
     }
-    if (permission.status.fullDiskAccess !== "granted") {
+    if (!permission.granted) {
       return {
         attempted: true,
         ok: false,
         message: "Full Disk Access is required before background sync can be enabled",
-        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+        detail: { status: status ? macStatusJson(status) : null },
       };
     }
     const confirmed = request.assumeYes
       ? true
       : await this.ui.confirm({
           title: "Do you want to enable the background service now?",
-          body: "Nutshell can keep syncing in the background using the permissions you just granted.",
+          body: `${PRODUCT_NAME} can keep syncing in the background using the permissions you just granted.`,
           initialValue: true,
         });
     if (!confirmed) {
@@ -359,41 +643,19 @@ export class SetupRuntime {
         attempted: true,
         ok: true,
         message: "background service left disabled by user choice",
-        detail: { permissionSetup: permission.setup ? jsonRunResult(permission.setup) : null, status: appStatusJson(permission.status) },
+        detail: { status: status ? macStatusJson(status) : null },
       };
     }
     const enable = await this.host.run({ command: executable, args: ["enable-sync"], timeoutMs: 30_000 });
     const register = await this.host.run({ command: executable, args: ["register-agent"], timeoutMs: 30_000 });
-    const status = await inspectNutshellApp(this.config, appPath);
-    const ok = register.code === 0 && enable.code === 0 && status.agent === "enabled" && status.backgroundSync === "enabled";
+    const finalStatus = this.host.macos ? await this.host.macos.appStatus() : null;
+    const ok = register.code === 0 && enable.code === 0 && finalStatus?.agent === "enabled" && finalStatus?.backgroundSync === "enabled";
     return {
       attempted: true,
       ok,
       message: ok ? "background agent enabled" : "background agent enablement failed",
-      detail: { register: jsonRunResult(register), enable: jsonRunResult(enable), status: appStatusJson(status) },
+      detail: { register: jsonRunResult(register), enable: jsonRunResult(enable), status: finalStatus ? macStatusJson(finalStatus) : null },
     };
-  }
-
-  private async ensureAppPermission(
-    appPath: string,
-    executable: string,
-  ): Promise<{ status: Awaited<ReturnType<typeof inspectNutshellApp>>; setup: { code: number; stdout: string; stderr: string } | null }> {
-    let status = await inspectNutshellApp(this.config, appPath);
-    if (status.fullDiskAccess === "granted") return { status, setup: null };
-    await this.ui.note({
-      title: "macOS permission required",
-      body:
-        "Nutshell.app needs Full Disk Access before background sync can read protected local data. The Nutshell setup window will open now. Grant access there, then return here to continue.",
-    });
-    const setup = process.platform === "darwin"
-      ? await this.host.run({ command: "/usr/bin/open", args: ["-n", appPath, "--args", "setup"], timeoutMs: 30_000 })
-      : await this.host.run({ command: executable, args: ["setup"], timeoutMs: 30_000 });
-    if (setup.code !== 0) {
-      status = await inspectNutshellApp(this.config, appPath);
-      return { status, setup };
-    }
-    status = await waitForFullDiskAccess(this.config, appPath, this.permissionHandoffTimeoutMs);
-    return { status, setup };
   }
 }
 
@@ -402,16 +664,6 @@ export function permissionHandoffTimeoutMs(env: Record<string, string | undefine
   if (!value) return DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS;
-}
-
-async function waitForFullDiskAccess(config: TraceConfig, appPath: string, timeoutMs: number): Promise<Awaited<ReturnType<typeof inspectNutshellApp>>> {
-  const deadline = Date.now() + timeoutMs;
-  let status = await inspectNutshellApp(config, appPath);
-  while (status.fullDiskAccess !== "granted" && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    status = await inspectNutshellApp(config, appPath);
-  }
-  return status;
 }
 
 function skippedAction(message: string): SetupReport["backgroundAgent"] {
@@ -451,41 +703,80 @@ function jsonRunResult(result: { code: number; stdout: string; stderr: string })
   };
 }
 
+function macStatusJson(status: MacAppStatus): JsonObject {
+  return {
+    installed: status.installed,
+    path: status.path,
+    fullDiskAccess: status.fullDiskAccess,
+    backgroundSync: status.backgroundSync,
+    agent: status.agent,
+  };
+}
+
 async function pluginSummary(plugin: TracePlugin, ctx: PluginSetupContext): Promise<PluginSetupSummary> {
   if (plugin.setup) return plugin.setup.summarize(ctx);
   return {
     title: plugin.manifest.displayName,
-    body: "This plugin has no interactive setup. Nutshell will run its health probe.",
+    body: `${PRODUCT_NAME} verifies this source with its health probe.`,
   };
 }
 
-function pluginRuntimeContext(config: TraceConfig, plugin: TracePlugin, logger: JsonlLogger, signal: AbortSignal): PluginContext {
-  return {
-    root: config.root,
-    config: pluginConfig(config, plugin.manifest.id),
-    logger,
-    signal,
-    now: () => new Date(),
-    records: {
-      query: async () => ({ records: [], total: 0, limit: 0, offset: 0 }),
-    },
-    writeArtifact: async () => {
-      throw new Error("setup verification cannot write artifacts");
-    },
-  };
+function hasCritical(findings: HealthFinding[]): boolean {
+  return findings.some((finding) => finding.level === "critical");
 }
 
-function setupSummaryText(report: SetupReport): string {
-  const ready = report.plugins.filter((item) => item.status === "ready").map((item) => item.displayName);
-  const degraded = report.plugins.filter((item) => item.status === "degraded").map((item) => item.displayName);
-  const disabled = report.plugins.filter((item) => item.status === "disabled").map((item) => item.displayName);
-  return [
-    ready.length ? `Ready: ${ready.join(", ")}` : "Ready: none",
-    degraded.length ? `Degraded: ${degraded.join(", ")}` : "Degraded: none",
-    disabled.length ? `Disabled: ${disabled.join(", ")}` : "Disabled: none",
-    `Background: ${report.backgroundAgent.message}`,
-    `Sync: ${report.syncHandoff.message}`,
-  ].join("\n");
+const STATE_WORDS: Record<UserState, string> = {
+  not_configured: "not configured",
+  needs_auth: "needs login",
+  needs_permission: "needs permission",
+  ready_empty: "no data found",
+  ready_with_data: "verified",
+  blocked_bug: "blocked",
+};
+
+export function stateWord(findings: HealthFinding[]): string {
+  const critical = findings.filter((finding) => finding.level === "critical");
+  if (!critical.length) return findings.length ? "verified (with warnings)" : "verified";
+  const state = critical.find((finding) => finding.guidance)?.guidance?.state;
+  return state ? STATE_WORDS[state] : "needs attention";
+}
+
+function displayUrl(url: string): string {
+  return url.replace(/^https:\/\/(www\.)?/, "").replace(/\/$/, "");
+}
+
+export function formatSetupSummaryText(report: SetupReport): string {
+  const lines: string[] = [];
+  for (const plugin of report.plugins) {
+    if (plugin.status === "disabled") {
+      lines.push(`· ${plugin.displayName} — disabled`);
+      continue;
+    }
+    if (plugin.status === "ready") {
+      lines.push(`✓ ${plugin.displayName} — verified`);
+    } else {
+      lines.push(`✗ ${plugin.displayName} — ${stateWord(plugin.findings)}`);
+      const lead = plugin.findings.find((finding) => finding.level === "critical") ?? plugin.findings[0];
+      if (lead?.guidance) {
+        lines.push(`    fix:  ${lead.guidance.fix}`);
+        lines.push(`    then: ${lead.guidance.confirm}`);
+      }
+    }
+    if (plugin.archiveImport === "skipped" && plugin.importCommand) {
+      lines.push(`    history import pending — when your export arrives: ${plugin.importCommand}`);
+    }
+    if (plugin.archiveImport === "failed") {
+      const importFinding = plugin.findings.find((finding) => finding.code === "setup_archive_import_failed");
+      if (importFinding?.guidance) {
+        lines.push(`    archive import failed — fix: ${importFinding.guidance.fix}`);
+      }
+    }
+  }
+  lines.push(`Background: ${report.backgroundAgent.message}`);
+  lines.push(`Sync: ${report.syncHandoff.message}`);
+  const degraded = report.plugins.some((plugin) => plugin.status === "degraded");
+  lines.push(degraded ? `Finish anytime: rerun ${CLI_NAME} setup` : "All selected sources are verified.");
+  return lines.join("\n");
 }
 
 export function exitCodeForSetup(report: SetupReport): number {

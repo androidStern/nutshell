@@ -4,7 +4,10 @@ import { join, resolve } from "node:path";
 import { TraceError, UsageError } from "./core/errors";
 import { APP_PATH_ENV, CLI_NAME, DEFAULT_APP_PATH, PRODUCT_VERSION } from "./core/product";
 import { DEFAULT_SYNC_BUDGET } from "./config/defaults";
-import { expandHome, loadConfig, resolveConfigPath, resolveRoot } from "./config/config";
+import { expandHome, loadConfig, logPath, resolveConfigPath, resolveRoot } from "./config/config";
+import { loadBuiltinPlugins } from "./plugins/registry";
+import { probePluginContext } from "./setup/probe";
+import { JsonlLogger } from "./runtime/logger";
 import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
@@ -24,6 +27,19 @@ async function main(argv: string[]): Promise<number> {
   if (command === "__personal_trace_podcasts_sqlite_worker") {
     await runPodcastsSqliteWorkerFromStdin();
     return 0;
+  }
+  // Hidden app/helper bridge: runs one plugin's real probe (plugin.check)
+  // regardless of enabled state, so setup can verify a source through the
+  // Nutshell.app identity before config is committed. Not a public command.
+  if (command === "__probe") {
+    const source = args[0] && !args[0].startsWith("--") ? args.shift()! : null;
+    if (!source) throw new UsageError(`${CLI_NAME} __probe requires a plugin name`);
+    const config = loadConfig(root, configFile);
+    const registry = loadBuiltinPlugins();
+    const plugin = registry.get(source);
+    const findings = await plugin.check(probePluginContext(config, plugin, new JsonlLogger(logPath(config)), new AbortController().signal));
+    process.stdout.write(`${JSON.stringify({ source, findings }, null, 2)}\n`);
+    return findings.some((finding) => finding.level === "critical") ? 2 : findings.length ? 1 : 0;
   }
   if (command === "version" || command === "--version" || command === "-v") {
     process.stdout.write(`${CLI_NAME} ${PRODUCT_VERSION}\n`);

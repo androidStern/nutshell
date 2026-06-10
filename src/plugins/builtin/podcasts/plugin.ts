@@ -45,16 +45,8 @@ export class PodcastsPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Apple Podcasts",
       body:
-        "Nutshell reads the local Apple Podcasts library database in read-only mode. The app-owned sync verifies database access after setup so the terminal does not read protected app data.",
+        "Nutshell reads the local Apple Podcasts library database in read-only mode and verifies access now, through Nutshell.app.",
     }),
-    run: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: podcasts access verification deferred", { source: "podcasts" });
-      return { findings: [] };
-    },
-    verify: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: podcasts access verification deferred", { source: "podcasts" });
-      return [];
-    },
   };
 
   async check(ctx: PluginContext) {

@@ -53,7 +53,7 @@ export class YouTubePlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "YouTube",
       body:
-        "Nutshell uses your configured browser session for recent YouTube activity. The app-owned sync verifies browser access after setup so the terminal does not read browser-owned files. Historical backfill is optional and uses an official Google export.",
+        "Nutshell reads recent YouTube activity through your Chrome session and verifies access now, through Nutshell.app. Historical backfill is optional and uses an official Google export.",
       archiveImport: {
         title: "Import Google YouTube export now?",
         body: "Use this only if you already have a Google Takeout or Data Portability export containing YouTube activity.",
@@ -61,14 +61,6 @@ export class YouTubePlugin implements TracePlugin {
         allowedExtensions: ["zip", "json", "html"],
       },
     }),
-    run: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: youtube browser verification deferred", { source: "youtube" });
-      return { findings: [] };
-    },
-    verify: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: youtube browser verification deferred", { source: "youtube" });
-      return [];
-    },
   };
 
   async check(ctx: PluginContext) {

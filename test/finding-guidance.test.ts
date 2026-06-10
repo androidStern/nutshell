@@ -10,6 +10,8 @@ import { SETUP_FINDINGS } from "../src/setup/setup-findings";
 import { formatHealthText } from "../src/health/reporters";
 import { formatSyncText } from "../src/health/sync-reporter";
 import { JsonConfigDraft, pluginSetupFindings } from "../src/setup/config-draft";
+import { formatSetupSummaryText } from "../src/setup/setup-runtime";
+import type { SetupReport } from "../src/setup/types";
 import { loadBuiltinPlugins } from "../src/plugins/registry";
 
 // Universal invariant (goal criteria 10 + 11): every problem finding the
@@ -147,6 +149,31 @@ describe("every surface renders fix and confirm for every emittable problem find
       const text = formatSyncText(syncReportWith(finding));
       expect(text, `sync text for ${finding.code}`).toContain(finding.guidance!.fix);
       expect(text, `sync text for ${finding.code}`).toContain(finding.guidance!.confirm);
+    }
+  });
+
+  test("setup summary", () => {
+    for (const finding of allSamples()) {
+      const report: SetupReport = {
+        status: "warning",
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        plugins: [
+          {
+            source: finding.source === "system" ? "youtube" : finding.source,
+            displayName: "Example Source",
+            status: "degraded",
+            findings: [finding],
+            archiveImport: "unavailable",
+            importCommand: null,
+          },
+        ],
+        backgroundAgent: { attempted: false, ok: true, message: "skipped", detail: {} },
+        syncHandoff: { attempted: false, ok: true, message: "skipped", detail: {} },
+      };
+      const text = formatSetupSummaryText(report);
+      expect(text, `setup summary for ${finding.code}`).toContain(finding.guidance!.fix);
+      expect(text, `setup summary for ${finding.code}`).toContain(finding.guidance!.confirm);
     }
   });
 

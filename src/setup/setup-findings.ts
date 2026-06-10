@@ -29,6 +29,13 @@ export const SETUP_FINDINGS = new FindingCatalog("system", {
     confirm: `${CLI_NAME} health`,
     sample: "twitter archive import failed",
   },
+  plugin_probe_unavailable: {
+    level: "critical",
+    state: "blocked_bug",
+    fix: `Rerun ${CLI_NAME} setup. If this keeps happening, reinstall Nutshell and run ${CLI_NAME} doctor.`,
+    confirm: `${CLI_NAME} doctor`,
+    sample: "Twitter/X could not be probed through Nutshell.app",
+  },
 });
 
 export type SetupFindingCode = Parameters<typeof SETUP_FINDINGS.make>[0];

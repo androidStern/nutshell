@@ -70,16 +70,8 @@ export class AppleNotesPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Apple Notes",
       body:
-        "Nutshell reads current Notes.app metadata and accessible note bodies through macOS automation. The app-owned sync verifies Notes access after setup so the terminal does not request automation access. Locked notes are kept as metadata-only when the body is not available.",
+        "Nutshell reads current Notes.app metadata and accessible note bodies through macOS automation, and verifies access now, through Nutshell.app. Locked notes are kept as metadata-only when the body is not available.",
     }),
-    run: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: apple notes access verification deferred", { source: "apple_notes" });
-      return { findings: [] };
-    },
-    verify: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: apple notes access verification deferred", { source: "apple_notes" });
-      return [];
-    },
   };
 
   async check(ctx: PluginContext) {

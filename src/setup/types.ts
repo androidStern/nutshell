@@ -107,8 +107,11 @@ export interface PluginSetupResult {
 
 export interface TracePluginSetup {
   summarize(ctx: PluginSetupContext): Promise<PluginSetupSummary>;
-  run(ctx: PluginSetupContext): Promise<PluginSetupResult>;
-  verify(ctx: PluginSetupContext): Promise<HealthFinding[]>;
+  // Optional plugin-specific configuration steps before verification.
+  run?(ctx: PluginSetupContext): Promise<PluginSetupResult>;
+  // Optional custom verification. When absent, core verifies with the
+  // plugin's real probe (plugin.check) through the app identity on macOS.
+  verify?(ctx: PluginSetupContext): Promise<HealthFinding[]>;
 }
 
 export type PluginSetupStatus = "ready" | "degraded" | "disabled";

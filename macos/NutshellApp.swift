@@ -88,7 +88,7 @@ func main() throws {
     output = openFullDiskAccess() ? "opened Full Disk Access settings\n" : "could not open Full Disk Access settings\n"
   case "verify":
     output = try verify()
-  case "health", "doctor", "sync":
+  case "health", "doctor", "sync", "__probe":
     try emit(try runCore(commandArguments(), timeoutSeconds: coreTimeoutSeconds(for: command)))
     return
   case "__sync-once":
@@ -267,6 +267,8 @@ func coreTimeoutSeconds(for command: String) -> TimeInterval {
   switch command {
   case "health", "doctor":
     return 55
+  case "__probe":
+    return 120
   case "sync":
     return 10 * 60
   default:

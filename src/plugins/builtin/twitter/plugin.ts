@@ -61,7 +61,7 @@ export class TwitterPlugin implements TracePlugin {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Twitter/X",
       body:
-        "Nutshell uses your configured browser session for recent X activity. The app-owned sync verifies browser access after setup so the terminal does not read browser-owned files. Historical backfill is optional and uses an official X archive export.",
+        "Nutshell reads recent X activity through your Chrome session and verifies access now, through Nutshell.app. Historical backfill is optional and uses an official X archive export.",
       archiveImport: {
         title: "Import official X archive now?",
         body: "Use this only if you already have the official X archive export from x.com.",
@@ -69,14 +69,6 @@ export class TwitterPlugin implements TracePlugin {
         allowedExtensions: ["zip", "js", "json"],
       },
     }),
-    run: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: twitter browser verification deferred", { source: "twitter" });
-      return { findings: [] };
-    },
-    verify: async (ctx: PluginSetupContext) => {
-      ctx.logger.event("setup: twitter browser verification deferred", { source: "twitter" });
-      return [];
-    },
   };
 
   async check(ctx: PluginContext) {
