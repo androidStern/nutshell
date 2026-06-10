@@ -6,13 +6,12 @@ They can establish the auth-present browser state only after the same run has pr
 
 ## What Must Be Saved
 
-Saving only the Chrome profile is not enough. Chrome cookies on macOS are encrypted with the `Chrome Safe Storage` item in the user's login keychain. A reusable seed must preserve all three:
+Saving only the Chrome profile is not enough. Chrome cookies on macOS are encrypted with the `Chrome Safe Storage` item in the user's login keychain. A reusable seed may preserve:
 
 - `~/Library/Application Support/Google/Chrome`
 - `~/Library/Keychains/login.keychain-db`
-- the `Chrome Safe Storage` password, stored in the seed as `chrome-safe-storage-password.txt`
 
-The password file is a private test fixture. It lets restored auth-present VMs decrypt the restored Chrome cookies without repeatedly showing a macOS keychain prompt. It must stay outside git.
+Do not save the raw `Chrome Safe Storage` password into a fixture file or teach the product to read that file. That was attempted in `v0.1.20` and rejected because it bypasses the real user install behavior this rehearsal is supposed to validate.
 
 The seed must stay outside git. The current private seed location is:
 
@@ -43,7 +42,7 @@ After Google My Activity and X are visibly signed in in VM Chrome, capture the s
 scripts/tart-browser-auth-snapshot.sh <vm-name> <snapshot-name>
 ```
 
-The script quits Chrome, writes `chrome-profile.tgz`, copies `login.keychain-db`, writes `chrome-safe-storage-password.txt`, and writes a manifest under the shared `auth-profiles` directory.
+The script quits Chrome, writes `chrome-profile.tgz`, copies `login.keychain-db`, and writes a manifest under the shared `auth-profiles` directory.
 
 ## Restore
 
@@ -70,7 +69,7 @@ bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore \
   --append
 ```
 
-If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Check that `~/Nutshell/.private/chrome-safe-storage-password` exists in the VM after restore, then fix the product or the restore path before continuing.
+If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Fix the product's normal Keychain/browser behavior or the VM fixture restore path before continuing.
 
 ## Current Product Bug
 

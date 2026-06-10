@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createCipheriv, pbkdf2Sync } from "node:crypto";
 import { join } from "node:path";
-import { chromeSafeStoragePasswordOverride, readBrowserCookies } from "../src/browser/cookies";
+import { readBrowserCookies } from "../src/browser/cookies";
 import { readMacChromeCookiesWithPassword } from "../src/browser/chrome-macos";
 
 const CHROME_EPOCH_OFFSET_MICROS = 11_644_473_600_000_000n;
@@ -54,19 +54,6 @@ test.skipIf(process.platform !== "darwin")("browser cookie reader uses app-provi
   } finally {
     if (previous === undefined) delete process.env.NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD;
     else process.env.NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD = previous;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("Chrome Safe Storage override can come from a private seed file", () => {
-  const root = mkdtempSync(join(tmpdir(), "nutshell-safe-storage-"));
-  try {
-    const passwordPath = join(root, "chrome-safe-storage-password");
-    writeFileSync(passwordPath, "safe-storage-secret\n");
-
-    expect(chromeSafeStoragePasswordOverride({ NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD_FILE: passwordPath })).toBe("safe-storage-secret");
-    expect(chromeSafeStoragePasswordOverride({ NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD: " direct-secret " })).toBe("direct-secret");
-  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

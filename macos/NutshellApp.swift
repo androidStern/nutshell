@@ -312,13 +312,6 @@ func runProcess(_ executable: String, _ arguments: [String], timeoutSeconds: Tim
 }
 
 func chromeSafeStoragePassword() -> String? {
-  if let direct = ProcessInfo.processInfo.environment["NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD"]?.trimmingCharacters(in: .whitespacesAndNewlines), !direct.isEmpty {
-    return direct
-  }
-  if let fromFile = chromeSafeStoragePasswordFile() {
-    return fromFile
-  }
-
   let query: [String: Any] = [
     kSecClass as String: kSecClassGenericPassword,
     kSecAttrAccount as String: "Chrome",
@@ -332,22 +325,6 @@ func chromeSafeStoragePassword() -> String? {
     return nil
   }
   return String(data: data, encoding: .utf8)
-}
-
-func chromeSafeStoragePasswordFile() -> String? {
-  let explicit = ProcessInfo.processInfo.environment["NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD_FILE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-  let candidates = [
-    explicit?.isEmpty == false ? URL(fileURLWithPath: NSString(string: explicit!).expandingTildeInPath) : nil,
-    dataRoot().appendingPathComponent(".private/chrome-safe-storage-password"),
-  ]
-  for candidate in candidates {
-    guard let url = candidate else { continue }
-    guard let value = try? String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-      continue
-    }
-    return value
-  }
-  return nil
 }
 
 func fullDiskAccessGranted() -> Bool {

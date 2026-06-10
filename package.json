@@ -1,6 +1,6 @@
 {
   "name": "nutshell",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Local personal trace ingestion runtime for notes, media activity, podcasts, and X.",
   "type": "module",
   "bin": {

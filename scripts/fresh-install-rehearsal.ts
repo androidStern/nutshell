@@ -434,10 +434,8 @@ function recordBrowserAuthSeedRestore(input: { seed: string; seedRoot: string; h
   const manifestPath = join(seedPath, "manifest.json");
   const profileArchive = join(seedPath, "chrome-profile.tgz");
   const seedKeychain = join(seedPath, "login.keychain-db");
-  const seedSafeStoragePassword = join(seedPath, "chrome-safe-storage-password.txt");
   const restoredProfile = join(input.home, "Library", "Application Support", "Google", "Chrome");
   const restoredKeychain = join(input.home, "Library", "Keychains", "login.keychain-db");
-  const restoredSafeStoragePassword = join(input.home, "Nutshell", ".private", "chrome-safe-storage-password");
   const checks: RehearsalReport["checks"] = [
     input.seed.trim()
       ? { name: "browser auth seed restore declared", status: "pass", detail: { seed: input.seed, seedPath } }
@@ -451,18 +449,12 @@ function recordBrowserAuthSeedRestore(input: { seed: string; seedRoot: string; h
     existsSync(seedKeychain)
       ? { name: "browser auth seed login keychain exists", status: "pass", detail: { seedKeychain, bytes: statSync(seedKeychain).size } }
       : { name: "browser auth seed login keychain exists", status: "fail", detail: { seedKeychain } },
-    existsSync(seedSafeStoragePassword) && statSync(seedSafeStoragePassword).size > 0
-      ? { name: "browser auth seed Safe Storage password exists", status: "pass", detail: { seedSafeStoragePassword, bytes: statSync(seedSafeStoragePassword).size } }
-      : { name: "browser auth seed Safe Storage password exists", status: "fail", detail: { seedSafeStoragePassword } },
     existsSync(restoredProfile)
       ? { name: "Chrome profile exists after auth seed restore", status: "pass", detail: { restoredProfile } }
       : { name: "Chrome profile exists after auth seed restore", status: "fail", detail: { restoredProfile } },
     existsSync(restoredKeychain)
       ? { name: "login keychain exists after auth seed restore", status: "pass", detail: { restoredKeychain, bytes: statSync(restoredKeychain).size } }
       : { name: "login keychain exists after auth seed restore", status: "fail", detail: { restoredKeychain } },
-    existsSync(restoredSafeStoragePassword) && statSync(restoredSafeStoragePassword).size > 0
-      ? { name: "Chrome Safe Storage password exists after auth seed restore", status: "pass", detail: { restoredSafeStoragePassword, bytes: statSync(restoredSafeStoragePassword).size } }
-      : { name: "Chrome Safe Storage password exists after auth seed restore", status: "fail", detail: { restoredSafeStoragePassword } },
   ];
   return aggregateReport("browser-auth-seed-restore", checks, {
     seed: input.seed,
@@ -470,10 +462,8 @@ function recordBrowserAuthSeedRestore(input: { seed: string; seedRoot: string; h
     manifestPath,
     profileArchive,
     seedKeychain,
-    seedSafeStoragePassword,
     restoredProfile,
     restoredKeychain,
-    restoredSafeStoragePassword,
     fixture: "browser_auth_seed",
   });
 }

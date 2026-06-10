@@ -471,10 +471,8 @@ test("aggregate report audit accepts declared auth seed restore instead of repea
   runs.splice(loginIndex, 1, fakeReport("browser-auth-seed-restore", [
     "browser auth seed restore declared",
     "browser auth seed manifest exists",
-    "browser auth seed Safe Storage password exists",
     "Chrome profile exists after auth seed restore",
     "login keychain exists after auth seed restore",
-    "Chrome Safe Storage password exists after auth seed restore",
   ]));
 
   const report = auditRehearsalReport({ runs });
@@ -490,10 +488,8 @@ test("aggregate report audit rejects both manual browser login and auth seed res
   runs.splice(loginIndex + 1, 0, fakeReport("browser-auth-seed-restore", [
     "browser auth seed restore declared",
     "browser auth seed manifest exists",
-    "browser auth seed Safe Storage password exists",
     "Chrome profile exists after auth seed restore",
     "login keychain exists after auth seed restore",
-    "Chrome Safe Storage password exists after auth seed restore",
   ]));
 
   const report = auditRehearsalReport({ runs });

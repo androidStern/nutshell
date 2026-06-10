@@ -267,10 +267,8 @@ const REQUIRED_MANUAL_HANDOFF_CHECK_NAMES = [
 const REQUIRED_AUTH_SEED_RESTORE_CHECK_NAMES = [
   "browser auth seed restore declared",
   "browser auth seed manifest exists",
-  "browser auth seed Safe Storage password exists",
   "Chrome profile exists after auth seed restore",
   "login keychain exists after auth seed restore",
-  "Chrome Safe Storage password exists after auth seed restore",
 ] as const;
 
 interface RecordStats {
