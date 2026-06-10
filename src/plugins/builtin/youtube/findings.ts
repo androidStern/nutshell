@@ -10,11 +10,21 @@ export const YOUTUBE_FINDINGS = new FindingCatalog("youtube", {
   youtube_signed_out: {
     level: "critical",
     state: "needs_auth",
-    fix: "Open youtube.com in Chrome and sign into your Google account, then retry.",
+    fix: "Sign into your Google account at youtube.com in Chrome, then retry.",
     confirm: DOCTOR_YOUTUBE,
     url: "https://www.youtube.com",
-    sample:
-      "YouTube browser session is signed out of Google. Sign into Google My Activity in the configured Chrome profile and try again.",
+    sample: "You're not signed into Google in Chrome.",
+  },
+  youtube_session_unverifiable: {
+    level: "critical",
+    state: "blocked_bug",
+    // Google interposes an identity-verification page on programmatic access
+    // to some established/multi-account sessions; cookies are valid but a
+    // server-side request can't satisfy the device/session binding. The
+    // reliable route for YouTube history is the official export.
+    fix: `Recent YouTube sync can't establish a session for this Google account — Google served an identity-verification page. Import your history from Google Takeout instead: \`${CLI_NAME} import youtube <google-export.zip> --json\`. If you use multiple Google accounts in this browser, set plugins.youtube.authUser in ~/${CONFIG_FILENAME} to the right account index (0 = first).`,
+    confirm: DOCTOR_YOUTUBE,
+    sample: "Google served an identity-verification page instead of My Activity for this account; recent YouTube sync cannot establish a session.",
   },
   youtube_keychain_blocked: {
     level: "critical",

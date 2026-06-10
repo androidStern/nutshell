@@ -18,7 +18,7 @@ import type { TracePlugin } from "../../interface";
 import type { PluginSetupContext } from "../../../setup/types";
 import { googleTakeoutYoutubePluginResult } from "../../../imports/google-takeout-youtube";
 import { dateKeyToDate, youtubeEventType, youtubeFingerprint, youtubeHappenedAt, youtubeSourceId, type YouTubeActivityItem } from "./identity";
-import { collectYouTubeFromMyActivityHttp, type MyActivityHttpResult } from "./myactivity-http";
+import { collectYouTubeFromMyActivityHttp, MYACTIVITY_SESSION_UNVERIFIABLE, type MyActivityHttpResult } from "./myactivity-http";
 import { YOUTUBE_FINDINGS } from "./findings";
 
 type YouTubeCollector = typeof collectYouTubeFromMyActivityHttp;
@@ -29,7 +29,7 @@ interface YouTubeState {
   lastScroll?: JsonObject;
 }
 
-type YouTubeProbeFailureCode = "youtube_signed_out" | "youtube_keychain_blocked" | "youtube_activity_unreadable";
+type YouTubeProbeFailureCode = "youtube_signed_out" | "youtube_keychain_blocked" | "youtube_activity_unreadable" | "youtube_session_unverifiable";
 
 type YouTubeProbeResult =
   | { ok: true; message: string; detail: JsonObject }
@@ -114,6 +114,7 @@ export class YouTubePlugin implements TracePlugin {
           cookieBrowser: cfg.cookieBrowser,
           cookieProfile: cfg.cookieProfile,
           cookieTimeoutMs: cfg.cookieTimeoutMs,
+          authUser: cfg.authUser,
           signal: ctx.signal,
         });
         return normalizeCollectionResult(result, state, window, observedAt, cutoffYmd, health);
@@ -139,6 +140,7 @@ export class YouTubePlugin implements TracePlugin {
       cookieBrowser: cfg.cookieBrowser,
       cookieProfile: cfg.cookieProfile,
       cookieTimeoutMs: cfg.cookieTimeoutMs,
+      authUser: cfg.authUser,
       signal,
     });
     const loadedCards = Number(result.scroll.loadedCardCount || 0);
@@ -173,7 +175,7 @@ export class YouTubePlugin implements TracePlugin {
 // pick their own fallback code (probe vs sync).
 function classifyYouTubeAccessError(
   error: unknown,
-): { code: "youtube_signed_out" | "youtube_keychain_blocked"; message: string; detail: JsonObject } | null {
+): { code: "youtube_signed_out" | "youtube_keychain_blocked" | "youtube_session_unverifiable"; message: string; detail: JsonObject } | null {
   const text = String(error);
   if (isChromeSafeStorageAccessIssue(text)) {
     return {
@@ -182,10 +184,17 @@ function classifyYouTubeAccessError(
       detail: { reason: CHROME_SAFE_STORAGE_REASON, error: text },
     };
   }
+  if (text.includes(MYACTIVITY_SESSION_UNVERIFIABLE)) {
+    return {
+      code: "youtube_session_unverifiable",
+      message: "Google served an identity-verification page instead of My Activity for this account; recent YouTube sync cannot establish a session.",
+      detail: { error: text },
+    };
+  }
   if (isYouTubeSignedOutError(text)) {
     return {
       code: "youtube_signed_out",
-      message: "YouTube browser session is signed out of Google. Sign into Google My Activity in the configured Chrome profile and try again.",
+      message: "You're not signed into Google in Chrome.",
       detail: { error: text },
     };
   }
@@ -225,6 +234,7 @@ function configFromJson(cfg: JsonObject) {
     cookieTimeoutMs: numberAt(cfg, "cookieTimeoutMs", 30_000),
     overlapHours: numberAt(cfg, "overlapHours", 48),
     httpMaxPages: numberAt(cfg, "httpMaxPages", 10),
+    authUser: numberAt(cfg, "authUser", 0),
   };
 }
 

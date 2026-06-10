@@ -21,6 +21,10 @@ export async function collectYouTubeFromMyActivityHttp(input: {
   cookieBrowser: string;
   cookieProfile: string;
   cookieTimeoutMs: number;
+  // Which signed-in Google account to use, by browser order (0 = first).
+  // A browser signed into multiple Google accounts shares one cookie jar;
+  // without this, My Activity bounces every request to the account chooser.
+  authUser: number;
   signal: AbortSignal;
 }): Promise<MyActivityHttpResult> {
   const cookies = await readBrowserCookieHeader({
@@ -35,8 +39,9 @@ export async function collectYouTubeFromMyActivityHttp(input: {
     throw new Error(`${message}; warnings=${warnings}`);
   }
   const cookieHeader = cookies.header;
+  const authUser = Math.max(0, Math.trunc(input.authUser));
   {
-    const page = await fetchText(cookieHeader, "https://myactivity.google.com/myactivity?product=26", null, input.signal);
+    const page = await fetchText(cookieHeader, withAuthUser("https://myactivity.google.com/myactivity?product=26", authUser), null, authUser, input.signal);
     const session = parseSession(page);
     const allItems: YouTubeActivityItem[] = [];
     let cursor: string | null = input.cursor ?? null;
@@ -50,7 +55,7 @@ export async function collectYouTubeFromMyActivityHttp(input: {
 
     while (pages < input.maxPages) {
       const request = cursor ? [youtubeProductFilter(), cursor] : [youtubeProductFilter()];
-      const response = await callDisplayItems(cookieHeader, session, request, pages, input.signal);
+      const response = await callDisplayItems(cookieHeader, session, request, pages, authUser, input.signal);
       pages += 1;
       const parsed = parseDisplayItemsResponse(response);
       const items = parsed.rows.map(rowToItem).filter((item): item is YouTubeActivityItem => Boolean(item));
@@ -95,12 +100,19 @@ export async function collectYouTubeFromMyActivityHttp(input: {
   }
 }
 
-async function fetchText(cookieHeader: string, url: string, formBody: string | null, signal: AbortSignal): Promise<string> {
+function withAuthUser(url: string, authUser: number): string {
+  return `${url}${url.includes("?") ? "&" : "?"}authuser=${authUser}`;
+}
+
+async function fetchText(cookieHeader: string, url: string, formBody: string | null, authUser: number, signal: AbortSignal): Promise<string> {
   const headers = new Headers({
     "user-agent": userAgent,
     cookie: cookieHeader,
     origin: "https://myactivity.google.com",
     referer: "https://myactivity.google.com/myactivity?product=26",
+    // Disambiguates which account in a multi-account cookie jar; the URL
+    // authuser param and this header must agree.
+    "x-goog-authuser": String(authUser),
   });
   const init: RequestInit = {
     method: formBody === null ? "GET" : "POST",
@@ -119,12 +131,30 @@ async function fetchText(cookieHeader: string, url: string, formBody: string | n
   return text;
 }
 
+// Sentinel substring carried by parseSession errors that mean "Google
+// interposed an identity-verification page" — classified to a dedicated
+// finding so the product names the real cause instead of guessing.
+export const MYACTIVITY_SESSION_UNVERIFIABLE = "could not establish a My Activity session";
+
 function parseSession(html: string): MyActivitySession {
+  // The authoritative signal that we reached the real My Activity app is its
+  // own build label. A page can carry the generic SNlM0e token yet still be
+  // Google's identity/auth shell (multi-account or device-binding checks), so
+  // we key on the footprints build, not loose "Sign in" text or SNlM0e alone.
+  const footprintsBuild = html.match(/boq_footprintsmyactivityuiserver_[^"&/]+/);
+  if (footprintsBuild && /"SNlM0e":"[^"]+"/.test(html)) {
+    const at = matchRequired(html, /"SNlM0e":"([^"]+)"/, "SNlM0e");
+    const fsid = matchRequired(html, /"FdrFJe":"([^"]+)"/, "FdrFJe");
+    return { at, fsid, bl: footprintsBuild[0] };
+  }
   if (/FootprintsMyactivitySignedoutUi/i.test(html.slice(0, 500_000))) {
     throw new Error("Google My Activity returned the signed-out shell for the configured browser profile");
   }
-  if (/accounts\.google\.com\/(?:signin|ServiceLogin)|Sign in/i.test(html.slice(0, 200_000))) {
-    throw new Error("Google My Activity returned a signed-out page");
+  if (/boq_identityfrontendauthuiserver/i.test(html)) {
+    throw new Error(`Google ${MYACTIVITY_SESSION_UNVERIFIABLE}: it served an identity-verification page for this account`);
+  }
+  if (/accounts\.google\.com\/(?:signin|ServiceLogin)/i.test(html.slice(0, 200_000))) {
+    throw new Error(`Google ${MYACTIVITY_SESSION_UNVERIFIABLE}: no account session resolved; set youtube.authUser to the right account index`);
   }
   const at = matchRequired(html, /"SNlM0e":"([^"]+)"/, "SNlM0e");
   const fsid = matchRequired(html, /"FdrFJe":"([^"]+)"/, "FdrFJe");
@@ -137,6 +167,7 @@ async function callDisplayItems(
   session: MyActivitySession,
   request: unknown[],
   page: number,
+  authUser: number,
   signal: AbortSignal,
 ): Promise<string> {
   const fReq = JSON.stringify([[["y3VFHd", JSON.stringify(request), null, "generic"]]]);
@@ -144,8 +175,8 @@ async function callDisplayItems(
   const url =
     `https://myactivity.google.com/_/FootprintsMyactivityUi/data/batchexecute?rpcids=y3VFHd` +
     `&source-path=%2Fmyactivity&f.sid=${encodeURIComponent(session.fsid)}&bl=${encodeURIComponent(session.bl)}` +
-    `&hl=en&soc-app=712&soc-platform=1&soc-device=1&_reqid=${7000 + page}&rt=c`;
-  return fetchText(cookieHeader, url, body, signal);
+    `&hl=en&authuser=${authUser}&soc-app=712&soc-platform=1&soc-device=1&_reqid=${7000 + page}&rt=c`;
+  return fetchText(cookieHeader, url, body, authUser, signal);
 }
 
 function parseDisplayItemsResponse(text: string): { rows: unknown[]; cursor: string | null } {

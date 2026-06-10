@@ -110,12 +110,30 @@ test("youtube health probe reports collector auth exceptions instead of crashing
   expect(findings).toHaveLength(1);
   expect(findings[0]?.level).toBe("critical");
   expect(findings[0]?.code).toBe("youtube_signed_out");
-  expect(findings[0]?.message).toContain("Sign into Google My Activity");
+  expect(findings[0]?.message).toContain("not signed into Google");
   expect(findings[0]?.guidance?.state).toBe("needs_auth");
   expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
   expect(findings[0]?.guidance?.url).toBe("https://www.youtube.com");
   expect(JSON.stringify(findings[0]?.detail)).toContain("signed-out shell");
+});
+
+test("youtube health probe names Google's identity-verification interstitial, not a false signed-out", async () => {
+  // Regression: a real multi-account / device-bound Google session gets bounced
+  // to an identity-verification page even with valid cookies. The product must
+  // name that (blocked_bug, route to import) instead of claiming "signed out".
+  const plugin = new YouTubePlugin(async () => {
+    throw new Error("Google could not establish a My Activity session: it served an identity-verification page for this account");
+  });
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("youtube_session_unverifiable");
+  expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+  expect(findings[0]?.guidance?.fix).toContain("import youtube");
+  expect(findings[0]?.guidance?.fix).toContain("authUser");
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
 });
 
 test("youtube health probe reports Chrome Safe Storage as a permission block", async () => {
