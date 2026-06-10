@@ -11,6 +11,8 @@ The rehearsal has two environments:
 
 Private seed files must stay outside git. Do not commit Apple Podcasts databases, X archives, Google exports, browser profiles, or rehearsal reports with private account data.
 
+For repeated downstream debugging, private browser auth seeds may be captured and restored as described in `docs/rehearsal-browser-auth-seeds.md`. Those seeds reduce repeated Google/X login handoffs, but they are not clean release-pass evidence. A final pass still must prove the signed-out state and then create the signed-in state through the explicit browser-login handoff.
+
 ## Product Contract
 
 The rehearsal validates product behavior from user-visible states, not from implementation convenience. Every phase in the machine-readable report records a product validation contract with `userStory`, `expectedState`, `observedState`, `source`, `pass`, `blockerKind`, and optional `diagnosticAction`.

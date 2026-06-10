@@ -10,7 +10,7 @@ This file captures operational lessons from the strict Nutshell fresh-install re
 - Test user: `nutshelltest`
 - Test user password and keychain password: `nutshelltest`
 - Host input folder: `~/Documents/NutshellRehearsalShare`
-- Public product under test for the current strict attempt: `v0.1.14`
+- Public product under test for the next strict attempt: `v0.1.17`
 - Do not trust a VM name that says "Clean Baseline". Verify clean state from inside the VM before claiming clean evidence.
 
 ## Hard Rules
@@ -32,6 +32,7 @@ Use Tart when VirtualBuddy GUI control is unreliable.
 - Use `tart exec -i -t ...` with a real host PTY for interactive setup. In Codex, set `tty: true` on the host `exec_command`. Non-PTY `tart exec` can let `nutshell setup` return without a real Full Disk Access handoff.
 - Do not reuse an attempt VM after a failed product or harness phase. Freeze its report, stop it, and clone a new attempt from the clean Tart base.
 - Chrome may request the VM login keychain for `Chrome Safe Storage`; enter `admin` and choose `Always Allow`. If this is not granted, authenticated browser checks can fail with keychain/Safe Storage warnings instead of proving source auth.
+- For downstream debug runs, do not make the user repeat Google/X login. Use `docs/rehearsal-browser-auth-seeds.md` and the Tart auth seed scripts to capture and restore the private Chrome profile plus login keychain. Restored auth is diagnostic only and cannot satisfy a clean release-pass report.
 - If `nutshell doctor`, `nutshell health`, or `nutshell sync` reads protected/browser state from a Tart exec or terminal-owned process instead of `Nutshell.app`, freeze the attempt. The public CLI is expected to hand these protected commands to the installed app wrapper on macOS.
 - macOS launchctl may report the app-owned agent through ServiceManagement as `program identifier = Contents/Library/LaunchServices/NutshellAgent` plus `parent bundle identifier = com.winterfell.nutshell`, not as a full `Nutshell.app/...` path. That is valid app-owned evidence; raw CLI/Bun/Homebrew Cellar targets are not.
 
@@ -105,6 +106,7 @@ Use this sequence before running product checks:
 - If setup fails only because the harness rejects valid ServiceManagement launchctl evidence, freeze that attempt as a harness failure, patch the harness, and restart from a clean clone.
 - Attempt `nutshell-strict-attempt-v0.1.14-20260609e` failed after user-completed Google/X login because Chrome Safe Storage keychain reads timed out from the product browser-auth path. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.14-tart-run-20260609e.failed-frozen.json` as a failed `0.1.14` rehearsal. The fix is not to patch that VM; publish a new artifact and start a new clean clone.
 - Attempt `nutshell-strict-attempt-v0.1.15-20260609a` failed at `published-install`: Homebrew installed formula `0.1.15`, but the installed command printed `nutshell 0.1.14` because `PRODUCT_VERSION` was still hardcoded. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.15-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Release certification now checks source, compiled, and package-installed CLI versions against `package.json`.
+- Attempt `nutshell-strict-attempt-v0.1.16-20260609a` failed at `authenticated-browser-state`: Google and X were visibly signed in, but both browser cookie probes and doctors timed out reading Chrome Safe Storage through the macOS keychain. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.16-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Private auth seed captured at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`.
 
 ## Attention Triggers
 

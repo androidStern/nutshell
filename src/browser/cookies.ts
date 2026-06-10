@@ -1,4 +1,5 @@
 import { getCookies, toCookieHeader, type BrowserName, type Cookie } from "@steipete/sweet-cookie";
+import { readMacChromeCookiesWithPassword } from "./chrome-macos";
 
 export interface BrowserCookieRequest {
   url: string;
@@ -26,6 +27,10 @@ export async function readBrowserCookieHeader(request: BrowserCookieRequest): Pr
 }
 
 export async function readBrowserCookies(request: BrowserCookieRequest): Promise<BrowserCookieSet> {
+  const safeStoragePassword = process.env.NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD;
+  if (process.platform === "darwin" && safeStoragePassword && usesChrome(request.browser)) {
+    return readMacChromeCookiesWithPassword(request, safeStoragePassword);
+  }
   const browsers = request.browser ? [normalizeBrowserName(request.browser)] : undefined;
   const result = await getCookies({
     url: request.url,
@@ -38,6 +43,10 @@ export async function readBrowserCookies(request: BrowserCookieRequest): Promise
     mode: "merge",
   });
   return { cookies: result.cookies, warnings: result.warnings };
+}
+
+function usesChrome(value: string | undefined): boolean {
+  return !value || value === "chrome";
 }
 
 export function cookieValue(cookies: readonly Cookie[], name: string): string | null {

@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Darwin
 import Foundation
+import Security
 import ServiceManagement
 
 let appBundleID = "com.winterfell.nutshell"
@@ -260,16 +261,23 @@ func runCore(_ arguments: [String], timeoutSeconds: TimeInterval? = nil) throws 
   guard let core = Bundle.main.url(forResource: "nutshell-core", withExtension: nil) else {
     throw AppError.missingBundleResource("nutshell-core")
   }
-  return runProcess(core.path, arguments, timeoutSeconds: timeoutSeconds)
+  var environment: [String: String] = [:]
+  if let chromeSafeStoragePassword = chromeSafeStoragePassword() {
+    environment["NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD"] = chromeSafeStoragePassword
+  }
+  return runProcess(core.path, arguments, timeoutSeconds: timeoutSeconds, extraEnvironment: environment)
 }
 
-func runProcess(_ executable: String, _ arguments: [String], timeoutSeconds: TimeInterval? = nil) -> ProcessResult {
+func runProcess(_ executable: String, _ arguments: [String], timeoutSeconds: TimeInterval? = nil, extraEnvironment: [String: String] = [:]) -> ProcessResult {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: executable)
   process.arguments = arguments
   var environment = ProcessInfo.processInfo.environment
   environment["NUTSHELL_APP_BUNDLE_ID"] = appBundleID
   environment["NUTSHELL_APP_PATH"] = Bundle.main.bundleURL.path
+  for (key, value) in extraEnvironment {
+    environment[key] = value
+  }
   process.environment = environment
 
   let pipe = Pipe()
@@ -301,6 +309,22 @@ func runProcess(_ executable: String, _ arguments: [String], timeoutSeconds: Tim
   }
   let data = pipe.fileHandleForReading.readDataToEndOfFile()
   return ProcessResult(code: process.terminationStatus, output: String(data: data, encoding: .utf8) ?? "")
+}
+
+func chromeSafeStoragePassword() -> String? {
+  let query: [String: Any] = [
+    kSecClass as String: kSecClassGenericPassword,
+    kSecAttrAccount as String: "Chrome",
+    kSecAttrService as String: "Chrome Safe Storage",
+    kSecReturnData as String: true,
+    kSecMatchLimit as String: kSecMatchLimitOne,
+  ]
+  var item: CFTypeRef?
+  let status = SecItemCopyMatching(query as CFDictionary, &item)
+  guard status == errSecSuccess, let data = item as? Data else {
+    return nil
+  }
+  return String(data: data, encoding: .utf8)
 }
 
 func fullDiskAccessGranted() -> Bool {
