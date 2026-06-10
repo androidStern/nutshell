@@ -1,4 +1,4 @@
-import type { HealthFinding, JsonObject } from "../core/types";
+import type { HealthFinding, JsonObject, SourceId } from "../core/types";
 import { CLI_NAME, PRODUCT_NAME } from "../core/product";
 import { finding } from "../plugins/interface";
 import { FindingCatalog, guidanceFromJson, guidanceFromSpec } from "./guidance";
@@ -222,6 +222,27 @@ export function systemFinding(
 // Setup findings persisted in the config carry their guidance as plain JSON.
 // Re-validate it through guidanceFromJson when re-surfacing them so the stored
 // fix text survives the round-trip and invalid shapes are dropped.
+// Stored setup findings (config-draft shape: no source key, ISO observedAt)
+// rebuilt as real HealthFindings for surfaces that render them directly.
+export function healthFindingsFromStored(source: SourceId, stored: JsonObject[]): HealthFinding[] {
+  return stored.flatMap((item) => {
+    if (typeof item.code !== "string" || typeof item.message !== "string") return [];
+    const guidance = guidanceFromJson(item.guidance ?? null);
+    const level = item.level === "warning" || item.level === "ok" ? item.level : "critical";
+    return [
+      {
+        level,
+        source,
+        code: item.code,
+        message: item.message,
+        detail: (item.detail ?? {}) as HealthFinding["detail"],
+        observedAt: typeof item.observedAt === "string" ? new Date(item.observedAt) : new Date(),
+        ...(guidance ? { guidance } : {}),
+      } satisfies HealthFinding,
+    ];
+  });
+}
+
 export function restoredSetupFindings(stored: JsonObject[]): JsonObject[] {
   return stored.map((item) => {
     const guidance = guidanceFromJson(item.guidance ?? null);

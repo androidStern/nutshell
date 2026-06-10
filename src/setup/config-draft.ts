@@ -61,6 +61,13 @@ export function pluginSetupStatus(config: TraceConfig, source: SourceId): Plugin
   return status === "ready" || status === "degraded" || status === "disabled" ? status : null;
 }
 
+export function pluginSetupUpdatedAt(config: TraceConfig, source: SourceId): Date | null {
+  const setup = objectAt(objectAt(objectAt(config.data, "plugins"), source), "setup");
+  if (typeof setup.updatedAt !== "string") return null;
+  const parsed = new Date(setup.updatedAt);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 export function pluginSetupFindings(config: TraceConfig, source: SourceId): JsonObject[] {
   const setup = objectAt(objectAt(objectAt(config.data, "plugins"), source), "setup");
   return Array.isArray(setup.findings)

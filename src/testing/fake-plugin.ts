@@ -1,5 +1,6 @@
 import type {
   Checkpoint,
+  HealthFinding,
   JsonObject,
   PluginContext,
   PluginManifest,
@@ -10,10 +11,12 @@ import type { TracePlugin } from "../plugins/interface";
 
 export class FakePlugin implements TracePlugin {
   readonly manifest: PluginManifest;
+  checkCalls = 0;
 
   constructor(
     id: string,
     private readonly resultFactory: (checkpoint: Checkpoint, ctx: PluginContext) => PluginSyncResult | Promise<PluginSyncResult>,
+    private readonly checkFactory: () => HealthFinding[] | Promise<HealthFinding[]> = () => [],
   ) {
     this.manifest = {
       id,
@@ -26,7 +29,8 @@ export class FakePlugin implements TracePlugin {
   }
 
   async check() {
-    return [];
+    this.checkCalls += 1;
+    return this.checkFactory();
   }
 
   async sync(ctx: PluginContext, _request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {

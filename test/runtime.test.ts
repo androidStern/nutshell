@@ -6,6 +6,8 @@ import { loadConfig } from "../src/config/config";
 import { TraceRuntime } from "../src/runtime/trace-runtime";
 import { PluginRegistry } from "../src/plugins/registry";
 import { FakePlugin, fakeOkResult } from "../src/testing/fake-plugin";
+import { finding } from "../src/plugins/interface";
+import { pluginSetupFindings, pluginSetupStatus } from "../src/setup/config-draft";
 import { DEFAULT_SYNC_BUDGET } from "../src/config/defaults";
 import type { Checkpoint, EnrichmentRequest, JsonObject, PluginContext, PluginSyncResult, ProviderExportImportRequest, SyncRequest } from "../src/core/types";
 
@@ -347,49 +349,155 @@ test("runtime refreshes projections after import and enrichment mutations", asyn
   }
 });
 
-test("runtime skips degraded plugins during scheduled all-source sync", async () => {
+function degradedPluginsConfig(code: string, updatedAt = "2026-05-24T12:00:00Z"): JsonObject {
+  return {
+    fake: {
+      enabled: true,
+      setup: {
+        status: "degraded",
+        updatedAt,
+        findings: [
+          {
+            level: "critical",
+            code,
+            message: "fake auth failed",
+            observedAt: "2026-05-24T12:00:00Z",
+            detail: {},
+            guidance: { state: "needs_auth", fix: "Sign into fake in Chrome, then retry.", confirm: "nutshell doctor fake" },
+          },
+        ],
+      },
+    },
+  };
+}
+
+const scheduledRecentSync = {
+  source: null,
+  mode: "recent",
+  window: null,
+  collections: [],
+  budget: DEFAULT_SYNC_BUDGET,
+  dryRun: false,
+} as const;
+
+test("scheduled sync probes a degraded plugin and skips when the probe still fails", async () => {
   const root = mkdtempSync(join(tmpdir(), "trace-runtime-degraded-"));
   try {
     const config = loadConfig(root);
-    config.data.plugins = {
-      fake: {
-        enabled: true,
-        setup: {
-          status: "degraded",
-          findings: [{ level: "critical", code: "fake_auth", message: "fake auth failed", observedAt: "2026-05-24T12:00:00Z", detail: {} }],
-        },
-      },
-    };
+    config.data.plugins = degradedPluginsConfig("fake_auth");
     let syncCalled = false;
-    const runtime = new TraceRuntime({
-      root,
-      config,
-      registry: new PluginRegistry([
-        new FakePlugin("fake", () => {
-          syncCalled = true;
-          return fakeOkResult("fake");
-        }),
-      ]),
+    const probeFinding = finding("critical", "fake", "fake_auth", "still signed out", {}, new Date(), {
+      state: "needs_auth",
+      fix: "Sign into fake in Chrome, then retry.",
+      confirm: "nutshell doctor fake",
     });
+    const plugin = new FakePlugin(
+      "fake",
+      () => {
+        syncCalled = true;
+        return fakeOkResult("fake");
+      },
+      () => [probeFinding],
+    );
+    const runtime = new TraceRuntime({ root, config, registry: new PluginRegistry([plugin]) });
 
-    const report = await runtime.sync({
-      source: null,
-      mode: "recent",
-      window: null,
-      collections: [],
-      budget: DEFAULT_SYNC_BUDGET,
-      dryRun: false,
-    });
+    const report = await runtime.sync({ ...scheduledRecentSync });
 
+    expect(plugin.checkCalls).toBe(1);
     expect(syncCalled).toBe(false);
     expect(report.status).toBe("warning");
     expect(report.sources[0]?.status).toBe("skipped");
-    const degraded = report.sources[0]?.findings[0];
-    expect(degraded?.code).toBe("plugin_setup_degraded");
-    expect(degraded?.source).toBe("fake");
-    expect(degraded?.guidance?.state).toBe("blocked_bug");
-    expect(degraded?.guidance?.fix?.length).toBeGreaterThan(0);
-    expect(degraded?.guidance?.confirm?.length).toBeGreaterThan(0);
+    const lead = report.sources[0]?.findings[0];
+    expect(lead?.code).toBe("fake_auth");
+    expect(lead?.message).toBe("still signed out");
+    expect(lead?.guidance?.fix?.length).toBeGreaterThan(0);
+    // The stored finding was refreshed with the probe's current truth.
+    const stored = pluginSetupFindings(loadConfig(root), "fake");
+    expect(stored[0]?.message).toBe("still signed out");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled sync self-heals a degraded plugin when the probe passes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-runtime-heal-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = degradedPluginsConfig("fake_auth");
+    let syncCalled = false;
+    const plugin = new FakePlugin("fake", () => {
+      syncCalled = true;
+      return fakeOkResult("fake");
+    });
+    const runtime = new TraceRuntime({ root, config, registry: new PluginRegistry([plugin]) });
+
+    const report = await runtime.sync({ ...scheduledRecentSync });
+
+    expect(plugin.checkCalls).toBe(1);
+    expect(syncCalled).toBe(true);
+    expect(report.status).toBe("ok");
+    expect(report.sources[0]?.status).toBe("ok");
+    expect(report.sources[0]?.commit?.insertedRecords).toBe(1);
+    expect(pluginSetupStatus(loadConfig(root), "fake")).toBe("ready");
+
+    // The next scheduled run needs no probe at all — status is ready.
+    const second = await runtime.sync({ ...scheduledRecentSync });
+    expect(plugin.checkCalls).toBe(1);
+    expect(second.sources[0]?.status).toBe("ok");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled sync backs off rate-limited sources instead of probing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-runtime-ratelimit-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = degradedPluginsConfig("fake_rate_limited", new Date().toISOString());
+    let syncCalled = false;
+    const plugin = new FakePlugin("fake", () => {
+      syncCalled = true;
+      return fakeOkResult("fake");
+    });
+    const runtime = new TraceRuntime({ root, config, registry: new PluginRegistry([plugin]) });
+
+    const report = await runtime.sync({ ...scheduledRecentSync });
+
+    expect(plugin.checkCalls).toBe(0);
+    expect(syncCalled).toBe(false);
+    expect(report.sources[0]?.status).toBe("skipped");
+    expect(report.sources[0]?.metrics).toMatchObject({ reason: "rate_limit_backoff" });
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a scheduled sync failing on auth marks the source degraded for the next run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-runtime-redegrade-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = { fake: { enabled: true, setup: { status: "ready", updatedAt: "2026-05-24T12:00:00Z", findings: [] } } };
+    const authFinding = finding("critical", "fake", "fake_auth", "signed out mid-flight", {}, new Date(), {
+      state: "needs_auth",
+      fix: "Sign into fake in Chrome, then retry.",
+      confirm: "nutshell doctor fake",
+    });
+    const plugin = new FakePlugin("fake", () => ({
+      ...fakeOkResult("fake"),
+      health: [authFinding],
+      completed: false,
+      partial: true,
+    }));
+    const runtime = new TraceRuntime({ root, config, registry: new PluginRegistry([plugin]) });
+
+    await runtime.sync({ ...scheduledRecentSync });
+
+    expect(pluginSetupStatus(loadConfig(root), "fake")).toBe("degraded");
+    const stored = pluginSetupFindings(loadConfig(root), "fake");
+    expect(stored[0]?.code).toBe("fake_auth");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

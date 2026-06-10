@@ -3,6 +3,8 @@ import { redactJson, redactText } from "../core/redaction";
 
 // One code = one user state = one fix. A failure that needs a different fix
 // gets its own code, not a message variant.
+// Naming contract: codes for provider rate limits end in "_rate_limited" —
+// the scheduler backs off on those instead of probing them every run.
 export interface FindingSpec {
   level: "warning" | "critical";
   state: UserState;

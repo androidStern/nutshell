@@ -5,6 +5,7 @@ import type {
   Checkpoint,
   EnrichmentRequest,
   EnrichmentSourceReport,
+  HealthFinding,
   HealthReport,
   HealthScope,
   JsonObject,
@@ -12,6 +13,7 @@ import type {
   ProjectionReport,
   ProjectionRequest,
   ProviderExportImportRequest,
+  SourceId,
   SyncReport,
   SyncRequest,
   SyncSourceReport,
@@ -23,7 +25,7 @@ import type {
 import { sha256, runId } from "../core/ids";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
 import { booleanAt, loadConfig, logPath, numberAt, objectAt, pluginConfig, storePath, type TraceConfig } from "../config/config";
-import { pluginSetupFindings, pluginSetupStatus } from "../setup/config-draft";
+import { JsonConfigDraft, pluginSetupFindings, pluginSetupStatus, pluginSetupUpdatedAt } from "../setup/config-draft";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
 import type { TracePlugin } from "../plugins/interface";
 import type { TraceStore } from "../store/interface";
@@ -31,7 +33,7 @@ import { openStore } from "../store/sqlite-store";
 import { RuntimeLock } from "./lock";
 import { JsonlLogger } from "./logger";
 import { evaluateHealth } from "../health/checks";
-import { restoredSetupFindings, systemFinding } from "../health/system-findings";
+import { healthFindingsFromStored, systemFinding } from "../health/system-findings";
 import { renderDailyJson } from "../projections/daily-json";
 import { renderDailyMarkdown } from "../projections/daily-markdown";
 import { renderDashboardData } from "../projections/dashboard-data";
@@ -80,25 +82,16 @@ export class TraceRuntime {
         const sourceStarted = new Date();
         const setupStatus = pluginSetupStatus(this.config, plugin.manifest.id);
         if (!request.source && setupStatus === "degraded") {
-          const finishedAt = new Date();
-          const finding = systemFinding(
-            "plugin_setup_degraded",
-            plugin.manifest.id,
-            `${plugin.manifest.displayName} setup is degraded; skipping scheduled sync until setup or doctor repairs it`,
-            { setupFindings: restoredSetupFindings(pluginSetupFindings(this.config, plugin.manifest.id)) },
-            finishedAt,
-          );
-          sources.push({
-            source: plugin.manifest.id,
-            status: "skipped",
-            startedAt: sourceStarted,
-            finishedAt,
-            durationMs: finishedAt.getTime() - sourceStarted.getTime(),
-            findings: [finding],
-            metrics: { skipped: true, reason: "plugin_setup_degraded" },
-          });
-          this.logger.warn("runtime: source skipped", { source: plugin.manifest.id, reason: "plugin_setup_degraded" });
-          continue;
+          // Self-healing: one bounded probe per scheduled run. If the user
+          // fixed the underlying problem (logged in, granted permission), the
+          // probe passes, status flips back to ready, and the sync proceeds —
+          // no setup re-run required. If it still fails, the stored finding is
+          // refreshed (one deduped write) and the expensive sync is skipped.
+          const probe = await this.probeDegradedSource(plugin, sourceStarted);
+          if (!probe.healed) {
+            sources.push(probe.report);
+            continue;
+          }
         }
         const controller = new AbortController();
         const budget = { ...plugin.manifest.defaultBudget, ...request.budget };
@@ -150,6 +143,7 @@ export class TraceRuntime {
           });
           const enrichment = await this.runAutomaticEnrichment(plugin, request, sourceReport);
           if (enrichment) sourceReport.enrichment = enrichment;
+          if (!request.source && !request.dryRun) this.recordSetupStateFromSync(plugin, result.health);
           sources.push(sourceReport);
         } catch (error) {
           const finishedAt = new Date();
@@ -220,6 +214,82 @@ export class TraceRuntime {
     } finally {
       lock.release();
     }
+  }
+
+  // One bounded probe for a degraded source during a scheduled run. Healed →
+  // status flips back to ready and the caller proceeds with the full sync.
+  // Still failing → skipped report carrying the CURRENT probe findings (not
+  // stale stored state), refreshed into config as one deduped write. Sources
+  // whose stored findings are provider rate limits back off instead of
+  // probing (catalog naming contract: codes end in "_rate_limited").
+  private async probeDegradedSource(plugin: TracePlugin, startedAt: Date): Promise<{ healed: true } | { healed: false; report: SyncSourceReport }> {
+    const source = plugin.manifest.id;
+    const runtimeCfg = objectAt(this.config.data, "runtime");
+    const stored = healthFindingsFromStored(source, pluginSetupFindings(this.config, source));
+    const rateLimited = stored.some((finding) => finding.code.endsWith("_rate_limited"));
+    if (rateLimited) {
+      const backoffMs = numberAt(runtimeCfg, "rateLimitBackoffMs", 60 * 60_000);
+      const updatedAt = pluginSetupUpdatedAt(this.config, source);
+      if (updatedAt && Date.now() - updatedAt.getTime() < backoffMs) {
+        return { healed: false, report: this.skippedSourceReport(plugin, startedAt, stored, "rate_limit_backoff") };
+      }
+    }
+    const probeTimeoutMs = numberAt(runtimeCfg, "scheduledProbeTimeoutMs", 120_000);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("probe timeout")), probeTimeoutMs);
+    let findings: HealthFinding[];
+    try {
+      findings = await plugin.check(this.pluginContext(source, controller.signal, true));
+    } catch (error) {
+      findings = [systemFinding("plugin_check_crashed", source, "Plugin health check crashed", { error: String(error) })];
+    } finally {
+      clearTimeout(timeout);
+    }
+    const status = findings.some((finding) => finding.level === "critical") ? "degraded" : "ready";
+    await this.writeSetupStatus(source, status, findings);
+    if (status === "ready") {
+      this.logger.event("runtime: degraded source healed by probe", { source });
+      return { healed: true };
+    }
+    this.logger.warn("runtime: source skipped", { source, reason: "probe_still_failing", codes: findings.map((finding) => finding.code) });
+    return { healed: false, report: this.skippedSourceReport(plugin, startedAt, findings, "probe_still_failing") };
+  }
+
+  private skippedSourceReport(plugin: TracePlugin, startedAt: Date, findings: HealthFinding[], reason: string): SyncSourceReport {
+    const finishedAt = new Date();
+    return {
+      source: plugin.manifest.id,
+      status: "skipped",
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+      findings,
+      metrics: { skipped: true, reason },
+    };
+  }
+
+  // A scheduled sync that fails with an auth/permission problem marks the
+  // source degraded, so the next scheduled run probes cheaply instead of
+  // re-running the full sync into the same wall.
+  private recordSetupStateFromSync(plugin: TracePlugin, findings: HealthFinding[]): void {
+    const blocking = findings.filter(
+      (finding) =>
+        finding.level === "critical" &&
+        (finding.guidance?.state === "needs_auth" || finding.guidance?.state === "needs_permission"),
+    );
+    if (!blocking.length) return;
+    void this.writeSetupStatus(plugin.manifest.id, "degraded", blocking).catch((error) => {
+      this.logger.error("runtime: failed to record degraded setup state", { source: plugin.manifest.id, error: String(error) });
+    });
+  }
+
+  private async writeSetupStatus(source: SourceId, status: "ready" | "degraded", findings: HealthFinding[]): Promise<void> {
+    const draft = new JsonConfigDraft(this.config);
+    draft.setPluginSetupStatus(source, status, findings);
+    await draft.commit();
+    // Keep the in-memory config coherent for the rest of this run.
+    (this.config.data as JsonObject).plugins = draft.data.plugins ?? {};
+    this.logger.event("runtime: setup status recorded", { source, status });
   }
 
   async importProviderExport(request: ProviderExportImportRequest): Promise<SyncSourceReport> {
