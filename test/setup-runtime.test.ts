@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SYNC_BUDGET } from "../src/config/defaults";
 import { loadConfig } from "../src/config/config";
+import { APP_PATH_ENV, PRODUCT_NAME } from "../src/core/product";
 import type { Checkpoint, HealthFinding, JsonObject, PluginContext, PluginManifest, PluginSyncResult, ProviderExportImportRequest, SyncRequest } from "../src/core/types";
 import { makeFinding } from "../src/health/health";
 import { AppleNotesPlugin } from "../src/plugins/builtin/apple-notes/plugin";
@@ -12,9 +13,11 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 import { YouTubePlugin } from "../src/plugins/builtin/youtube/plugin";
 import type { TracePlugin } from "../src/plugins/interface";
 import { PluginRegistry } from "../src/plugins/registry";
-import { DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS, SetupRuntime, permissionHandoffTimeoutMs } from "../src/setup/setup-runtime";
-import type { HostCapabilities, HostRunResult, PluginSetupContext } from "../src/setup/types";
-import { pluginSetupStatus } from "../src/setup/config-draft";
+import { DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS, SetupRuntime, exitCodeForSetup, permissionHandoffTimeoutMs } from "../src/setup/setup-runtime";
+import type { SetupProber } from "../src/setup/probe";
+import type { HostCapabilities, HostRunResult, MacAppStatus, MacHostCapabilities, PluginSetupContext } from "../src/setup/types";
+import { pluginSetupFindings, pluginSetupStatus } from "../src/setup/config-draft";
+import { FakeSetupProber } from "../src/testing/fake-prober";
 import { FakeSetupUI } from "../src/testing/fake-setup-ui";
 import { openStore } from "../src/store/sqlite-store";
 
@@ -38,6 +41,7 @@ test("setup marks selected plugins ready without source-specific core steps", as
       registry: new PluginRegistry([new SetupPlugin("ready"), new SetupPlugin("other")]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -68,6 +72,7 @@ test("setup isolates a degraded plugin and keeps other selected plugins ready", 
       ]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -96,6 +101,7 @@ test("setup enforces a core-owned timeout around plugin setup", async () => {
       registry: new PluginRegistry([new SlowSetupPlugin("slow"), new SetupPlugin("ready")]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
       setupPluginTimeoutMs: 5,
     });
 
@@ -128,6 +134,7 @@ test("setup preserves disabled as a user choice distinct from degraded", async (
       registry: new PluginRegistry([new SetupPlugin("enabled"), new SetupPlugin("disabled")]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -158,6 +165,7 @@ test("setup can skip archive import without creating pending state", async () =>
       registry: new PluginRegistry([new SetupPlugin("archive", [], true)]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -187,6 +195,7 @@ test("setup can run a plugin-owned archive import immediately", async () => {
       registry: new PluginRegistry([plugin]),
       ui,
       host: new FakeHost(archivePath),
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -224,6 +233,7 @@ test("cancelled setup does not commit the config draft", async () => {
       registry: new PluginRegistry([new SetupPlugin("ready")]),
       ui: new CancelledUI(),
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     await expect(runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false })).rejects.toThrow("setup cancelled");
@@ -246,6 +256,7 @@ test("setup does not mark plugins ready when secret commit fails", async () => {
       registry: new PluginRegistry([new SetupPlugin("ready", [], false, true)]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
       secretStore: new FailingSecretStore() as never,
     });
 
@@ -272,6 +283,7 @@ test("setup asks a plugin for its summary exactly once", async () => {
       registry: new PluginRegistry([plugin]),
       ui,
       host: new FakeHost(),
+      prober: new FakeSetupProber(),
     });
 
     await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
@@ -281,8 +293,13 @@ test("setup asks a plugin for its summary exactly once", async () => {
   }
 });
 
-test("setup does not probe browser or protected local sources from the CLI", async () => {
+test("setup records protected sources as degraded instead of probing them in-process when the app is missing", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-protected-"));
+  const previousAppPath = process.env[APP_PATH_ENV];
+  // Point the app path at a path that does not exist: the real prober must
+  // report the missing app honestly instead of running plugin checks (browser
+  // cookies, Notes automation, protected reads) in the terminal process.
+  process.env[APP_PATH_ENV] = join(root, "Applications", "Nutshell.app");
   try {
     const config = loadConfig(root);
     config.data.plugins = {};
@@ -294,13 +311,26 @@ test("setup does not probe browser or protected local sources from the CLI", asy
       registry: new PluginRegistry([new YouTubePlugin(), new PodcastsPlugin(), new AppleNotesPlugin(), new TwitterPlugin()]),
       ui,
       host: new ProtectedAccessFailingHost(),
+      // Intentionally no fake prober: this test pins the DefaultSetupProber
+      // contract that fake-ready is impossible without the app.
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
 
-    expect(report.status).toBe("ok");
-    expect(report.plugins.map((plugin) => plugin.status)).toEqual(["ready", "ready", "ready", "ready"]);
+    expect(report.status).toBe("warning");
+    expect(exitCodeForSetup(report)).toBe(1);
+    const reloaded = loadConfig(root);
+    for (const source of ["youtube", "podcasts", "apple_notes", "twitter"]) {
+      const plugin = report.plugins.find((item) => item.source === source);
+      expect(plugin?.status).toBe("degraded");
+      const appMissing = plugin?.findings.find((finding) => finding.code === "nutshell_app_missing");
+      expect(appMissing?.level).toBe("critical");
+      expect(appMissing?.guidance?.state).toBe("needs_permission");
+      expect(pluginSetupStatus(reloaded, source)).toBe("degraded");
+    }
   } finally {
+    if (previousAppPath === undefined) delete process.env[APP_PATH_ENV];
+    else process.env[APP_PATH_ENV] = previousAppPath;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -309,44 +339,30 @@ test("setup enables background sync through the installed app helper", async () 
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-app-owned-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
-    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    const executable = installFakeApp(appPath);
+    const grantedMarker = join(root, "permission-granted");
     const enabledMarker = join(root, "background-enabled");
-    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
-    writeFileSync(
-      executable,
-      `#!/bin/sh
-if [ "$1" = "status" ]; then
-  echo "Full Disk Access: granted"
-  if [ -f "${enabledMarker}" ]; then
-    echo "Agent status: enabled"
-    echo "Background sync: enabled"
-  else
-    echo "Agent status: notRegistered"
-    echo "Background sync: disabled"
-  fi
-  echo "Data root: ${root}/Nutshell"
-  exit 0
-fi
-exit 64
-`,
-      "utf8",
-    );
-    chmodSync(executable, 0o755);
+    writeFileSync(grantedMarker, "yes\n");
     const config = loadConfig(root);
     config.data.plugins = {};
     config.data.app = { path: appPath };
     const ui = new FakeSetupUI();
     ui.multiselectValues = [["ready"]];
     ui.confirms = [true];
-    const host = new FakeHost(null, (run) => {
-      if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
-    });
+    const host = new FakeHost(
+      null,
+      (run) => {
+        if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
+      },
+      { appPath, grantedMarker, enabledMarker },
+    );
     const runtime = new SetupRuntime({
       root,
       config,
       registry: new PluginRegistry([new SetupPlugin("ready")]),
       ui,
       host,
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
@@ -355,6 +371,8 @@ exit 64
     expect(report.syncHandoff.ok).toBe(true);
     expect(report.syncHandoff.attempted).toBe(false);
     expect((loadConfig(root).data.app as JsonObject).path).toBe(appPath);
+    // Full Disk Access was already granted: the permission window never opens.
+    expect(host.permissionWindowOpens).toBe(0);
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
       [executable, "enable-sync"],
       [executable, "register-agent"],
@@ -364,67 +382,50 @@ exit 64
   }
 });
 
-test("setup opens the app permission window before enabling protected background sync", async () => {
+test("setup opens the app permission window before any plugin probe and before enabling background sync", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-permission-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
-    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+    const executable = installFakeApp(appPath);
     const grantedMarker = join(root, "permission-granted");
     const enabledMarker = join(root, "background-enabled");
-    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
-    writeFileSync(
-      executable,
-      `#!/bin/sh
-if [ "$1" = "status" ]; then
-  if [ -f "${grantedMarker}" ]; then
-    echo "Full Disk Access: granted"
-    if [ -f "${enabledMarker}" ]; then
-      echo "Agent status: enabled"
-      echo "Background sync: enabled"
-    else
-      echo "Agent status: notRegistered"
-      echo "Background sync: disabled"
-    fi
-  else
-    echo "Full Disk Access: not granted"
-    echo "Agent status: notRegistered"
-    echo "Background sync: disabled"
-  fi
-  echo "Data root: ${root}/Nutshell"
-  exit 0
-fi
-exit 0
-`,
-      "utf8",
-    );
-    chmodSync(executable, 0o755);
+    const events: string[] = [];
     const config = loadConfig(root);
     config.data.plugins = {};
     config.data.app = { path: appPath };
     const ui = new FakeSetupUI();
-    ui.multiselectValues = [["ready"]];
+    ui.multiselectValues = [["probed"]];
+    // The permission loop is user-driven: the window 'grants' FDA via the
+    // marker file, then the user answers "I granted it — check again".
+    ui.selectedValues = ["check"];
     ui.confirms = [true];
-    const host = new FakeHost(null, (run) => {
-      if (run.args.includes("setup")) writeFileSync(grantedMarker, "yes\n");
-      if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
-    });
+    const host = new FakeHost(
+      null,
+      (run) => {
+        if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
+      },
+      { appPath, grantedMarker, enabledMarker, grantOnWindowOpen: true, events },
+    );
+    const prober = new FakeSetupProber({}, events);
     const runtime = new SetupRuntime({
       root,
       config,
-      registry: new PluginRegistry([new SetupPlugin("ready")]),
+      registry: new PluginRegistry([new ProbedPlugin("probed")]),
       ui,
       host,
+      prober,
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
-    const setupCommand =
-      process.platform === "darwin" ? ["/usr/bin/open", "-n", appPath, "--args", "setup"] : [executable, "setup"];
 
+    expect(host.permissionWindowOpens).toBe(1);
+    expect(events).toContain("permission-window-opened");
+    expect(events).toContain("probe:probed");
+    expect(events.indexOf("permission-window-opened")).toBeLessThan(events.indexOf("probe:probed"));
+    expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("ready");
     expect(report.backgroundAgent.ok).toBe(true);
     expect(report.syncHandoff.ok).toBe(true);
-    expect(report.syncHandoff.attempted).toBe(false);
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
-      setupCommand,
       [executable, "enable-sync"],
       [executable, "register-agent"],
     ]);
@@ -437,36 +438,26 @@ test("setup refuses to claim handoff when app-owned status stays disabled", asyn
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-background-fail-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
-    const executable = join(appPath, "Contents", "MacOS", "Nutshell");
-    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
-    writeFileSync(
-      executable,
-      `#!/bin/sh
-if [ "$1" = "status" ]; then
-  echo "Full Disk Access: granted"
-  echo "Agent status: notRegistered"
-  echo "Background sync: disabled"
-  echo "Data root: ${root}/Nutshell"
-  exit 0
-fi
-exit 0
-`,
-      "utf8",
-    );
-    chmodSync(executable, 0o755);
+    const executable = installFakeApp(appPath);
+    const grantedMarker = join(root, "permission-granted");
+    const enabledMarker = join(root, "background-enabled");
+    writeFileSync(grantedMarker, "yes\n");
     const config = loadConfig(root);
     config.data.plugins = {};
     config.data.app = { path: appPath };
     const ui = new FakeSetupUI();
     ui.multiselectValues = [["ready"]];
     ui.confirms = [true];
-    const host = new FakeHost();
+    // No onRun hook: enable-sync never flips the marker, so the app-owned
+    // status stays disabled even though the helper commands exit 0.
+    const host = new FakeHost(null, null, { appPath, grantedMarker, enabledMarker });
     const runtime = new SetupRuntime({
       root,
       config,
       registry: new PluginRegistry([new SetupPlugin("ready")]),
       ui,
       host,
+      prober: new FakeSetupProber(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
@@ -475,10 +466,296 @@ exit 0
     expect(report.backgroundAgent.ok).toBe(false);
     expect(report.syncHandoff.ok).toBe(false);
     expect(report.syncHandoff.message).toContain("not handed off");
+    expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
+      [executable, "enable-sync"],
+      [executable, "register-agent"],
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("setup retries a failing probe and records ready only after it passes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-retry-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["probed"]];
+    ui.selectedValues = ["retry"];
+    const prober = new FakeSetupProber({ probed: [[criticalProbeFinding("probed")], []] });
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("probed")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("ok");
+    expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("ready");
+    expect(prober.callCount("probed")).toBe(2);
+    expect(pluginSetupStatus(loadConfig(root), "probed")).toBe("ready");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("skipping a failing probe records degraded with the probe finding and exits 1", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-skip-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["probed"]];
+    ui.selectedValues = ["skip"];
+    const failing = criticalProbeFinding("probed");
+    const prober = new FakeSetupProber({ probed: [[failing]] });
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("probed")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("warning");
+    expect(exitCodeForSetup(report)).toBe(1);
+    expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("degraded");
+    const reloaded = loadConfig(root);
+    expect(pluginSetupStatus(reloaded, "probed")).toBe("degraded");
+    const stored = pluginSetupFindings(reloaded, "probed");
+    expect(stored.length).toBe(1);
+    expect(stored[0]?.code).toBe("probed_signed_out");
+    expect(stored[0]?.guidance).toEqual({ ...failing.guidance });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the probe loop opens the guidance url and re-verifies on the open-and-retry choice", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-open-url-"));
+  try {
+    const url = "https://x.com/login";
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["probed"]];
+    ui.selectedValues = ["open"];
+    const prober = new FakeSetupProber({ probed: [[criticalProbeFinding("probed", url)], []] });
+    const host = new FakeHost();
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("probed")]),
+      ui,
+      host,
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(host.openedUrls).toEqual([url]);
+    expect(prober.callCount("probed")).toBe(2);
+    expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("ready");
+    expect(pluginSetupStatus(loadConfig(root), "probed")).toBe("ready");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a plugin whose probe always fails is never recorded ready", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-never-ready-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    // Entirely unscripted UI: multiselect defaults to every plugin and the
+    // probe-loop select falls through to the last option (skip).
+    const ui = new FakeSetupUI();
+    const prober = new FakeSetupProber({ probed: [[criticalProbeFinding("probed")]] });
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("probed")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("warning");
+    expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("degraded");
+    expect(pluginSetupStatus(loadConfig(root), "probed")).toBe("degraded");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a third-party plugin with its own verify completes fail-retry-pass through the generic loop", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-third-party-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["thirdparty"]];
+    ui.selectedValues = ["retry"];
+    const plugin = new ThirdPartyPlugin("thirdparty", [[criticalProbeFinding("thirdparty")], []]);
+    const prober = new FakeSetupProber();
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([plugin]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("ok");
+    expect(report.plugins.find((item) => item.source === "thirdparty")?.status).toBe("ready");
+    expect(plugin.verifyCalls).toBe(2);
+    // The plugin's own verify takes precedence: the injected prober is unused.
+    expect(prober.calls.length).toBe(0);
+    expect(pluginSetupStatus(loadConfig(root), "thirdparty")).toBe("ready");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("re-run setup reviews current truth and walks only failing sources through the loop", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-rerun-fix-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {
+      alpha: { enabled: true, setup: { status: "ready", updatedAt: "2026-06-01T00:00:00.000Z", findings: [] } },
+      beta: { enabled: true, setup: { status: "ready", updatedAt: "2026-06-01T00:00:00.000Z", findings: [] } },
+    };
+    const ui = new NoMultiselectUI();
+    ui.selectedValues = ["fix", "retry"];
+    const prober = new FakeSetupProber({ alpha: [[]], beta: [[criticalProbeFinding("beta")], []] });
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("alpha"), new ProbedPlugin("beta")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    // No first-run intro on a re-run.
+    expect(ui.notes.some((note) => note.startsWith(`${PRODUCT_NAME} setup`))).toBe(false);
+    expect(ui.notes.some((note) => note.includes("1 of 2 sources working"))).toBe(true);
+    // Passing source: probed once at the review only. Failing source: review
+    // probe plus the in-loop probe after retry.
+    expect(prober.callCount("alpha")).toBe(1);
+    expect(prober.callCount("beta")).toBe(2);
+    expect(report.status).toBe("ok");
+    const reloaded = loadConfig(root);
+    expect(pluginSetupStatus(reloaded, "alpha")).toBe("ready");
+    expect(pluginSetupStatus(reloaded, "beta")).toBe("ready");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("re-run setup exit records review truth without walking the plugin loop", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-rerun-exit-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {
+      alpha: { enabled: true, setup: { status: "ready", updatedAt: "2026-06-01T00:00:00.000Z", findings: [] } },
+      beta: { enabled: true, setup: { status: "ready", updatedAt: "2026-06-01T00:00:00.000Z", findings: [] } },
+    };
+    const ui = new NoMultiselectUI();
+    ui.selectedValues = ["exit"];
+    const prober = new FakeSetupProber({ alpha: [[]], beta: [[criticalProbeFinding("beta")]] });
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("alpha"), new ProbedPlugin("beta")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
+
+    expect(report.status).toBe("warning");
+    expect(exitCodeForSetup(report)).toBe(1);
+    expect(report.backgroundAgent.message).toContain("status review");
+    // Review probes only — no plugin-loop probes after choosing exit.
+    expect(prober.callCount("alpha")).toBe(1);
+    expect(prober.callCount("beta")).toBe(1);
+    const reloaded = loadConfig(root);
+    expect(pluginSetupStatus(reloaded, "alpha")).toBe("ready");
+    expect(pluginSetupStatus(reloaded, "beta")).toBe("degraded");
+    expect(pluginSetupFindings(reloaded, "beta").map((finding) => finding.code)).toContain("beta_signed_out");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a probe that never resolves is bounded by the core timeout and recorded honestly", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-hang-"));
+  try {
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["stuck"]];
+    const prober: SetupProber = { probe: () => new Promise<never>(() => {}) };
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new ProbedPlugin("stuck")]),
+      ui,
+      host: new FakeHost(),
+      prober,
+      setupPluginTimeoutMs: 50,
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.status).toBe("warning");
+    const plugin = report.plugins.find((item) => item.source === "stuck");
+    expect(plugin?.status).toBe("degraded");
+    expect(plugin?.findings.map((finding) => finding.code)).toContain("plugin_setup_timeout");
+    expect(pluginSetupStatus(loadConfig(root), "stuck")).toBe("degraded");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function criticalProbeFinding(source: string, url?: string): HealthFinding {
+  return makeFinding("critical", source, `${source}_signed_out`, `${source} session is signed out`, {}, {
+    state: "needs_auth",
+    fix: `Sign into ${source} in the browser profile Nutshell uses`,
+    confirm: `nutshell doctor ${source}`,
+    ...(url ? { url } : {}),
+  });
+}
+
+function installFakeApp(appPath: string): string {
+  const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  writeFileSync(executable, "");
+  return executable;
+}
+
+class NoMultiselectUI extends FakeSetupUI {
+  async multiselect<T>(): Promise<T[]> {
+    throw new Error("re-run setup must not re-ask plugin selection");
+  }
+}
 
 class SetupPlugin implements TracePlugin {
   importedPath: string | null = null;
@@ -501,6 +778,8 @@ class SetupPlugin implements TracePlugin {
     };
   }
 
+  // verify takes precedence over the injected prober — intended here, so these
+  // tests stay independent of any prober scripting.
   readonly setup = {
     summarize: async (_ctx: PluginSetupContext) => {
       this.summarizeCount += 1;
@@ -535,6 +814,69 @@ class SetupPlugin implements TracePlugin {
   async importProviderExport(_ctx: PluginContext, request: ProviderExportImportRequest, _checkpoint: Checkpoint): Promise<PluginSyncResult> {
     this.importedPath = request.path;
     return fakeResult(this.manifest.id);
+  }
+}
+
+// A plugin with no custom setup at all: core verifies it through the injected
+// prober — the generic path every third-party plugin gets for free.
+class ProbedPlugin implements TracePlugin {
+  readonly manifest: PluginManifest;
+
+  constructor(id: string) {
+    this.manifest = {
+      id,
+      displayName: id,
+      authKind: "none",
+      collections: ["default"],
+      supportsBackfill: false,
+      defaultBudget: DEFAULT_SYNC_BUDGET,
+    };
+  }
+
+  async check(): Promise<HealthFinding[]> {
+    return [];
+  }
+
+  async sync(_ctx: PluginContext, _request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
+    return { ...fakeResult(this.manifest.id), nextCheckpoint: checkpoint.state };
+  }
+}
+
+// A plugin that owns verification via setup.verify, sequenced like a probe:
+// each call consumes the next findings array and the last entry repeats.
+class ThirdPartyPlugin implements TracePlugin {
+  verifyCalls = 0;
+  readonly manifest: PluginManifest;
+
+  constructor(
+    id: string,
+    private readonly verifySequence: HealthFinding[][],
+  ) {
+    this.manifest = {
+      id,
+      displayName: id,
+      authKind: "none",
+      collections: ["default"],
+      supportsBackfill: false,
+      defaultBudget: DEFAULT_SYNC_BUDGET,
+    };
+  }
+
+  readonly setup = {
+    summarize: async (_ctx: PluginSetupContext) => ({ title: this.manifest.displayName, body: "third-party setup" }),
+    verify: async (_ctx: PluginSetupContext) => {
+      this.verifyCalls += 1;
+      if (!this.verifySequence.length) return [];
+      return this.verifySequence.length > 1 ? this.verifySequence.shift()! : this.verifySequence[0]!;
+    },
+  };
+
+  async check(): Promise<HealthFinding[]> {
+    return [];
+  }
+
+  async sync(_ctx: PluginContext, _request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
+    return { ...fakeResult(this.manifest.id), nextCheckpoint: checkpoint.state };
   }
 }
 
@@ -592,15 +934,55 @@ class FailingSecretStore {
   }
 }
 
+interface FakeMacosOptions {
+  appPath: string;
+  grantedMarker: string;
+  enabledMarker: string;
+  // Simulates the user granting Full Disk Access in the window that opens.
+  grantOnWindowOpen?: boolean;
+  // Shared event log across fakes for ordering assertions.
+  events?: string[];
+}
+
 class FakeHost implements HostCapabilities {
   runs: Array<{ command: string; args: string[] }> = [];
+  openedUrls: string[] = [];
+  permissionWindowOpens = 0;
+  readonly macos?: MacHostCapabilities;
 
   constructor(
     private readonly file: string | null = null,
     private readonly onRun: ((run: { command: string; args: string[] }) => void) | null = null,
-  ) {}
+    macosOptions?: FakeMacosOptions,
+  ) {
+    if (macosOptions) {
+      this.macos = {
+        openPrivacyPane: async () => {},
+        showNutshellPermissionWindow: async () => {
+          this.permissionWindowOpens += 1;
+          macosOptions.events?.push("permission-window-opened");
+          if (macosOptions.grantOnWindowOpen) writeFileSync(macosOptions.grantedMarker, "granted\n");
+        },
+        appStatus: async (): Promise<MacAppStatus> => {
+          const installed = existsSync(join(macosOptions.appPath, "Contents", "MacOS", "Nutshell"));
+          const granted = existsSync(macosOptions.grantedMarker);
+          const enabled = existsSync(macosOptions.enabledMarker);
+          return {
+            installed,
+            path: macosOptions.appPath,
+            fullDiskAccess: granted ? "granted" : "missing",
+            backgroundSync: enabled ? "enabled" : "disabled",
+            agent: enabled ? "enabled" : "notRegistered",
+            raw: "",
+          };
+        },
+      };
+    }
+  }
 
-  async openUrl(_url: string): Promise<void> {}
+  async openUrl(url: string): Promise<void> {
+    this.openedUrls.push(url);
+  }
   async revealPath(): Promise<void> {}
   async openApp(_pathOrBundleId: string): Promise<void> {}
   async chooseFile(): Promise<string | null> {

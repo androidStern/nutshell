@@ -125,10 +125,14 @@ export class SetupRuntime {
     }
 
     // Selection. Re-runs open with a probed status table and only walk through
-    // what needs attention; first runs ask which sources to enable.
+    // what needs attention; first runs ask which sources to enable. The
+    // app/permission step always precedes plugin verification — on re-runs
+    // that means before the review probes, so the table shows post-grant truth.
     let toSetup: TracePlugin[];
     let priorFindings = new Map<SourceId, HealthFinding[]>();
+    let appPermission: AppPermissionOutcome | null = null;
     if (rerun) {
+      appPermission = await this.prepareAppPermission(request);
       const review = await this.reviewCurrentState(draft, controller.signal);
       priorFindings = review.findings;
       if (review.action === "exit") {
@@ -162,11 +166,9 @@ export class SetupRuntime {
       }
     }
 
-    // App/permission step runs before any plugin verification: on macOS the
-    // probes execute through the Nutshell.app identity, so Full Disk Access
-    // must be sorted out first.
-    const appPermission = await this.prepareAppPermission(request);
-    if (appPermission.changed) priorFindings = new Map();
+    // First runs reach the app/permission step here, after source selection
+    // and before any plugin verification.
+    appPermission ??= await this.prepareAppPermission(request);
 
     for (const plugin of toSetup) {
       const ctx = this.pluginSetupContext(plugin, draft, secretDraft.plugin(plugin.manifest.id), controller.signal);
@@ -353,9 +355,7 @@ export class SetupRuntime {
       const custom = plugin.setup?.run
         ? await this.withPluginSetupDeadline(plugin, ctx, (deadlineCtx) => plugin.setup!.run!(deadlineCtx))
         : { findings: [] };
-      const customFindings = custom.findings ?? [];
-      const probeFindings = await this.probeLoop(plugin, ctx, prior);
-      findings = [...customFindings, ...probeFindings];
+      findings = await this.probeLoop(plugin, ctx, prior, custom.findings ?? []);
     } catch (error) {
       const timedOut = error instanceof SetupPluginTimeoutError;
       findings = [
@@ -388,10 +388,14 @@ export class SetupRuntime {
   // One loop, three verbs: probe, then on a critical finding offer retry
   // (optionally opening the page that fixes it) or skip. The user drives the
   // loop; nothing polls and nothing times out while they think.
-  private async probeLoop(plugin: TracePlugin, ctx: PluginSetupContext, prior?: HealthFinding[]): Promise<HealthFinding[]> {
-    let findings = prior ?? (await this.runProbe(plugin, ctx.signal, ctx));
+  private async probeLoop(plugin: TracePlugin, ctx: PluginSetupContext, prior?: HealthFinding[], baseline: HealthFinding[] = []): Promise<HealthFinding[]> {
+    // baseline carries findings from the plugin's custom setup step; the loop
+    // evaluates them together with probe results so "verified" is never shown
+    // while a custom-step failure stands (retrying the probe cannot clear it).
+    let probeFindings = prior ?? (await this.runProbe(plugin, ctx.signal, ctx));
     for (let iteration = 0; ; iteration += 1) {
       if (iteration >= RUNAWAY_LOOP_LIMIT) throw new Error(`${plugin.manifest.id} setup retry loop exceeded ${RUNAWAY_LOOP_LIMIT} iterations; a scripted UI is misbehaving`);
+      const findings = [...baseline, ...probeFindings];
       const problems = findings.filter((finding) => finding.level === "critical");
       if (!problems.length) {
         await this.ui.note({ title: plugin.manifest.displayName, body: `✓ ${plugin.manifest.displayName} verified` });
@@ -415,7 +419,7 @@ export class SetupRuntime {
         return findings;
       }
       if (choice === "open" && url) await this.host.openUrl(url);
-      findings = await this.runProbe(plugin, ctx.signal, ctx);
+      probeFindings = await this.runProbe(plugin, ctx.signal, ctx);
     }
   }
 
