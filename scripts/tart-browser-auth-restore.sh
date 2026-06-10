@@ -37,7 +37,7 @@ if ! command -v tart >/dev/null 2>&1; then
   exit 127
 fi
 
-for required in chrome-profile.tgz login.keychain-db manifest.json; do
+for required in chrome-profile.tgz login.keychain-db chrome-safe-storage-password.txt manifest.json; do
   if [[ ! -f "${host_snapshot}/${required}" ]]; then
     echo "missing ${host_snapshot}/${required}" >&2
     exit 1
@@ -53,6 +53,8 @@ stamp=\$(date -u +%Y%m%dT%H%M%SZ)
 profile_root="\$HOME/Library/Application Support/Google"
 keychain_dir="\$HOME/Library/Keychains"
 keychain="\$keychain_dir/login.keychain-db"
+safe_storage_dir="\$HOME/Nutshell/.private"
+safe_storage_password_file="\$safe_storage_dir/chrome-safe-storage-password"
 
 /usr/bin/osascript -e 'tell application "Google Chrome" to quit' >/dev/null 2>&1 || true
 sleep 4
@@ -69,6 +71,9 @@ fi
 tar -C "\$profile_root" -xzf "\$guest_snapshot/chrome-profile.tgz"
 cp "\$guest_snapshot/login.keychain-db" "\$keychain"
 chmod 600 "\$keychain"
+mkdir -p "\$safe_storage_dir"
+cp "\$guest_snapshot/chrome-safe-storage-password.txt" "\$safe_storage_password_file"
+chmod 600 "\$safe_storage_password_file"
 
 security list-keychains -d user -s "\$keychain" /Library/Keychains/System.keychain
 security default-keychain -s "\$keychain"
@@ -79,6 +84,7 @@ security set-generic-password-partition-list -a Chrome -s "Chrome Safe Storage" 
 security find-generic-password -a Chrome -s "Chrome Safe Storage" "\$keychain" >/tmp/nutshell-auth-restore-safe-storage-metadata.txt 2>&1 || true
 
 echo "restored Chrome profile and login keychain from \$guest_snapshot"
+echo "installed private Chrome Safe Storage password at \$safe_storage_password_file"
 echo "reboot or stop/start this VM before judging restored auth"
 SCRIPT
 )"

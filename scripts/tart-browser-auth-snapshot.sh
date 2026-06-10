@@ -69,6 +69,8 @@ tar \\
 
 cp "\$keychain" "\$guest_snapshot/login.keychain-db"
 security find-generic-password -a Chrome -s "Chrome Safe Storage" "\$keychain" > "\$guest_snapshot/chrome-safe-storage-metadata.txt" 2>&1 || true
+security find-generic-password -a Chrome -s "Chrome Safe Storage" -w "\$keychain" > "\$guest_snapshot/chrome-safe-storage-password.txt"
+chmod 600 "\$guest_snapshot/chrome-safe-storage-password.txt"
 
 created_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
 guest_user=\$(whoami)
@@ -81,6 +83,7 @@ cat > "\$guest_snapshot/manifest.json" <<EOF
   "browser": "Google Chrome",
   "profileArchive": "chrome-profile.tgz",
   "keychainFile": "login.keychain-db",
+  "chromeSafeStoragePasswordFile": "chrome-safe-storage-password.txt",
   "accounts": ["Google My Activity", "X"],
   "intendedUse": "private debug restore only; not clean release-pass evidence"
 }
