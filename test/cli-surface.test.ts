@@ -68,12 +68,9 @@ test("old machine-specific commands are not accepted", async () => {
   }
 });
 
-test("version command uses the public nutshell name", async () => {
-  const result = await runCli(["--version"]);
-  expect(result.exitCode).toBe(0);
-  expect(result.stdout.startsWith("nutshell ")).toBe(true);
-});
-
+// "version command uses the public nutshell name" was removed by the test
+// traceability audit (docs/test-traceability.md): strictly weaker duplicate of
+// the exact-match assertion below, which already pins the public name.
 test("version command matches package version", async () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version: string };
   const result = await runCli(["--version"]);

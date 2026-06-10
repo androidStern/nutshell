@@ -9,7 +9,6 @@ import {
   type TweetEnrichmentTarget,
   type TwitterEnrichmentState,
 } from "../src/plugins/builtin/twitter/enrichment";
-import { TWITTER_FINDINGS } from "../src/plugins/builtin/twitter/findings";
 import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 
 const originalPage = BirdClient.prototype.page;
@@ -45,14 +44,11 @@ test("twitter backfill refuses live transport and requires official X archive im
   expect(result.nextCheckpoint).toEqual({ existing: true });
 });
 
-test("twitter finding catalog attaches actionable guidance to every code", () => {
-  for (const sample of TWITTER_FINDINGS.samples()) {
-    expect(sample.guidance?.state, `${sample.code} needs a user state`).toBeTruthy();
-    expect((sample.guidance?.fix ?? "").length, `${sample.code} needs a fix`).toBeGreaterThan(0);
-    expect(sample.guidance?.confirm, `${sample.code} needs a confirm command`).toContain("nutshell");
-  }
-});
-
+// "twitter finding catalog attaches actionable guidance to every code" was
+// removed by the test traceability audit (docs/test-traceability.md): strictly
+// weaker duplicate of test/finding-guidance.test.ts "every spec carries a valid
+// state, a concrete fix, and a runnable confirm command", which iterates every
+// plugin catalog (including TWITTER_FINDINGS) with stronger assertions.
 test("twitter auth check fails closed even when account identity is configured", async () => {
   (BirdClient.prototype as unknown as { client: () => Promise<unknown> }).client = async () => ({
     getCurrentUser: async () => ({ success: false, error: "401 unauthorized" }),
