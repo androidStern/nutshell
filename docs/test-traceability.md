@@ -434,3 +434,11 @@ audited here) and the `fixture_stale`, post-permission gate, and gate-label rows
 | live-sync gate still fails on a critical finding | gates doc "Live Sync And Dashboard Gate" (zero critical findings); honest-setup #26 | anchored |
 | live-sync gate still fails on a warning outside the standing set | gates doc "Live Sync And Dashboard Gate" (allowed standing warnings are an explicit closed set — anything else, e.g. disk_free_low, fails); truthful-baseline §1 (no quiet fake success) | anchored |
 | live-sync gate fails when podcasts records are absent even in the wide dashboard window | gates doc "Live Sync And Dashboard Gate" (dashboard must show nonzero podcasts records inside the explicit 60-day window); honest-setup #26 | anchored |
+
+### test/fresh-install-rehearsal.test.ts (podcasts seed backfill contract, 2026-06-10, run b)
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| live-sync gate passes the frozen v0.1.24 evidence: standing warnings, recent-0 podcasts, seed backfill | gates doc "Live Sync And Dashboard Gate" (recent-mode read-path proof + bounded `--mode backfill` ingestion of the provenance-verified seed); regression: reports/livesync-gate-v0.1.24-20260610b.harness-failed-frozen.json — recent mode's 48h overlap window honestly ingests 0 rows from the frozen seed (newest play 2026-05-28), so no read-side dashboard window could ever show them | anchored |
+| live-sync gate fails when the podcasts seed backfill inserts no records | gates doc "Live Sync And Dashboard Gate" (backfill must insert the seed's records, `insertedRecords > 0`); truthful-baseline §3.2 (missing proof is not ok) | anchored |
+| live-sync gate fails when the podcasts seed backfill reports a non-ok status | gates doc "Live Sync And Dashboard Gate" (backfill source status must be ok); honest-setup #26 | anchored |

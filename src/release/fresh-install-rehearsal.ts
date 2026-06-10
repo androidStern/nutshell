@@ -680,6 +680,13 @@ async function verifyLiveSyncAndDashboardChecks(options: FinalVerificationOption
   if (!preflight.healthy) return fixtureStaleReport(LIVE_SYNC_DASHBOARD_PHASE, preflight.check, googleCookies, xCookies);
 
   const sync = await runJsonCommand<JsonObject>(["nutshell", "sync", "all", "--json"], runner, env, 30 * 60_000);
+  // The foreground sync runs recent mode, which reads podcasts through a 48h
+  // overlap window (plugin overlapHours default) — the frozen seed's newest
+  // play is older than that by design, so recent honestly ingests 0 podcasts
+  // rows (v0.1.24 run b evidence). A bounded backfill sync is how the seed's
+  // historical rows canonically enter the store; see
+  // podcastsSeedBackfillCheck for the full contract rationale.
+  const podcastsBackfill = await runJsonCommand<JsonObject>(["nutshell", "sync", "podcasts", "--mode", "backfill", "--json"], runner, env, 30 * 60_000);
   const health = await runJsonCommand<HealthReport>(["nutshell", "health", "--json"], runner, env, 120_000);
   const checks: RehearsalCheck[] = [
     preflight.check,
@@ -687,6 +694,7 @@ async function verifyLiveSyncAndDashboardChecks(options: FinalVerificationOption
     liveCommitRecordsCheck("youtube", sync.value),
     liveCommitRecordsCheck("twitter", sync.value),
     podcastsSeedSyncCheck(sync.value),
+    podcastsSeedBackfillCheck(podcastsBackfill.value),
     appleNotesLiveRecordsCheck(sync.value),
     jsonCommandCheck("final health command returns JSON", health),
     liveHealthCheck(health.value),
@@ -695,6 +703,8 @@ async function verifyLiveSyncAndDashboardChecks(options: FinalVerificationOption
   if (dashboard) checks.push(...dashboard.checks);
   return reportFor(LIVE_SYNC_DASHBOARD_PHASE, checks, {
     syncExitCode: sync.result.code,
+    podcastsBackfillExitCode: podcastsBackfill.result.code,
+    podcastsBackfillInserted: commitInsertedRecords(syncSourceFor(podcastsBackfill.value, "podcasts")),
     healthExitCode: health.result.code,
     liveCommits: liveCommitCounts(sync.value),
     healthStatus: health.value?.status ?? null,
@@ -1589,6 +1599,11 @@ function liveCommitRecordsCheck(source: SourceId, sync: JsonObject | null): Rehe
     : fail(name, { source, status, insertedRecords, reason: "no_live_records_committed" });
 }
 
+// Recent-mode proof for podcasts: status ok proves the seed is readable
+// through the normal plugin read path. insertedRecords is deliberately NOT
+// required here — recent mode covers a 48h overlap window, and the frozen
+// seed's plays are older than that by design (podcastsSeedBackfillCheck owns
+// the ingestion proof).
 function podcastsSeedSyncCheck(sync: JsonObject | null): RehearsalCheck {
   const name = "podcasts seed syncs through the normal plugin path";
   const sourceReport = syncSourceFor(sync, "podcasts");
@@ -1597,6 +1612,36 @@ function podcastsSeedSyncCheck(sync: JsonObject | null): RehearsalCheck {
   return status === "ok"
     ? pass(name, { status, insertedRecords: commitInsertedRecords(sourceReport) })
     : fail(name, { status, findings: Array.isArray(sourceReport.findings) ? sourceReport.findings.slice(0, 5) : [] });
+}
+
+// Podcasts seed ingestion contract (v0.1.24 run b evidence): the gate's
+// foreground sync runs recent mode with a 48h overlap window (podcasts
+// overlapHours default), but the seed is a frozen snapshot whose newest play
+// (2026-05-28 at freeze time) is older than that by design — recent mode
+// honestly ingests 0 podcasts rows, so no read-side dashboard window can ever
+// show them. Backfill mode is the contract because it is the canonical public
+// CLI path for historical local-OS data (`nutshell sync podcasts --mode
+// backfill --json`): podcasts is a local-OS source, distinct from the
+// provider-archive import prohibition, and the seed's provenance is verified
+// by the stage-podcast-seed phase. Requiring a <48h-fresh seed instead would
+// be operationally dishonest — frozen seeds stay viable forever.
+function podcastsSeedBackfillCheck(sync: JsonObject | null): RehearsalCheck {
+  const name = "podcasts seed backfills through the normal plugin path";
+  const sourceReport = syncSourceFor(sync, "podcasts");
+  if (!sourceReport) return fail(name, { reason: "missing_source_report" });
+  const status = typeof sourceReport.status === "string" ? sourceReport.status : "unknown";
+  const insertedRecords = commitInsertedRecords(sourceReport);
+  if (status !== "ok") {
+    return fail(name, {
+      status,
+      insertedRecords,
+      reason: `source_status_${status}`,
+      findings: Array.isArray(sourceReport.findings) ? sourceReport.findings.slice(0, 5) : [],
+    });
+  }
+  return insertedRecords > 0
+    ? pass(name, { status, insertedRecords })
+    : fail(name, { status, insertedRecords, reason: "no_seed_records_backfilled" });
 }
 
 function appleNotesLiveRecordsCheck(sync: JsonObject | null): RehearsalCheck {

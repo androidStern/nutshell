@@ -135,7 +135,7 @@ Pass means:
 
 - foreground `nutshell sync all --json` emits live YouTube records
 - foreground sync emits live X records
-- Podcasts reads the SQLite-safe snapshot through the normal plugin path
+- Podcasts proves both plugin paths against the SQLite-safe snapshot: the recent foreground sync reports podcasts `ok` (read-path proof — its 48h overlap window honestly ingests 0 rows from a frozen seed whose plays are older), and a bounded `nutshell sync podcasts --mode backfill --json` then inserts the seed's records (`insertedRecords > 0`). Backfill is the canonical public CLI path for historical local-OS data — distinct from the provider-archive import prohibition — and the seed's provenance is verified at staging; requiring a seed fresher than 48h instead would be operationally dishonest, since frozen seeds stay viable forever
 - Notes reads a visible note through `Nutshell.app`
 - scheduled app-owned background sync records last and next run times
 - final health has zero critical findings, a green app block (Full Disk Access granted, background sync enabled, agent enabled), and every warning drawn from the allowed standing set (`backfill_incomplete`, `backfill_partial`, `last_run_partial`, `twitter_enrichment_pending`, `twitter_enrichment_failed`, `app_owned_sync_not_verified`) — this split gate runs without archive imports, so the coverage warnings are structural and `status: ok` is unsatisfiable here by design; the strict `ok`/zero-findings requirement belongs to the final fresh-install rehearsal, where imports have run

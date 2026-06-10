@@ -531,36 +531,48 @@ test("live-sync gate passes on live commits, ok health, and enabled background s
     startDashboard: false,
     runner: async (command) => {
       commands.push(command);
+      if (command.includes("backfill")) return commandResult(0, podcastsBackfillSyncJson(4));
       if (command.includes("sync")) return commandResult(0, liveSyncReportJson());
       return commandResult(0, liveHealthJson());
     },
     env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
   });
 
-  expect(commands.map((command) => command.join(" "))).toEqual(["nutshell sync all --json", "nutshell health --json"]);
+  expect(commands.map((command) => command.join(" "))).toEqual([
+    "nutshell sync all --json",
+    "nutshell sync podcasts --mode backfill --json",
+    "nutshell health --json",
+  ]);
   expect(report.phase).toBe("live-sync-dashboard");
   expect(report.status).toBe("pass");
   expect(report.verdict).toBe("pass");
   expect(report.checks.find((check) => check.name === "fixture preflight")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "podcasts seed backfills through the normal plugin path")?.status).toBe("pass");
   expect(report.checks.find((check) => check.name === "final health has no critical findings, only standing warnings, and a green app block")?.status).toBe("pass");
   expect(report.evidence.liveCommits).toEqual({ youtube: 4, podcasts: 2, apple_notes: 3, twitter: 5 });
+  expect(report.evidence.podcastsBackfillInserted).toBe(4);
 });
 
-// Replays the frozen v0.1.24 run (reports/livesync-gate-v0.1.24-20260610.*):
-// product numbers were all good, but the gate failed on two contract bugs —
+// Replays the frozen v0.1.24 runs (reports/livesync-gate-v0.1.24-20260610*):
+// product numbers were all good, but the gate failed on three contract bugs —
 // requiring health.status "ok" in a split gate that runs without archive
-// imports (the six standing warnings are structural), and querying /api/days
-// over the product's default 7-day window, which hid the frozen podcasts
-// seed's older records. This exact evidence must now pass.
-test("live-sync gate passes the frozen v0.1.24 evidence: standing warnings and an out-of-window podcasts seed", async () => {
+// imports (the six standing warnings are structural), querying /api/days over
+// the product's default 7-day window, and (run b) expecting the recent-mode
+// foreground sync to ingest the frozen seed even though its 48h overlap
+// window honestly skips plays older than two days. With the backfill step the
+// seed's rows enter the store (insertedRecords 4 here) and the dashboard
+// shows them inside the 60-day window. This exact evidence must now pass.
+test("live-sync gate passes the frozen v0.1.24 evidence: standing warnings, recent-0 podcasts, seed backfill", async () => {
   const dashboard = fakeDashboardServer([
     { source: "youtube", daysAgo: 1, count: 30 },
     { source: "twitter", daysAgo: 1, count: 17 },
     { source: "apple_notes", daysAgo: 1, count: 3 },
-    // The frozen seed's listens carry the snapshot date: outside the 7-day
-    // default window, inside the harness's explicit 60-day window.
+    // The frozen seed's listens carry the snapshot date (2026-05-28 at freeze
+    // time): outside both the 7-day default dashboard window and the 48h
+    // recent-sync overlap window, inside the harness's explicit 60-day window.
     { source: "podcasts", daysAgo: 12, count: 2 },
   ]);
+  const commands: string[][] = [];
   try {
     const report = await verifyLiveSyncAndDashboard({
       cookieProbe: {
@@ -568,14 +580,30 @@ test("live-sync gate passes the frozen v0.1.24 evidence: standing warnings and a
         x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
       },
       dashboardUrl: dashboard.url,
-      runner: async (command) =>
-        command.includes("sync") ? commandResult(1, liveSyncV0124EvidenceJson()) : commandResult(1, liveHealthV0124EvidenceJson()),
+      runner: async (command) => {
+        commands.push(command);
+        if (command.includes("backfill")) return commandResult(0, podcastsBackfillSyncJson(4));
+        if (command.includes("sync")) return commandResult(1, liveSyncV0124EvidenceJson());
+        return commandResult(1, liveHealthV0124EvidenceJson());
+      },
       env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
     });
 
+    expect(commands.map((command) => command.join(" "))).toEqual([
+      "nutshell sync all --json",
+      "nutshell sync podcasts --mode backfill --json",
+      "nutshell health --json",
+    ]);
     expect(report.status).toBe("pass");
     expect(report.verdict).toBe("pass");
     expect(report.evidence.liveCommits).toEqual({ youtube: 30, podcasts: 0, apple_notes: 6, twitter: 4341 });
+    expect(report.evidence.podcastsBackfillInserted).toBe(4);
+    // Recent-mode podcasts honestly ingested 0 rows and that is still a pass:
+    // the read-path proof does not require insertedRecords.
+    expect(report.checks.find((check) => check.name === "podcasts seed syncs through the normal plugin path")?.status).toBe("pass");
+    const backfill = report.checks.find((check) => check.name === "podcasts seed backfills through the normal plugin path");
+    expect(backfill?.status).toBe("pass");
+    expect(backfill?.detail.insertedRecords).toBe(4);
     const health = report.checks.find((check) => check.name === "final health has no critical findings, only standing warnings, and a green app block");
     expect(health?.status).toBe("pass");
     expect(health?.detail.status).toBe("warning");
@@ -587,6 +615,50 @@ test("live-sync gate passes the frozen v0.1.24 evidence: standing warnings and a
   }
 });
 
+test("live-sync gate fails when the podcasts seed backfill inserts no records", async () => {
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) => {
+      if (command.includes("backfill")) return commandResult(0, podcastsBackfillSyncJson(0));
+      if (command.includes("sync")) return commandResult(1, liveSyncV0124EvidenceJson());
+      return commandResult(1, liveHealthV0124EvidenceJson());
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "podcasts seed backfills through the normal plugin path");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.reason).toBe("no_seed_records_backfilled");
+});
+
+test("live-sync gate fails when the podcasts seed backfill reports a non-ok status", async () => {
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) => {
+      if (command.includes("backfill")) return commandResult(2, podcastsBackfillSyncJson(0, "critical"));
+      if (command.includes("sync")) return commandResult(1, liveSyncV0124EvidenceJson());
+      return commandResult(1, liveHealthV0124EvidenceJson());
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "podcasts seed backfills through the normal plugin path");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.reason).toBe("source_status_critical");
+});
+
 test("live-sync gate still fails on a critical finding", async () => {
   const report = await verifyLiveSyncAndDashboard({
     cookieProbe: {
@@ -595,7 +667,9 @@ test("live-sync gate still fails on a critical finding", async () => {
     },
     startDashboard: false,
     runner: async (command) =>
-      command.includes("sync")
+      command.includes("backfill")
+        ? commandResult(0, podcastsBackfillSyncJson(4))
+        : command.includes("sync")
         ? commandResult(1, liveSyncV0124EvidenceJson())
         : commandResult(2, liveHealthV0124EvidenceJson([
             {
@@ -627,7 +701,9 @@ test("live-sync gate still fails on a warning outside the standing set", async (
     },
     startDashboard: false,
     runner: async (command) =>
-      command.includes("sync")
+      command.includes("backfill")
+        ? commandResult(0, podcastsBackfillSyncJson(4))
+        : command.includes("sync")
         ? commandResult(1, liveSyncV0124EvidenceJson())
         : commandResult(1, liveHealthV0124EvidenceJson([
             {
@@ -664,8 +740,11 @@ test("live-sync gate fails when podcasts records are absent even in the wide das
         x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
       },
       dashboardUrl: dashboard.url,
-      runner: async (command) =>
-        command.includes("sync") ? commandResult(1, liveSyncV0124EvidenceJson()) : commandResult(1, liveHealthV0124EvidenceJson()),
+      runner: async (command) => {
+        if (command.includes("backfill")) return commandResult(0, podcastsBackfillSyncJson(4));
+        if (command.includes("sync")) return commandResult(1, liveSyncV0124EvidenceJson());
+        return commandResult(1, liveHealthV0124EvidenceJson());
+      },
       env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
     });
 
@@ -686,8 +765,11 @@ test("live-sync gate fails as product_fail when a source commits no live records
       x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
     },
     startDashboard: false,
-    runner: async (command) =>
-      command.includes("sync") ? commandResult(0, liveSyncReportJson({ youtubeInserted: 0 })) : commandResult(0, liveHealthJson()),
+    runner: async (command) => {
+      if (command.includes("backfill")) return commandResult(0, podcastsBackfillSyncJson(4));
+      if (command.includes("sync")) return commandResult(0, liveSyncReportJson({ youtubeInserted: 0 }));
+      return commandResult(0, liveHealthJson());
+    },
     env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
   });
 
@@ -1284,6 +1366,26 @@ function liveSyncV0124EvidenceJson(): string {
       { source: "podcasts", status: "ok", metrics: {}, commit: { insertedRecords: 0 } },
       { source: "apple_notes", status: "ok", metrics: { uniqueNotes: 3 }, commit: { insertedRecords: 6 } },
       { source: "twitter", status: "ok", metrics: { observations: 4341 }, commit: { insertedRecords: 4341 } },
+    ],
+  });
+}
+
+// Shape of `nutshell sync podcasts --mode backfill --json` (same SyncReport
+// surface as livesync-gate-v0.1.24-20260610b-evidence-sync-podcasts.json,
+// which recorded the recent-mode run that honestly ingested 0 rows).
+function podcastsBackfillSyncJson(insertedRecords: number, status = "ok"): string {
+  return JSON.stringify({
+    status,
+    startedAt: "2026-06-10T16:34:40.000Z",
+    finishedAt: "2026-06-10T16:34:41.000Z",
+    sources: [
+      {
+        source: "podcasts",
+        status,
+        metrics: { rows: insertedRecords, emitted: insertedRecords },
+        commit: { insertedRecords },
+        findings: [],
+      },
     ],
   });
 }
