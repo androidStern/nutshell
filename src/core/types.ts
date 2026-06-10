@@ -85,6 +85,25 @@ export interface TraceRecord {
   payload: Json;
 }
 
+// User-state taxonomy from docs/release-validation-gates.md. For operational
+// blockers that are not provider states (disk full, stale lock, corrupt store),
+// `blocked_bug` applies: the user's provider state should work, but Nutshell
+// cannot inspect or sync it right now.
+export type UserState =
+  | "not_configured"
+  | "needs_auth"
+  | "needs_permission"
+  | "ready_empty"
+  | "ready_with_data"
+  | "blocked_bug";
+
+export interface FindingGuidance {
+  state: UserState;
+  fix: string;
+  confirm: string;
+  url?: string;
+}
+
 export interface HealthFinding {
   level: HealthLevel;
   source: SourceId | "system";
@@ -92,6 +111,7 @@ export interface HealthFinding {
   message: string;
   detail: Json;
   observedAt: Date;
+  guidance?: FindingGuidance;
 }
 
 export type BackfillHealthStatus =

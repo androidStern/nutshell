@@ -1,6 +1,7 @@
 import type {
   Checkpoint,
   EnrichmentRequest,
+  FindingGuidance,
   HealthFinding,
   PluginContext,
   PluginManifest,
@@ -9,6 +10,7 @@ import type {
   SyncRequest,
 } from "../core/types";
 import { redactJson, redactText } from "../core/redaction";
+import type { FindingCatalog } from "../health/guidance";
 import type { TracePluginSetup } from "../setup/types";
 
 export type {
@@ -25,6 +27,10 @@ export type { TracePluginSetup };
 
 export interface TracePlugin {
   readonly manifest: PluginManifest;
+  // Catalog of every problem finding this plugin can emit, with its guidance.
+  // The universal invariant test enumerates these; a problem finding whose
+  // code is missing here fails CI.
+  readonly findings?: FindingCatalog;
   check(ctx: PluginContext): Promise<HealthFinding[]>;
   sync(ctx: PluginContext, request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult>;
   setup?: TracePluginSetup;
@@ -39,6 +45,15 @@ export function finding(
   message: string,
   detail: HealthFinding["detail"] = {},
   observedAt = new Date(),
+  guidance?: FindingGuidance,
 ): HealthFinding {
-  return { level, source, code, message: redactText(message), detail: redactJson(detail), observedAt };
+  return {
+    level,
+    source,
+    code,
+    message: redactText(message),
+    detail: redactJson(detail),
+    observedAt,
+    ...(guidance ? { guidance } : {}),
+  };
 }

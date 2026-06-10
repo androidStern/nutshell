@@ -42,6 +42,7 @@ export class JsonConfigDraft implements ConfigDraft {
         message: redactText(finding.message),
         observedAt: finding.observedAt.toISOString(),
         detail: redactJson(finding.detail),
+        ...(finding.guidance ? { guidance: { ...finding.guidance } } : {}),
       })) as unknown as Json,
     };
   }

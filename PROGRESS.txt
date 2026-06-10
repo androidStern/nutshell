@@ -1,0 +1,23 @@
+Nutshell release validation reset, current as of 2026-06-10:
+
+- No full fresh-install release rehearsal has passed. Do not claim final release validation.
+- Public `v0.1.22` is published from source commit `94307b1`; GitHub release: `https://github.com/androidStern/nutshell/releases/tag/v0.1.22`; tarball SHA256 `e26a3cab3d0ee317155af27ef546c026f64da15696f0dd01ac076105e36d034a`; Homebrew tap commit `96a8bff`.
+- `v0.1.22` removes the rejected private Chrome Safe Storage password-file behavior, bounds macOS Chrome Safe Storage Keychain reads, and makes YouTube/X report signed-in-but-Keychain-blocked states explicitly.
+- Verification before publish: `bun run typecheck`, full `bun test` (158 pass), `bun run build:compile`, `bun run build`, `bun run build:macos-app`, and `bun run certify:release` passed.
+- Validation strategy is split-gate now. Use `docs/release-validation-gates.md`; do not restart the old monolithic VM flow or use coordinate clicking/computer-use as the main harness.
+- Local import gate passed with real official inputs. Report: `~/Documents/NutshellRehearsalShare/reports/local-provider-imports-v0.1.21-20260610.json`; X records 69,596; YouTube records 74,424.
+- Signed-out browser gate passed from clean public Homebrew `0.1.21`. Report: `~/Documents/NutshellRehearsalShare/reports/signedout-gate-v0.1.21-20260610c.json`.
+- Stable auth-present Tart snapshot exists: `nutshell-authpresent-sequoia-google-x-20260610`. It has no Nutshell app/config/data/agent/tap, Chrome Safe Storage is readable, Google My Activity auth cookies are present, and X `auth_token`/`ct0` cookies are present.
+- Signed-in browser gate passed from a fresh clone of that snapshot using public Homebrew `0.1.22`. Report: `~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610c.json`.
+- Failed signed-in reports to preserve: `~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610a.failed-frozen.json` (bad auth seed restore caused Chrome Safe Storage timeout) and `~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610b.harness-failed-frozen.json` (harness incorrectly failed auth gate on missing Full Disk Access; fixed in local harness).
+- Use the stable auth-present snapshot for future signed-in/live-sync gates. Do not use the old `v0.1.20` password-file bypass, and do not treat prompt-clicking during a gate as pass evidence.
+- Keep private inputs/reports/auth profiles and this `PROGRESS.txt` uncommitted.
+
+Setup/onboarding concern to preserve for next agent:
+
+- Current `nutshell setup` asks which plugins to enable, loops selected plugins through their `setup.summarize/run/verify`, optionally offers provider archive imports, commits plugin enabled/setup state, then handles app-level Full Disk Access/background-agent enablement.
+- Built-in YouTube, Twitter/X, Apple Notes, and Podcasts setup callbacks currently defer real browser/protected-data/automation checks. They mostly show text and return no findings, so selected plugins can be marked `ready` before login/permission has actually been proven.
+- Browser login failures currently appear later through `doctor`, `health`, or `sync`; `setup` does not wait for Google/X login and does not auto-resume after the user logs into Chrome.
+- User concern: this is not a normal setup CLI experience. At each source step the user should be able to understand current state, skip, resume later, and find the right return/import commands without hidden knowledge.
+- User concern: plugin-specific onboarding must remain plugin-owned. The setup orchestrator should not absorb YouTube/X/Notes/Podcasts-specific behavior in violation of the plugin design boundary.
+- User requested a neutral handoff only; do not treat these notes as a prescribed redesign.

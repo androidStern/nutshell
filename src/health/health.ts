@@ -1,4 +1,4 @@
-import type { HealthFinding, HealthLevel, HealthReport, SourceId } from "../core/types";
+import type { FindingGuidance, HealthFinding, HealthLevel, HealthReport, SourceId } from "../core/types";
 import { redactJson, redactText } from "../core/redaction";
 
 export function makeFinding(
@@ -7,8 +7,17 @@ export function makeFinding(
   code: string,
   message: string,
   detail: HealthFinding["detail"] = {},
+  guidance?: FindingGuidance,
 ): HealthFinding {
-  return { level, source, code, message: redactText(message), detail: redactJson(detail), observedAt: new Date() };
+  return {
+    level,
+    source,
+    code,
+    message: redactText(message),
+    detail: redactJson(detail),
+    observedAt: new Date(),
+    ...(guidance ? { guidance } : {}),
+  };
 }
 
 export function reportStatus(findings: HealthFinding[]): HealthReport["status"] {
