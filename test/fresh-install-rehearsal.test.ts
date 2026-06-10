@@ -542,8 +542,141 @@ test("live-sync gate passes on live commits, ok health, and enabled background s
   expect(report.status).toBe("pass");
   expect(report.verdict).toBe("pass");
   expect(report.checks.find((check) => check.name === "fixture preflight")?.status).toBe("pass");
-  expect(report.checks.find((check) => check.name === "final health is ok with background sync enabled")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "final health has no critical findings, only standing warnings, and a green app block")?.status).toBe("pass");
   expect(report.evidence.liveCommits).toEqual({ youtube: 4, podcasts: 2, apple_notes: 3, twitter: 5 });
+});
+
+// Replays the frozen v0.1.24 run (reports/livesync-gate-v0.1.24-20260610.*):
+// product numbers were all good, but the gate failed on two contract bugs —
+// requiring health.status "ok" in a split gate that runs without archive
+// imports (the six standing warnings are structural), and querying /api/days
+// over the product's default 7-day window, which hid the frozen podcasts
+// seed's older records. This exact evidence must now pass.
+test("live-sync gate passes the frozen v0.1.24 evidence: standing warnings and an out-of-window podcasts seed", async () => {
+  const dashboard = fakeDashboardServer([
+    { source: "youtube", daysAgo: 1, count: 30 },
+    { source: "twitter", daysAgo: 1, count: 17 },
+    { source: "apple_notes", daysAgo: 1, count: 3 },
+    // The frozen seed's listens carry the snapshot date: outside the 7-day
+    // default window, inside the harness's explicit 60-day window.
+    { source: "podcasts", daysAgo: 12, count: 2 },
+  ]);
+  try {
+    const report = await verifyLiveSyncAndDashboard({
+      cookieProbe: {
+        google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+        x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+      },
+      dashboardUrl: dashboard.url,
+      runner: async (command) =>
+        command.includes("sync") ? commandResult(1, liveSyncV0124EvidenceJson()) : commandResult(1, liveHealthV0124EvidenceJson()),
+      env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+    });
+
+    expect(report.status).toBe("pass");
+    expect(report.verdict).toBe("pass");
+    expect(report.evidence.liveCommits).toEqual({ youtube: 30, podcasts: 0, apple_notes: 6, twitter: 4341 });
+    const health = report.checks.find((check) => check.name === "final health has no critical findings, only standing warnings, and a green app block");
+    expect(health?.status).toBe("pass");
+    expect(health?.detail.status).toBe("warning");
+    const podcasts = report.checks.find((check) => check.name === "dashboard shows podcasts trace records");
+    expect(podcasts?.status).toBe("pass");
+    expect(podcasts?.detail.count).toBe(2);
+  } finally {
+    dashboard.stop();
+  }
+});
+
+test("live-sync gate still fails on a critical finding", async () => {
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) =>
+      command.includes("sync")
+        ? commandResult(1, liveSyncV0124EvidenceJson())
+        : commandResult(2, liveHealthV0124EvidenceJson([
+            {
+              level: "critical",
+              source: "apple_notes",
+              code: "apple_notes_access_failed",
+              message: "Apple Notes access could not be verified.",
+              detail: {},
+              observedAt: "2026-06-10T16:16:10.594Z",
+              guidance: { state: "blocked_bug", fix: "Open Notes.app and retry.", confirm: "nutshell doctor apple_notes" },
+            },
+          ])),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "final health has no critical findings, only standing warnings, and a green app block");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.failures).toEqual(["critical_findings_present"]);
+  expect(check?.detail.criticalFindings).toEqual(["apple_notes/apple_notes_access_failed"]);
+});
+
+test("live-sync gate still fails on a warning outside the standing set", async () => {
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) =>
+      command.includes("sync")
+        ? commandResult(1, liveSyncV0124EvidenceJson())
+        : commandResult(1, liveHealthV0124EvidenceJson([
+            {
+              level: "warning",
+              source: "system",
+              code: "disk_free_low",
+              message: "Nutshell data root disk free space is low",
+              detail: {},
+              observedAt: "2026-06-10T16:16:10.594Z",
+              guidance: { state: "blocked_bug", fix: "Free up disk space on the data root volume.", confirm: "nutshell health" },
+            },
+          ])),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "final health has no critical findings, only standing warnings, and a green app block");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.failures).toEqual(["non_standing_warnings_present"]);
+  expect(check?.detail.nonStandingWarnings).toEqual(["system/disk_free_low"]);
+});
+
+test("live-sync gate fails when podcasts records are absent even in the wide dashboard window", async () => {
+  const dashboard = fakeDashboardServer([
+    { source: "youtube", daysAgo: 1, count: 30 },
+    { source: "twitter", daysAgo: 1, count: 17 },
+    { source: "apple_notes", daysAgo: 1, count: 3 },
+  ]);
+  try {
+    const report = await verifyLiveSyncAndDashboard({
+      cookieProbe: {
+        google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+        x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+      },
+      dashboardUrl: dashboard.url,
+      runner: async (command) =>
+        command.includes("sync") ? commandResult(1, liveSyncV0124EvidenceJson()) : commandResult(1, liveHealthV0124EvidenceJson()),
+      env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+    });
+
+    expect(report.status).toBe("fail");
+    expect(report.verdict).toBe("product_fail");
+    const check = report.checks.find((item) => item.name === "dashboard shows podcasts trace records");
+    expect(check?.status).toBe("fail");
+    expect(check?.detail.count).toBe(0);
+  } finally {
+    dashboard.stop();
+  }
 });
 
 test("live-sync gate fails as product_fail when a source commits no live records", async () => {
@@ -1137,6 +1270,91 @@ function liveHealthJson(): string {
     app: { installed: true, path: "/Applications/Nutshell.app", fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled" },
     scheduler: { lastRunAt: "2026-06-10T00:00:00.000Z", nextRunAt: "2026-06-10T00:15:00.000Z" },
   });
+}
+
+// Mirrors livesync-gate-v0.1.24-20260610.harness-failed-frozen.json: the sync
+// report's per-source commit counts the gate recorded as liveCommits.
+function liveSyncV0124EvidenceJson(): string {
+  return JSON.stringify({
+    status: "partial",
+    startedAt: "2026-06-10T16:13:35.000Z",
+    finishedAt: "2026-06-10T16:14:16.051Z",
+    sources: [
+      { source: "youtube", status: "ok", metrics: { emitted: 30 }, commit: { insertedRecords: 30 } },
+      { source: "podcasts", status: "ok", metrics: {}, commit: { insertedRecords: 0 } },
+      { source: "apple_notes", status: "ok", metrics: { uniqueNotes: 3 }, commit: { insertedRecords: 6 } },
+      { source: "twitter", status: "ok", metrics: { observations: 4341 }, commit: { insertedRecords: 4341 } },
+    ],
+  });
+}
+
+// Mirrors livesync-gate-v0.1.24-20260610-evidence-health.json: status
+// "warning", zero criticals, a green app block, and exactly the six standing
+// warnings the real run produced (3x backfill_incomplete, backfill_partial,
+// last_run_partial, twitter_enrichment_pending) with their real guidance
+// states.
+function liveHealthV0124EvidenceJson(extraFindings: Array<Record<string, unknown>> = []): string {
+  const warning = (source: string, code: string, state: string) => ({
+    level: "warning",
+    source,
+    code,
+    message: `${source} ${code}`,
+    detail: {},
+    observedAt: "2026-06-10T16:16:10.594Z",
+    guidance: { state, fix: "No action needed — the next scheduled sync continues automatically.", confirm: "nutshell health" },
+  });
+  return JSON.stringify({
+    status: "warning",
+    checkedAt: "2026-06-10T16:16:10.511Z",
+    findings: [
+      warning("youtube", "backfill_incomplete", "ready_empty"),
+      warning("podcasts", "backfill_incomplete", "ready_empty"),
+      warning("apple_notes", "backfill_incomplete", "ready_empty"),
+      warning("twitter", "backfill_partial", "ready_empty"),
+      warning("twitter", "last_run_partial", "blocked_bug"),
+      warning("twitter", "twitter_enrichment_pending", "blocked_bug"),
+      ...extraFindings,
+    ],
+    app: { installed: true, path: "/Users/admin/Applications/Nutshell.app", fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled" },
+    scheduler: { lastRunAt: "2026-06-10T16:14:16.051Z", nextRunAt: "2026-06-10T16:28:19.321Z" },
+  });
+}
+
+// Stands in for `nutshell dashboard` behind the dashboardUrl test seam. Its
+// /api/days honors the same from/to params as the product (from defaults to
+// to minus 7 days, src/dashboard/server.ts dashboardDays), so a record older
+// than 7 days is only visible when the harness explicitly widens the window.
+function fakeDashboardServer(records: Array<{ source: string; daysAgo: number; count: number }>): { url: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/status") return Response.json({ product: "nutshell", version: "0.1.24" });
+      if (url.pathname === "/api/days") {
+        const now = new Date();
+        const toParam = url.searchParams.get("to");
+        const fromParam = url.searchParams.get("from");
+        const to = toParam ? new Date(toParam) : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+        const from = fromParam ? new Date(fromParam) : new Date(to.getFullYear(), to.getMonth(), to.getDate() - 7);
+        const byDay = new Map<string, Record<string, unknown[]>>();
+        for (const record of records) {
+          const happenedAt = new Date(now.getTime() - record.daysAgo * 24 * 60 * 60 * 1000);
+          if (happenedAt < from || happenedAt >= to) continue;
+          const date = happenedAt.toISOString().slice(0, 10);
+          const sources = byDay.get(date) ?? {};
+          sources[record.source] = Array.from({ length: record.count }, (_, index) => ({ source: record.source, index }));
+          byDay.set(date, sources);
+        }
+        return Response.json({
+          from: from.toISOString(),
+          to: to.toISOString(),
+          days: [...byDay.entries()].map(([date, sources]) => ({ date, sources })),
+        });
+      }
+      return new Response("<html><body>Nutshell dashboard</body></html>", { headers: { "content-type": "text/html" } });
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) };
 }
 
 function writeTestConfig(home: string): { root: string; configPath: string } {

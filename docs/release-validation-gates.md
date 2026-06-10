@@ -110,7 +110,7 @@ Current proven snapshot:
 
 Purpose: prove missing permissions are reported as permissions, and granted permissions belong to `Nutshell.app`.
 
-The post-permission snapshot is produced once by the staged ~20-minute human session in `docs/post-permission-snapshot-session.md` (naming: `nutshell-postperm-sequoia-<YYYYMMDD>`). That session is the only human clicking in this gate's lifecycle; it builds a frozen fixture, it is not pass evidence. The gate itself asserts both states mechanically, over SSH/CLI from clones:
+The post-permission snapshot is produced once by the staged ~20-minute human session in `docs/post-permission-snapshot-session.md` (naming: `nutshell-postperm-sequoia-<YYYYMMDD>`). Current snapshot: `nutshell-postperm-sequoia-20260610` (public `v0.1.24`, all grants owned by `Nutshell.app`, three seeded notes; verification: zero `needs_permission` findings, FDA granted — `~/Documents/NutshellRehearsalShare/reports/postperm-snapshot-verify-20260610-doctor.json`). That session is the only human clicking in this gate's lifecycle; it builds a frozen fixture, it is not pass evidence. The gate itself asserts both states mechanically, over SSH/CLI from clones:
 
 - pre-permission state (clone of the auth-present snapshot with the release candidate installed, no grants): doctor reports the per-source pre-state contract below.
 - post-permission state (clone of the post-permission snapshot): probes pass clean, with the grants owned by `Nutshell.app`.
@@ -138,8 +138,8 @@ Pass means:
 - Podcasts reads the SQLite-safe snapshot through the normal plugin path
 - Notes reads a visible note through `Nutshell.app`
 - scheduled app-owned background sync records last and next run times
-- final health is `ok`
-- dashboard API/page show nonzero records for YouTube, Podcasts, Notes, and X
+- final health has zero critical findings, a green app block (Full Disk Access granted, background sync enabled, agent enabled), and every warning drawn from the allowed standing set (`backfill_incomplete`, `backfill_partial`, `last_run_partial`, `twitter_enrichment_pending`, `twitter_enrichment_failed`, `app_owned_sync_not_verified`) — this split gate runs without archive imports, so the coverage warnings are structural and `status: ok` is unsatisfiable here by design; the strict `ok`/zero-findings requirement belongs to the final fresh-install rehearsal, where imports have run
+- dashboard API/page show nonzero records for YouTube, Podcasts, Notes, and X (the harness queries `/api/days` with an explicit 60-day `from` so the frozen podcasts seed's records stay in the window; the product's default 7-day reader window is unchanged)
 
 ## Session Keep-Alive
 

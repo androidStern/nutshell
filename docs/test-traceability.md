@@ -425,3 +425,12 @@ audited here) and the `fixture_stale`, post-permission gate, and gate-label rows
 | unauthenticated verifier passes on explicit signed-out findings with needs_auth guidance | gates doc "Signed-Out Browser Gate"; honest-setup #6 (assert guidance.state, not prose) | anchored |
 | unauthenticated verifier no longer accepts twitter_session_check_failed or other blocked-probe codes as signed-out proof | gates doc "Signed-Out Browser Gate" (keychain mystery is a failure); regression: v0.1.23 signed-out gate passed on twitter_session_check_failed (blocked_bug) in reports/signedout-gate-v0.1.23-20260610.product-fail-frozen.json | anchored |
 | unauthenticated verifier fails a signed-out code whose guidance state is not needs_auth | gates doc "Signed-Out Browser Gate"; honest-setup #6 (a needs_auth-coded match with non-needs_auth guidance is a blocked probe, not signed-out proof) | anchored |
+
+### test/fresh-install-rehearsal.test.ts (live-sync gate contract corrections, 2026-06-10)
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| live-sync gate passes the frozen v0.1.24 evidence: standing warnings and an out-of-window podcasts seed | gates doc "Live Sync And Dashboard Gate" (standing-warning health contract; explicit 60-day /api/days window); regression: reports/livesync-gate-v0.1.24-20260610.harness-failed-frozen.json failed a healthy product on `status: warning` (structural, no imports in this split gate) and on the 7-day default dashboard window hiding the frozen podcasts seed | anchored |
+| live-sync gate still fails on a critical finding | gates doc "Live Sync And Dashboard Gate" (zero critical findings); honest-setup #26 | anchored |
+| live-sync gate still fails on a warning outside the standing set | gates doc "Live Sync And Dashboard Gate" (allowed standing warnings are an explicit closed set — anything else, e.g. disk_free_low, fails); truthful-baseline §1 (no quiet fake success) | anchored |
+| live-sync gate fails when podcasts records are absent even in the wide dashboard window | gates doc "Live Sync And Dashboard Gate" (dashboard must show nonzero podcasts records inside the explicit 60-day window); honest-setup #26 | anchored |
