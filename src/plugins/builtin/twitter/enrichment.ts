@@ -1,6 +1,6 @@
 import type { HealthFinding, Json, JsonObject, PluginRecordReader, SyncBudget, TraceRecord } from "../../../core/types";
 import { sleep } from "../../../core/time";
-import { finding } from "../../interface";
+import { TWITTER_FINDINGS } from "./findings";
 
 export type TweetEnrichmentStatus =
   | "pending"
@@ -229,9 +229,15 @@ export async function enrichDueTargets(state: TwitterEnrichmentState, options: E
   if (enriched > 0) state.lastSuccessAt = options.now.toISOString();
   if (temporaryFailures > 0 || rateLimited) state.lastFailureAt = options.now.toISOString();
   if (rateLimited) {
-    health.push(finding("critical", "twitter", "twitter_enrichment_rate_limited", "Twitter enrichment is rate limited", { pending: Object.keys(queue).length }, options.now));
+    health.push({
+      ...TWITTER_FINDINGS.make("twitter_enrichment_rate_limited", "Twitter enrichment is rate limited", { pending: Object.keys(queue).length }),
+      observedAt: options.now,
+    });
   } else if (temporaryFailures > 0) {
-    health.push(finding("warning", "twitter", "twitter_enrichment_partial", "Some Twitter enrichment requests failed temporarily", { temporaryFailures }, options.now));
+    health.push({
+      ...TWITTER_FINDINGS.make("twitter_enrichment_partial", "Some Twitter enrichment requests failed temporarily", { temporaryFailures }),
+      observedAt: options.now,
+    });
   }
 
   return {

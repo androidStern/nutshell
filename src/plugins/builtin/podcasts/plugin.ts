@@ -13,8 +13,9 @@ import type {
 import { fingerprint } from "../../../core/ids";
 import { overlapWindow, sleep } from "../../../core/time";
 import { numberAt, stringArrayAt, stringAt } from "../../../config/config";
-import { finding, type TracePlugin } from "../../interface";
-import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
+import type { TracePlugin } from "../../interface";
+import type { PluginSetupContext } from "../../../setup/types";
+import { PODCASTS_FINDINGS } from "./findings";
 import { podcastEpisodeId, podcastListenId, type PodcastEpisodeRow } from "./identity";
 import { probePodcastDatabase, probePodcastFileAccess, readPodcastBackfillPage, readPodcastRows, type PodcastBackfillCursor } from "./sqlite-source";
 
@@ -38,6 +39,8 @@ export class PodcastsPlugin implements TracePlugin {
     defaultBudget: { maxRuntimeMs: 60_000, maxRequests: null, minDelayMs: 0, stopOnRateLimit: true },
   };
 
+  readonly findings = PODCASTS_FINDINGS;
+
   readonly setup = {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Apple Podcasts",
@@ -58,7 +61,7 @@ export class PodcastsPlugin implements TracePlugin {
     const cfg = config(ctx);
     const paths = existingDbPaths(cfg);
     if (!paths.length) {
-      return [finding("critical", "podcasts", "podcasts_db_missing", "Apple Podcasts database is missing", { dbPath: cfg.dbPath, dbPaths: cfg.dbPaths })];
+      return [PODCASTS_FINDINGS.make("podcasts_db_missing", "Apple Podcasts database is missing", { dbPath: cfg.dbPath, dbPaths: cfg.dbPaths })];
     }
     const failures: JsonObject[] = [];
     for (const dbPath of paths) {
@@ -76,9 +79,7 @@ export class PodcastsPlugin implements TracePlugin {
     const errorText = failures.map((item) => `${item.dbPath}: ${item.error}`).join("\n");
     const timeout = isTimeoutError(errorText);
     return [
-      finding(
-        timeout ? "warning" : "critical",
-        "podcasts",
+      PODCASTS_FINDINGS.make(
         timeout ? "podcasts_db_timeout" : "podcasts_db_probe_failed",
         timeout ? "Apple Podcasts database probe timed out" : "Apple Podcasts database probe failed",
         {
@@ -105,7 +106,7 @@ export class PodcastsPlugin implements TracePlugin {
     let lastError: unknown = null;
     const paths = orderedDbPaths(cfg, state);
     if (!paths.length) {
-      return missingDbResult(checkpoint, cfg, "podcasts_sync_failed", "Apple Podcasts database is missing");
+      return missingDbResult(checkpoint, cfg);
     }
     try {
       for (let attempt = 1; attempt <= cfg.attempts; attempt += 1) {
@@ -150,7 +151,7 @@ export class PodcastsPlugin implements TracePlugin {
       records: [],
       nextCheckpoint: checkpoint.state,
       health: [
-        finding("warning", "podcasts", timeout ? "podcasts_db_timeout" : "podcasts_sync_failed", timeout ? "Apple Podcasts database access timed out" : "Apple Podcasts sync failed after retries", {
+        PODCASTS_FINDINGS.make(timeout ? "podcasts_db_timeout" : "podcasts_sync_failed", timeout ? "Apple Podcasts database access timed out" : "Apple Podcasts sync failed after retries", {
           error: errorText,
           attempts: cfg.attempts,
           dbPath: cfg.dbPath,
@@ -160,52 +161,6 @@ export class PodcastsPlugin implements TracePlugin {
       metrics: { attempts: cfg.attempts },
       completed: false,
       partial: true,
-    };
-  }
-
-  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
-    const cfg = configFromJson(ctx.config.pluginConfig("podcasts"));
-    const paths = existingDbPaths(cfg);
-    if (!paths.length) {
-      return {
-        ok: false,
-        level: "critical",
-        message: "Apple Podcasts database was not found.",
-        detail: { dbPath: cfg.dbPath, dbPaths: cfg.dbPaths },
-      };
-    }
-    for (const dbPath of paths) {
-      const access = await probePodcastFileAccess(dbPath, Math.min(cfg.checkTimeoutMs, 5_000));
-      if (!access.ok) {
-        return {
-          ok: false,
-          level: access.code === "permission_denied" ? "critical" : "warning",
-          message: access.message,
-          detail: { dbPath, probe: { ...access } },
-        };
-      }
-      try {
-        await probePodcastDatabase(dbPath, cfg.checkTimeoutMs);
-        return {
-          ok: true,
-          level: "ok",
-          message: "Apple Podcasts database access works.",
-          detail: { dbPath },
-        };
-      } catch (error) {
-        return {
-          ok: false,
-          level: isTimeoutError(String(error)) ? "warning" : "critical",
-          message: isTimeoutError(String(error)) ? "Apple Podcasts database probe timed out." : "Apple Podcasts database schema could not be verified.",
-          detail: { dbPath, error: String(error) },
-        };
-      }
-    }
-    return {
-      ok: false,
-      level: "critical",
-      message: "Apple Podcasts database access could not be verified.",
-      detail: { dbPaths: cfg.dbPaths },
     };
   }
 }
@@ -232,11 +187,6 @@ function configFromJson(cfg: JsonObject) {
   };
 }
 
-function setupFindingFromCheck(code: string, check: SetupCheck) {
-  if (check.ok) return [];
-  return [finding(check.level === "warning" ? "warning" : "critical", "podcasts", code, check.message, check.detail ?? {})];
-}
-
 function existingDbPaths(cfg: ReturnType<typeof config>): string[] {
   return [...new Set(cfg.dbPaths)].filter((path) => existsSync(path));
 }
@@ -247,13 +197,13 @@ function orderedDbPaths(cfg: ReturnType<typeof config>, state: PodcastsState): s
   return preferred ? [preferred, ...existing.filter((path) => path !== preferred)] : existing;
 }
 
-function missingDbResult(checkpoint: Checkpoint, cfg: ReturnType<typeof config>, code: string, message: string): PluginSyncResult {
+function missingDbResult(checkpoint: Checkpoint, cfg: ReturnType<typeof config>): PluginSyncResult {
   return {
     observations: [],
     records: [],
     nextCheckpoint: checkpoint.state,
     health: [
-      finding("critical", "podcasts", code, message, {
+      PODCASTS_FINDINGS.make("podcasts_db_missing", "Apple Podcasts database is missing", {
         dbPath: cfg.dbPath,
         dbPaths: cfg.dbPaths,
       }),
@@ -295,7 +245,7 @@ async function syncBackfill(
       records: [],
       nextCheckpoint: state as unknown as JsonObject,
       health: [
-        finding("critical", "podcasts", "podcasts_backfill_failed", "Apple Podcasts database is missing", {
+        PODCASTS_FINDINGS.make("podcasts_db_missing", "Apple Podcasts database is missing", {
           dbPath: cfg.dbPath,
           dbPaths: cfg.dbPaths,
         }),
@@ -350,7 +300,7 @@ async function syncBackfill(
     records: [],
     nextCheckpoint: state as unknown as JsonObject,
     health: [
-      finding("warning", "podcasts", "podcasts_backfill_failed", "Apple Podcasts backfill failed after retries", {
+      PODCASTS_FINDINGS.make("podcasts_backfill_failed", "Apple Podcasts backfill failed after retries", {
         error: String(lastError),
         attempts: cfg.attempts,
       }),
@@ -390,9 +340,7 @@ function podcastsFileAccessFinding(
 ) {
   const timeout = access.code === "timeout";
   const permission = access.code === "permission_denied";
-  return finding(
-    permission ? "critical" : timeout ? "warning" : "warning",
-    "podcasts",
+  return PODCASTS_FINDINGS.make(
     permission ? "podcasts_full_disk_access_required" : timeout ? "podcasts_db_read_timeout" : "podcasts_db_read_failed",
     permission
       ? "Apple Podcasts database is blocked by macOS privacy permissions"
@@ -410,8 +358,6 @@ function podcastsFileAccessFinding(
         script: process.argv[1] ?? "",
         xpcServiceName: process.env.XPC_SERVICE_NAME ?? "",
       },
-      nextAction:
-        "Open System Settings > Privacy & Security > Full Disk Access, add the installed `nutshell` app or command, turn it on, then run `nutshell health` again. Do not grant access to Bun, zsh, or a temporary build path for production use.",
     },
   );
 }

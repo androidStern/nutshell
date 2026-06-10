@@ -103,7 +103,12 @@ test("setup enforces a core-owned timeout around plugin setup", async () => {
 
     expect(report.status).toBe("warning");
     expect(report.plugins.find((item) => item.source === "slow")?.status).toBe("degraded");
-    expect(report.plugins.find((item) => item.source === "slow")?.findings[0]?.code).toBe("plugin_setup_timeout");
+    const timeoutFinding = report.plugins.find((item) => item.source === "slow")?.findings[0];
+    expect(timeoutFinding?.code).toBe("plugin_setup_timeout");
+    expect(timeoutFinding?.source).toBe("slow");
+    expect(timeoutFinding?.guidance?.state).toBe("blocked_bug");
+    expect(timeoutFinding?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(timeoutFinding?.guidance?.confirm?.length).toBeGreaterThan(0);
     expect(report.plugins.find((item) => item.source === "ready")?.status).toBe("ready");
   } finally {
     rmSync(root, { recursive: true, force: true });

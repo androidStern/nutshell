@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import type { HealthFinding, JsonObject, PluginContext, SourceId } from "../core/types";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
 import { loadConfig, logPath, numberAt, objectAt, pluginConfig, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
-import { makeFinding, reportStatus as healthReportStatus } from "../health/health";
+import { reportStatus as healthReportStatus } from "../health/health";
+import { setupFinding } from "./setup-findings";
 import { appExecutable, appStatusJson, ensureStableAppPath, inspectNutshellApp } from "../macos/app-status";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
 import type { TracePlugin } from "../plugins/interface";
@@ -212,13 +213,9 @@ export class SetupRuntime {
       return { report, summary };
     } catch (error) {
       const timedOut = error instanceof SetupPluginTimeoutError;
-      const finding = makeFinding(
-        "critical",
-        source,
-        timedOut ? "plugin_setup_timeout" : "plugin_setup_failed",
-        timedOut ? `${plugin.manifest.displayName} setup timed out` : `${plugin.manifest.displayName} setup failed`,
-        timedOut ? { timeoutMs: error.timeoutMs } : { error: String(error) },
-      );
+      const finding = timedOut
+        ? setupFinding("plugin_setup_timeout", source, `${plugin.manifest.displayName} setup timed out`, { timeoutMs: error.timeoutMs })
+        : setupFinding("plugin_setup_failed", source, `${plugin.manifest.displayName} setup failed`, { error: String(error) });
       this.logger.error("setup: plugin failed", { source, error: String(error) });
       return {
         summary: { title: plugin.manifest.displayName, body: "Setup failed before the plugin could finish." },
@@ -316,7 +313,7 @@ export class SetupRuntime {
           output.push({
             source: item.source,
             ok: false,
-            finding: makeFinding("critical", item.source, "setup_archive_import_failed", `${item.source} archive import failed`, {
+            finding: setupFinding("setup_archive_import_failed", item.source, `${item.source} archive import failed`, {
               path: item.path,
               error: String(error),
             }),

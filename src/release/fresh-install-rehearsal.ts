@@ -140,6 +140,11 @@ const REQUIRED_RECORD_TYPES: Array<{ source: SourceId; label: string; types: str
   { source: "apple_notes", label: "Apple Notes note", types: ["apple_note", "apple_note.created", "apple_note.modified"] },
   { source: "twitter", label: "Twitter/X activity", types: ["twitter.authored", "twitter.bookmarked", "twitter.liked", "twitter.following"] },
 ];
+// The old catch-all auth-probe codes (youtube_auth_probe_failed, twitter_auth)
+// were split into one code per user state; the rehearsal accepts any of the
+// split codes wherever it used to match the catch-all.
+const YOUTUBE_AUTH_PROBE_CODES = ["youtube_signed_out", "youtube_keychain_blocked", "youtube_activity_unreadable"];
+const TWITTER_AUTH_PROBE_CODES = ["twitter_signed_out", "twitter_keychain_blocked", "twitter_session_check_failed"];
 const AGENT_LABEL = "com.winterfell.nutshell.agent";
 const BUNDLE_ID = "com.winterfell.nutshell";
 const REQUIRED_FULL_REHEARSAL_PHASES = [
@@ -353,9 +358,9 @@ export async function verifyUnauthenticatedBrowserState(options: RehearsalOption
   const twitter = await runJsonCommand<HealthReport>(["nutshell", "doctor", "twitter", "--json"], runner, env, 60_000);
   const checks = [
     jsonCommandCheck("youtube doctor returns JSON while signed out", youtube),
-    authFailureCheck("youtube signed-out state is explicit", youtube.value, ["youtube_auth", "youtube_auth_probe_failed"]),
+    authFailureCheck("youtube signed-out state is explicit", youtube.value, YOUTUBE_AUTH_PROBE_CODES),
     jsonCommandCheck("twitter doctor returns JSON while signed out", twitter),
-    authFailureCheck("twitter signed-out state is explicit", twitter.value, ["twitter_auth", "twitter_auth_probe_failed"]),
+    authFailureCheck("twitter signed-out state is explicit", twitter.value, TWITTER_AUTH_PROBE_CODES),
   ];
   return reportFor("unauthenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
@@ -376,10 +381,10 @@ export async function verifyAuthenticatedBrowserState(options: RehearsalOptions 
   const checks = [
     browserCookiesPresentCheck("Google/YouTube browser auth cookies present after login", googleCookies),
     jsonCommandCheck("youtube doctor returns JSON after login", youtube),
-    authenticatedSourceUsableCheck("youtube auth state is usable", youtube.value, googleCookies, "youtube", ["youtube_auth", "youtube_auth_probe_failed", "plugin_setup_degraded"]),
+    authenticatedSourceUsableCheck("youtube auth state is usable", youtube.value, googleCookies, "youtube", [...YOUTUBE_AUTH_PROBE_CODES, "plugin_setup_degraded"]),
     browserCookiesPresentCheck("X browser auth cookies present after login", xCookies),
     jsonCommandCheck("twitter doctor returns JSON after login", twitter),
-    authenticatedSourceUsableCheck("twitter auth state is usable", twitter.value, xCookies, "twitter", ["twitter_auth", "twitter_auth_probe_failed", "plugin_setup_degraded"]),
+    authenticatedSourceUsableCheck("twitter auth state is usable", twitter.value, xCookies, "twitter", [...TWITTER_AUTH_PROBE_CODES, "plugin_setup_degraded"]),
   ];
   return reportFor("authenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
@@ -1097,6 +1102,9 @@ function classifyBrowserAuthState(health: HealthReport | null, source: SourceId,
   const sourceFindings = health.findings.filter((finding) => finding.source === source);
   const text = findingTexts({ ...health, findings: sourceFindings });
   if (keychainOrSafeStorageWarnings(text).length) return "blocked_bug";
+  const guided = guidedCriticalState(sourceFindings, ["needs_auth", "needs_permission", "blocked_bug", "ready_empty"]);
+  if (guided === "needs_auth") return browserCookies.length ? "blocked_bug" : "needs_auth";
+  if (guided) return guided;
   if (sourceFindings.some((finding) => /auth|cookie|signed.?out|login/i.test(`${finding.code} ${finding.message}`))) {
     return browserCookies.length ? "blocked_bug" : "needs_auth";
   }
@@ -1120,6 +1128,9 @@ export function classifySourceState(input: {
   const relevant = input.source === "system" ? systemFindings : [...sourceFindings, ...systemFindings];
   const text = findingTexts({ ...input.health, findings: relevant });
   if (keychainOrSafeStorageWarnings(text).length) return "blocked_bug";
+  const guided = guidedCriticalState(sourceFindings, ["needs_permission", "needs_auth", "blocked_bug", "ready_empty"]);
+  if (guided === "needs_auth") return input.browserCookies?.length ? "blocked_bug" : "needs_auth";
+  if (guided) return guided;
   if (sourceFindings.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
     return "needs_permission";
   }
@@ -1135,6 +1146,19 @@ export function classifySourceState(input: {
 
 function findingTexts(health: HealthReport): string[] {
   return health.findings.map((finding) => `${finding.code}\n${finding.message}\n${JSON.stringify(finding.detail)}`);
+}
+
+// New releases carry guidance.state on every problem finding; prefer it over
+// the regex heuristics, which remain as the fallback for pre-guidance releases.
+function guidedCriticalState(
+  findings: HealthReport["findings"],
+  priority: RehearsalSourceState[],
+): RehearsalSourceState | null {
+  const states = new Set(
+    findings.filter((finding) => finding.level === "critical" && finding.guidance).map((finding) => finding.guidance!.state),
+  );
+  for (const state of priority) if (states.has(state)) return state;
+  return null;
 }
 
 function keychainOrSafeStorageWarnings(warnings: readonly string[]): string[] {

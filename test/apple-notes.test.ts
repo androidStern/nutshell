@@ -93,6 +93,9 @@ test("apple notes automation denial returns an explicit permission finding", asy
     const detail = result.health[0]?.detail as JsonObject;
     expect(String(detail.nextAction)).toContain("System Settings");
     expect(String(detail.nextAction)).toContain("nutshell");
+    expect(result.health[0]?.guidance?.state).toBe("needs_permission");
+    expect(result.health[0]?.guidance?.fix).toContain("System Settings");
+    expect(result.health[0]?.guidance?.confirm).toBe("nutshell doctor apple_notes");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -122,9 +125,36 @@ test("apple notes health probe fails closed on automation denial", async () => {
       },
     });
 
-    expect(findings.some((item) => item.level === "critical" && item.code === "apple_notes_access_probe_failed")).toBe(true);
+    expect(findings.some((item) => item.level === "critical" && item.code === "apple_notes_automation_permission_required")).toBe(true);
     expect(findings[0]?.message).toContain("automation permissions");
     expect(String((findings[0]?.detail as JsonObject).error)).toContain("Not authorized");
+    expect(findings[0]?.guidance?.state).toBe("needs_permission");
+    expect(findings[0]?.guidance?.fix).toContain("System Settings");
+    expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor apple_notes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apple notes health probe reports non-permission failures as access failed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-health-access-failed-"));
+  try {
+    const brokenSource: NotesSource = {
+      async scanMetadata() {
+        throw new Error("osascript timed out after 45000 ms");
+      },
+      async fetchBodies() {
+        return new Map();
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => brokenSource);
+    const findings = await plugin.check(context(root));
+
+    expect(findings.some((item) => item.level === "critical" && item.code === "apple_notes_access_failed")).toBe(true);
+    expect(String((findings[0]?.detail as JsonObject).error)).toContain("timed out");
+    expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+    expect(findings[0]?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor apple_notes");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -209,7 +239,11 @@ test("apple notes stops body export cleanly when the run budget is exhausted", a
     expect(bodyFetches).toBe(0);
     expect(result.partial).toBe(true);
     expect(result.metrics).toMatchObject({ bodyFetches: 0, partial: true });
-    expect(result.health.some((item) => item.code === "apple_notes_runtime_budget_exhausted")).toBe(true);
+    const budget = result.health.find((item) => item.code === "apple_notes_runtime_budget_exhausted");
+    expect(budget).toBeDefined();
+    expect(budget?.guidance?.state).toBe("blocked_bug");
+    expect(budget?.guidance?.fix).toContain("No action needed");
+    expect(budget?.guidance?.confirm).toBe("nutshell doctor apple_notes");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

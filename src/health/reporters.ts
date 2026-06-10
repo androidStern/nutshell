@@ -15,6 +15,10 @@ export function formatHealthText(report: HealthReport): string {
   for (const finding of report.findings.sort((a, b) => severity(b.level) - severity(a.level))) {
     const prefix = finding.level === "critical" ? "CRITICAL" : finding.level === "warning" ? "WARN" : "OK";
     lines.push(`${prefix} ${finding.source}/${finding.code}: ${finding.message}`);
+    if (finding.level !== "ok" && finding.guidance) {
+      lines.push(`  fix:  ${finding.guidance.fix}`);
+      lines.push(`  then: ${finding.guidance.confirm}`);
+    }
   }
   for (const item of report.backfill) {
     const next = item.liveBackfill.nextCommand ? ` next=${item.liveBackfill.nextCommand}` : "";

@@ -86,6 +86,41 @@ test("x archive import commits official archive records", async () => {
   }
 });
 
+test("x archive import flags a bad archive path with import guidance", async () => {
+  const plugin = new TwitterPlugin();
+  const result = await plugin.importProviderExport(
+    {
+      root: "/tmp/nutshell-test",
+      config: {},
+      logger: { event() {}, warn() {}, error() {} },
+      signal: new AbortController().signal,
+      now: () => new Date("2026-05-22T12:00:00.000Z"),
+      records: {
+        async query() {
+          return { records: [], total: 0, limit: 0, offset: 0 };
+        },
+      },
+      async writeArtifact() {
+        return { path: "", contentHash: "", mimeType: null, bytes: 0 };
+      },
+    },
+    {
+      source: "twitter",
+      path: join(tmpdir(), "missing-x-archive.zip"),
+      dryRun: false,
+      budget: { maxRuntimeMs: 30_000, maxRequests: 10, minDelayMs: 0, stopOnRateLimit: true },
+    },
+    { version: 0, state: {} },
+  );
+
+  expect(result.partial).toBe(true);
+  expect(result.completed).toBe(false);
+  expect(result.health[0]?.code).toBe("x_archive_import_issue");
+  expect(result.health[0]?.guidance?.state).toBe("blocked_bug");
+  expect(result.health[0]?.guidance?.fix).toContain("official X archive");
+  expect(result.health[0]?.guidance?.confirm).toBe("nutshell import twitter <x-archive.zip> --json");
+});
+
 test("scheduled twitter sync drains queued enrichment by configured limit", async () => {
   const root = mkdtempSync(join(tmpdir(), "trace-x-auto-enrich-"));
   try {
@@ -200,6 +235,9 @@ test("scheduled twitter enrichment stops immediately on rate limit and persists 
     expect(report.sources[0]?.commit?.checkpointVersion).toBe(2);
     expect(report.sources[0]?.enrichment?.status).toBe("critical");
     expect(report.sources[0]?.enrichment?.findings[0]?.code).toBe("twitter_enrichment_rate_limited");
+    expect(report.sources[0]?.enrichment?.findings[0]?.guidance?.state).toBe("blocked_bug");
+    expect((report.sources[0]?.enrichment?.findings[0]?.guidance?.fix ?? "").length).toBeGreaterThan(0);
+    expect(report.sources[0]?.enrichment?.findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -265,6 +303,8 @@ test("scheduled twitter enrichment commits successes while keeping temporary fai
     expect(report.sources[0]?.commit?.checkpointVersion).toBe(2);
     expect(report.sources[0]?.enrichment?.commit?.checkpointVersion).toBe(3);
     expect(report.sources[0]?.enrichment?.findings[0]?.code).toBe("twitter_enrichment_partial");
+    expect(report.sources[0]?.enrichment?.findings[0]?.guidance?.state).toBe("blocked_bug");
+    expect((report.sources[0]?.enrichment?.findings[0]?.guidance?.fix ?? "").length).toBeGreaterThan(0);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

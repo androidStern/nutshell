@@ -45,7 +45,12 @@ test("health reports incomplete coverage without provider export or current-sour
     const twitter = report.backfill.find((item) => item.source === "twitter");
     expect(twitter?.status).toBe("backfill_incomplete");
     expect(twitter?.bulkBackfill.nextCommand).toBe("nutshell import twitter <provider-export> --json");
-    expect(report.findings.some((item) => item.source === "twitter" && item.code === "backfill_incomplete")).toBe(true);
+    const coverage = report.findings.find((item) => item.source === "twitter" && item.code === "backfill_incomplete");
+    expect(coverage).toBeDefined();
+    expect(coverage?.guidance?.state).toBe("ready_empty");
+    expect(coverage?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(coverage?.guidance?.confirm?.length).toBeGreaterThan(0);
+    expect((coverage?.detail as JsonObject).nextCommand).toBe("nutshell import twitter <provider-export> --json");
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -192,7 +197,11 @@ test("health reports stale runtime locks as critical", async () => {
     const store = openStore(join(root, "trace.sqlite"));
     const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([]) });
     const report = await runtime.health();
-    expect(report.findings.some((item) => item.code === "lock_stale" && item.level === "critical")).toBe(true);
+    const lockFinding = report.findings.find((item) => item.code === "lock_stale");
+    expect(lockFinding?.level).toBe("critical");
+    expect(lockFinding?.guidance?.state).toBe("blocked_bug");
+    expect(lockFinding?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(lockFinding?.guidance?.confirm?.length).toBeGreaterThan(0);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -223,7 +232,11 @@ test("health reports degraded setup state without running the plugin probe", asy
     const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([new ProbePlugin("fake", () => resultWithRecords("fake", []))]) });
     const report = await runtime.health();
     expect(checked).toBe(false);
-    expect(report.findings.some((item) => item.source === "fake" && item.code === "plugin_setup_degraded")).toBe(true);
+    const degraded = report.findings.find((item) => item.source === "fake" && item.code === "plugin_setup_degraded");
+    expect(degraded).toBeDefined();
+    expect(degraded?.guidance?.state).toBe("blocked_bug");
+    expect(degraded?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(degraded?.guidance?.confirm?.length).toBeGreaterThan(0);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -262,7 +275,11 @@ exit 64
     expect(report.app.fullDiskAccess).toBe("missing");
     expect(report.app.agent).toBe("requiresApproval");
     expect(report.app.backgroundSync).toBe("disabled");
-    expect(report.findings.some((item) => item.code === "nutshell_app_full_disk_access_missing")).toBe(true);
+    const fdaFinding = report.findings.find((item) => item.code === "nutshell_app_full_disk_access_missing");
+    expect(fdaFinding).toBeDefined();
+    expect(fdaFinding?.guidance?.state).toBe("needs_permission");
+    expect(fdaFinding?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(fdaFinding?.guidance?.confirm?.length).toBeGreaterThan(0);
     expect(report.findings.some((item) => item.code === "nutshell_agent_requires_approval")).toBe(true);
     expect(report.findings.some((item) => item.code === "nutshell_background_sync_disabled")).toBe(true);
     await runtime.close();
@@ -373,7 +390,7 @@ test("health uses app-owned run history for local OS sources instead of terminal
         {
           level: "critical",
           source: "apple_notes",
-          code: "apple_notes_access_probe_failed",
+          code: "apple_notes_access_failed",
           message: "Terminal should not probe Notes",
           detail: {},
           observedAt: new Date(),
@@ -385,7 +402,7 @@ test("health uses app-owned run history for local OS sources instead of terminal
     const report = await runtime.health();
 
     expect(checked).toBe(false);
-    expect(report.findings.some((item) => item.code === "apple_notes_access_probe_failed")).toBe(false);
+    expect(report.findings.some((item) => item.code === "apple_notes_access_failed")).toBe(false);
     expect(report.findings.some((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified")).toBe(false);
     await runtime.close();
   } finally {

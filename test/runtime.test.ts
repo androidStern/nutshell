@@ -161,7 +161,12 @@ test("runtime preserves normal sync commit when automatic enrichment fails", asy
     expect(report.status).toBe("critical");
     expect(report.sources[0]?.commit?.checkpointVersion).toBe(1);
     expect(report.sources[0]?.enrichment?.status).toBe("critical");
-    expect(report.sources[0]?.enrichment?.findings[0]?.code).toBe("plugin_enrichment_runtime_error");
+    const enrichmentFinding = report.sources[0]?.enrichment?.findings[0];
+    expect(enrichmentFinding?.code).toBe("plugin_enrichment_runtime_error");
+    expect(enrichmentFinding?.source).toBe("fake");
+    expect(enrichmentFinding?.guidance?.state).toBe("blocked_bug");
+    expect(enrichmentFinding?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(enrichmentFinding?.guidance?.confirm?.length).toBeGreaterThan(0);
     const page = await runtime.query({ source: "fake", limit: 10 });
     expect(page.total).toBe(1);
     const checkpoint = await runtime.store.loadCheckpoint("fake");
@@ -379,7 +384,12 @@ test("runtime skips degraded plugins during scheduled all-source sync", async ()
     expect(syncCalled).toBe(false);
     expect(report.status).toBe("warning");
     expect(report.sources[0]?.status).toBe("skipped");
-    expect(report.sources[0]?.findings[0]?.code).toBe("plugin_setup_degraded");
+    const degraded = report.sources[0]?.findings[0];
+    expect(degraded?.code).toBe("plugin_setup_degraded");
+    expect(degraded?.source).toBe("fake");
+    expect(degraded?.guidance?.state).toBe("blocked_bug");
+    expect(degraded?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(degraded?.guidance?.confirm?.length).toBeGreaterThan(0);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

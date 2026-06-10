@@ -14,11 +14,12 @@ import { overlapWindow } from "../../../core/time";
 import { CLI_NAME } from "../../../core/product";
 import { numberAt, stringAt } from "../../../config/config";
 import { CHROME_SAFE_STORAGE_REASON, chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
-import { finding, type TracePlugin } from "../../interface";
-import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
+import type { TracePlugin } from "../../interface";
+import type { PluginSetupContext } from "../../../setup/types";
 import { googleTakeoutYoutubePluginResult } from "../../../imports/google-takeout-youtube";
 import { dateKeyToDate, youtubeEventType, youtubeFingerprint, youtubeHappenedAt, youtubeSourceId, type YouTubeActivityItem } from "./identity";
 import { collectYouTubeFromMyActivityHttp, type MyActivityHttpResult } from "./myactivity-http";
+import { YOUTUBE_FINDINGS } from "./findings";
 
 type YouTubeCollector = typeof collectYouTubeFromMyActivityHttp;
 
@@ -28,8 +29,16 @@ interface YouTubeState {
   lastScroll?: JsonObject;
 }
 
+type YouTubeProbeFailureCode = "youtube_signed_out" | "youtube_keychain_blocked" | "youtube_activity_unreadable";
+
+type YouTubeProbeResult =
+  | { ok: true; message: string; detail: JsonObject }
+  | { ok: false; code: YouTubeProbeFailureCode; message: string; detail: JsonObject };
+
 export class YouTubePlugin implements TracePlugin {
   constructor(private readonly collect: YouTubeCollector = collectYouTubeFromMyActivityHttp) {}
+
+  readonly findings = YOUTUBE_FINDINGS;
 
   readonly manifest: PluginManifest = {
     id: "youtube",
@@ -65,15 +74,15 @@ export class YouTubePlugin implements TracePlugin {
   async check(ctx: PluginContext) {
     const cfg = config(ctx);
     if (cfg.accessMode !== "myactivity_http") {
-      return [finding("critical", "youtube", "youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", { accessMode: cfg.accessMode })];
+      return [YOUTUBE_FINDINGS.make("youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", { accessMode: cfg.accessMode })];
     }
-    let probe: SetupCheck;
+    let probe: YouTubeProbeResult;
     try {
       probe = await this.probe(cfg, ctx.signal);
     } catch (error) {
       probe = youtubeProbeException(error);
     }
-    return probe.ok ? [] : [finding(probe.level ?? "critical", "youtube", "youtube_auth_probe_failed", probe.message, probe.detail ?? {})];
+    return probe.ok ? [] : [YOUTUBE_FINDINGS.make(probe.code, probe.message, probe.detail)];
   }
 
   async importProviderExport(_ctx: PluginContext, request: ProviderExportImportRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
@@ -91,7 +100,7 @@ export class YouTubePlugin implements TracePlugin {
         return emptyResult(
           checkpoint,
           [
-            finding("warning", "youtube", "youtube_provider_export_required", "YouTube historical backfill requires an official Google export import", {
+            YOUTUBE_FINDINGS.make("youtube_provider_export_required", "YouTube historical backfill requires an official Google export import", {
               nextCommand: `${CLI_NAME} import youtube <provider-export> --json`,
             }),
           ],
@@ -118,33 +127,19 @@ export class YouTubePlugin implements TracePlugin {
         return normalizeCollectionResult(result, state, window, observedAt, cutoffYmd, health);
       }
       return emptyResult(checkpoint, [
-        finding("critical", "youtube", "youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", { accessMode: cfg.accessMode }),
+        YOUTUBE_FINDINGS.make("youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", { accessMode: cfg.accessMode }),
       ]);
     } catch (error) {
+      const access = classifyYouTubeAccessError(error);
       return emptyResult(checkpoint, [
-        finding("critical", "youtube", "youtube_sync_failed", "YouTube sync failed", { error: String(error) }),
+        access
+          ? YOUTUBE_FINDINGS.make(access.code, access.message, access.detail)
+          : YOUTUBE_FINDINGS.make("youtube_sync_failed", "YouTube sync failed", { error: String(error) }),
       ]);
     }
   }
 
-  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
-    const cfg = configFromJson(ctx.config.pluginConfig("youtube"));
-    if (cfg.accessMode !== "myactivity_http") {
-      return {
-        ok: false,
-        message: "Only direct My Activity HTTP sync is supported.",
-        level: "critical",
-        detail: { accessMode: cfg.accessMode },
-      };
-    }
-    try {
-      return await this.probe(cfg, ctx.signal);
-    } catch (error) {
-      return youtubeProbeException(error);
-    }
-  }
-
-  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<SetupCheck> {
+  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<YouTubeProbeResult> {
     const result = await this.collect({
       cutoffYmd: ymd(new Date(Date.now() - 24 * 60 * 60 * 1000)),
       maxPages: 1,
@@ -158,7 +153,7 @@ export class YouTubePlugin implements TracePlugin {
     if (result.items.length === 0 && result.scroll.reachedCutoff !== true) {
       return {
         ok: false,
-        level: "critical",
+        code: "youtube_activity_unreadable",
         message: "YouTube browser session could not prove recent activity access; the collector did not reach the probe cutoff.",
         detail: { items: result.items.length, loadedCards, scroll: result.scroll },
       };
@@ -166,7 +161,7 @@ export class YouTubePlugin implements TracePlugin {
     if (result.items.length === 0 && loadedCards > 0) {
       return {
         ok: false,
-        level: "critical",
+        code: "youtube_activity_unreadable",
         message: "YouTube browser session loaded activity cards but parsed no usable items.",
         detail: { items: result.items.length, loadedCards, scroll: result.scroll },
       };
@@ -179,21 +174,46 @@ export class YouTubePlugin implements TracePlugin {
   }
 }
 
-function youtubeProbeException(error: unknown): SetupCheck {
+// Classifies a collector error into the two access failure modes that have
+// their own user states: signed out (needs_auth) and Chrome Safe Storage /
+// Keychain blocked (needs_permission). Keychain is checked first and never
+// classified as an auth problem. Returns null for everything else so callers
+// pick their own fallback code (probe vs sync).
+function classifyYouTubeAccessError(
+  error: unknown,
+): { code: "youtube_signed_out" | "youtube_keychain_blocked"; message: string; detail: JsonObject } | null {
   const text = String(error);
   if (isChromeSafeStorageAccessIssue(text)) {
     return {
-      ok: false,
+      code: "youtube_keychain_blocked",
       message: chromeSafeStorageAccessMessage("YouTube"),
-      level: "critical",
       detail: { reason: CHROME_SAFE_STORAGE_REASON, error: text },
     };
   }
+  if (isYouTubeSignedOutError(text)) {
+    return {
+      code: "youtube_signed_out",
+      message: "YouTube browser session is signed out of Google. Sign into Google My Activity in the configured Chrome profile and try again.",
+      detail: { error: text },
+    };
+  }
+  return null;
+}
+
+// Matches the collector's signed-out error texts: missing/invalid Google
+// cookies, the signed-out My Activity shell, and login redirects.
+function isYouTubeSignedOutError(text: string): boolean {
+  return /signed-out|Google browser cookies were not usable|accounts\.google\.com\/(?:signin|ServiceLogin)/i.test(text);
+}
+
+function youtubeProbeException(error: unknown): YouTubeProbeResult {
+  const access = classifyYouTubeAccessError(error);
+  if (access) return { ok: false, ...access };
   return {
     ok: false,
-    message: "YouTube browser session could not be verified. Sign into Google My Activity in the configured Chrome profile and try again.",
-    level: "critical",
-    detail: { error: text },
+    code: "youtube_activity_unreadable",
+    message: "YouTube My Activity probe failed before recent activity access could be verified.",
+    detail: { error: String(error) },
   };
 }
 
@@ -233,16 +253,16 @@ function normalizeCollectionResult(
   });
 
   if (scroll.stoppedForCursorLoop) {
-    health.push(finding("critical", "youtube", "youtube_cursor_loop", "YouTube collector cursor looped before cutoff", scroll));
+    health.push(YOUTUBE_FINDINGS.make("youtube_cursor_loop", "YouTube collector cursor looped before cutoff", scroll));
   }
   if (!scroll.reachedCutoff) {
-    health.push(finding("critical", "youtube", "youtube_cutoff_not_reached", "YouTube collector did not reach cutoff", scroll));
+    health.push(YOUTUBE_FINDINGS.make("youtube_cutoff_not_reached", "YouTube collector did not reach cutoff", scroll));
   }
   if (scroll.stoppedForStagnation) {
-    health.push(finding("warning", "youtube", "youtube_stagnation", "YouTube collector stopped for stagnation", scroll));
+    health.push(YOUTUBE_FINDINGS.make("youtube_stagnation", "YouTube collector stopped for stagnation", scroll));
   }
   if (items.length === 0 && Number(scroll.loadedCardCount || 0) > 0) {
-    health.push(finding("critical", "youtube", "youtube_unexpected_empty", "YouTube parsed no items despite loaded cards", scroll));
+    health.push(YOUTUBE_FINDINGS.make("youtube_unexpected_empty", "YouTube parsed no items despite loaded cards", scroll));
   }
 
   const observations: RawObservation[] = filtered.map((item) => ({

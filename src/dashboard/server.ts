@@ -1542,6 +1542,8 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
 .source-list { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .source-card h3 { margin: 0 0 8px; font-size: 18px; }
 .source-metrics { display: grid; gap: 5px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.source-metrics .guidance { color: var(--muted); }
+.source-metrics .guidance code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--soft); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
 .source-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .run-history { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
 .config-summary { margin-top: 10px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -1858,10 +1860,12 @@ function renderSources() {
     const h = item.health || {};
     const counts = Object.entries(h.counts || {}).slice(0, 4).map(([key, value]) => '<div>' + esc(key) + ': ' + esc(value) + '</div>').join('');
     const latest = h.detail?.latestFinding ? esc(h.detail.latestFinding.message || h.detail.latestFinding.code) : 'No current issue';
+    const guidance = h.detail?.latestFinding?.guidance || null;
+    const guidanceHtml = guidance ? '<div class="guidance">fix: ' + esc(guidance.fix) + '</div><div class="guidance"><code>' + esc(guidance.confirm) + '</code></div>' : '';
     const recent = latestRun(item.manifest.id, 'recent');
     const backfill = latestRun(item.manifest.id, 'backfill');
     const lastSuccess = successfulRunTime(recent, backfill);
-    return '<article class="source-card"><h3>' + esc(item.manifest.displayName) + '</h3><div class="meta">' + esc(item.manifest.id) + ' · ' + esc(h.status || 'unknown') + '</div><div class="source-metrics"><div>Last successful sync: ' + fmt(lastSuccess) + '</div><div>Last attempted sync: ' + fmt(h.recent?.lastRunAt || recent?.finished_at || recent?.started_at) + '</div><div>Recent: ' + esc(h.recentStatus || recent?.status || 'unknown') + '</div><div>Backfill coverage: ' + esc(h.status || 'unknown') + '</div><div>Auth/permission: ' + esc(item.manifest.authKind || 'unknown') + '</div><div>Latest error: ' + latest + '</div>' + counts + '</div><div class="run-history"><div class="stat-label">Recent run history</div><div class="source-metrics">' + runLine('recent', recent) + runLine('backfill', backfill) + '</div></div><div class="config-summary"><span class="stat-label">Config</span><br>' + configSummary(item.config || {}) + '</div><div class="source-actions"><button class="secondary" data-sync="' + esc(item.manifest.id) + '">Sync source</button></div></article>';
+    return '<article class="source-card"><h3>' + esc(item.manifest.displayName) + '</h3><div class="meta">' + esc(item.manifest.id) + ' · ' + esc(h.status || 'unknown') + '</div><div class="source-metrics"><div>Last successful sync: ' + fmt(lastSuccess) + '</div><div>Last attempted sync: ' + fmt(h.recent?.lastRunAt || recent?.finished_at || recent?.started_at) + '</div><div>Recent: ' + esc(h.recentStatus || recent?.status || 'unknown') + '</div><div>Backfill coverage: ' + esc(h.status || 'unknown') + '</div><div>Auth/permission: ' + esc(item.manifest.authKind || 'unknown') + '</div><div>Latest error: ' + latest + '</div>' + guidanceHtml + counts + '</div><div class="run-history"><div class="stat-label">Recent run history</div><div class="source-metrics">' + runLine('recent', recent) + runLine('backfill', backfill) + '</div></div><div class="config-summary"><span class="stat-label">Config</span><br>' + configSummary(item.config || {}) + '</div><div class="source-actions"><button class="secondary" data-sync="' + esc(item.manifest.id) + '">Sync source</button></div></article>';
   }).join('');
 }
 

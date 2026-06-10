@@ -31,6 +31,7 @@ import { openStore } from "../store/sqlite-store";
 import { RuntimeLock } from "./lock";
 import { JsonlLogger } from "./logger";
 import { evaluateHealth } from "../health/checks";
+import { restoredSetupFindings, systemFinding } from "../health/system-findings";
 import { renderDailyJson } from "../projections/daily-json";
 import { renderDailyMarkdown } from "../projections/daily-markdown";
 import { renderDashboardData } from "../projections/dashboard-data";
@@ -80,14 +81,13 @@ export class TraceRuntime {
         const setupStatus = pluginSetupStatus(this.config, plugin.manifest.id);
         if (!request.source && setupStatus === "degraded") {
           const finishedAt = new Date();
-          const finding = {
-            level: "critical" as const,
-            source: plugin.manifest.id,
-            code: "plugin_setup_degraded",
-            message: `${plugin.manifest.displayName} setup is degraded; skipping scheduled sync until setup or doctor repairs it`,
-            detail: { setupFindings: pluginSetupFindings(this.config, plugin.manifest.id) },
-            observedAt: finishedAt,
-          };
+          const finding = systemFinding(
+            "plugin_setup_degraded",
+            plugin.manifest.id,
+            `${plugin.manifest.displayName} setup is degraded; skipping scheduled sync until setup or doctor repairs it`,
+            { setupFindings: restoredSetupFindings(pluginSetupFindings(this.config, plugin.manifest.id)) },
+            finishedAt,
+          );
           sources.push({
             source: plugin.manifest.id,
             status: "skipped",
@@ -153,14 +153,13 @@ export class TraceRuntime {
           sources.push(sourceReport);
         } catch (error) {
           const finishedAt = new Date();
-          const finding = {
-            level: "critical" as const,
-            source: plugin.manifest.id,
-            code: "plugin_runtime_error",
-            message: `${plugin.manifest.id} failed before commit`,
-            detail: { error: String(error) },
-            observedAt: finishedAt,
-          };
+          const finding = systemFinding(
+            "plugin_runtime_error",
+            plugin.manifest.id,
+            `${plugin.manifest.id} failed before commit`,
+            { error: String(error) },
+            finishedAt,
+          );
           const report: SyncSourceReport = {
             source: plugin.manifest.id,
             status: "critical",
@@ -387,14 +386,13 @@ export class TraceRuntime {
       };
     } catch (error) {
       const finishedAt = new Date();
-      const finding = {
-        level: "critical" as const,
-        source: plugin.manifest.id,
-        code: "plugin_enrichment_runtime_error",
-        message: `${plugin.manifest.id} enrichment failed`,
-        detail: { error: String(error) },
-        observedAt: finishedAt,
-      };
+      const finding = systemFinding(
+        "plugin_enrichment_runtime_error",
+        plugin.manifest.id,
+        `${plugin.manifest.id} enrichment failed`,
+        { error: String(error) },
+        finishedAt,
+      );
       const report: EnrichmentSourceReport = {
         status: "critical",
         startedAt,

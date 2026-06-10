@@ -69,6 +69,9 @@ test("youtube historical backfill refuses live collection and requires official 
   expect(result.observations).toHaveLength(0);
   expect(result.health[0]?.code).toBe("youtube_provider_export_required");
   expect((result.health[0]?.detail as JsonObject).nextCommand).toBe("nutshell import youtube <provider-export> --json");
+  expect(result.health[0]?.guidance?.state).toBe("ready_empty");
+  expect(result.health[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(result.health[0]?.guidance?.confirm).toBe("nutshell import youtube <google-export.zip> --json");
   expect(result.nextCheckpoint).toEqual({ existing: true });
 });
 
@@ -90,7 +93,10 @@ test("youtube health probe fails closed on unexpected empty access", async () =>
 
   const findings = await plugin.check(context());
 
-  expect(findings.some((item) => item.level === "critical" && item.code === "youtube_auth_probe_failed")).toBe(true);
+  expect(findings.some((item) => item.level === "critical" && item.code === "youtube_activity_unreadable")).toBe(true);
+  expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+  expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
   expect(JSON.stringify(findings[0]?.detail)).toContain("cursor-1");
 });
 
@@ -103,8 +109,12 @@ test("youtube health probe reports collector auth exceptions instead of crashing
 
   expect(findings).toHaveLength(1);
   expect(findings[0]?.level).toBe("critical");
-  expect(findings[0]?.code).toBe("youtube_auth_probe_failed");
+  expect(findings[0]?.code).toBe("youtube_signed_out");
   expect(findings[0]?.message).toContain("Sign into Google My Activity");
+  expect(findings[0]?.guidance?.state).toBe("needs_auth");
+  expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
+  expect(findings[0]?.guidance?.url).toBe("https://www.youtube.com");
   expect(JSON.stringify(findings[0]?.detail)).toContain("signed-out shell");
 });
 
@@ -116,8 +126,11 @@ test("youtube health probe reports Chrome Safe Storage as a permission block", a
   const findings = await plugin.check(context());
 
   expect(findings).toHaveLength(1);
-  expect(findings[0]?.code).toBe("youtube_auth_probe_failed");
+  expect(findings[0]?.code).toBe("youtube_keychain_blocked");
   expect(findings[0]?.message).toContain("macOS blocked access to Chrome Safe Storage");
+  expect(findings[0]?.guidance?.state).toBe("needs_permission");
+  expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
   expect((findings[0]?.detail as JsonObject).reason).toBe("chrome_safe_storage_keychain");
 });
 

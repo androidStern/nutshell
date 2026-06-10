@@ -1,6 +1,7 @@
 import type {
   Checkpoint,
   EnrichmentRequest,
+  HealthFinding,
   JsonObject,
   PluginContext,
   PluginManifest,
@@ -15,9 +16,10 @@ import { sleep } from "../../../core/time";
 import { CLI_NAME } from "../../../core/product";
 import { numberAt, stringArrayAt, stringAt } from "../../../config/config";
 import { CHROME_SAFE_STORAGE_REASON, chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
-import { finding, type TracePlugin } from "../../interface";
-import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
+import type { TracePlugin } from "../../interface";
+import type { PluginSetupContext } from "../../../setup/types";
 import { BirdClient } from "./bird-client";
+import { TWITTER_FINDINGS } from "./findings";
 import { authorPayload, collectionEventType, profileId, tweetCreatedAt, tweetId, type BirdTweet } from "./identity";
 import { looksLikeRateLimit } from "./rate-limit";
 import {
@@ -53,6 +55,8 @@ export class TwitterPlugin implements TracePlugin {
     defaultBudget: { maxRuntimeMs: 10 * 60_000, maxRequests: 50, minDelayMs: 10_000, stopOnRateLimit: true },
   };
 
+  readonly findings = TWITTER_FINDINGS;
+
   readonly setup = {
     summarize: async (_ctx: PluginSetupContext) => ({
       title: "Twitter/X",
@@ -77,20 +81,26 @@ export class TwitterPlugin implements TracePlugin {
 
   async check(ctx: PluginContext) {
     const cfg = config(ctx);
-    const findings = [];
+    const findings: HealthFinding[] = [];
     const client = new BirdClient(cfg);
     const result = await client.check(ctx.signal);
     if (!result.ok || result.authFailed) {
-      const keychainBlocked = isChromeSafeStorageAccessIssue(result.text);
-      findings.push(
-        finding("critical", "twitter", "twitter_auth", keychainBlocked ? chromeSafeStorageAccessMessage("X") : "X browser session check failed", {
-          ...(keychainBlocked ? { reason: CHROME_SAFE_STORAGE_REASON } : {}),
-          text: result.text.slice(-1200),
-        }),
-      );
+      const text = result.text.slice(-1200);
+      if (isChromeSafeStorageAccessIssue(result.text)) {
+        findings.push(
+          TWITTER_FINDINGS.make("twitter_keychain_blocked", chromeSafeStorageAccessMessage("X"), {
+            reason: CHROME_SAFE_STORAGE_REASON,
+            text,
+          }),
+        );
+      } else if (result.authFailed) {
+        findings.push(TWITTER_FINDINGS.make("twitter_signed_out", "X browser session is signed out", { text }));
+      } else if (!result.rateLimited) {
+        findings.push(TWITTER_FINDINGS.make("twitter_session_check_failed", "X browser session check failed", { text }));
+      }
     }
     if (result.rateLimited) {
-      findings.push(finding("critical", "twitter", "twitter_rate_limited", "X reported a rate limit", { text: result.text.slice(-1200) }));
+      findings.push(TWITTER_FINDINGS.make("twitter_rate_limited", "X reported a rate limit", { text: result.text.slice(-1200) }));
     }
     return findings;
   }
@@ -102,7 +112,7 @@ export class TwitterPlugin implements TracePlugin {
         records: [],
         nextCheckpoint: checkpoint.state,
         health: [
-          finding("warning", "twitter", "twitter_provider_export_required", "Twitter/X historical backfill requires an official X archive import", {
+          TWITTER_FINDINGS.make("twitter_provider_export_required", "Twitter/X historical backfill requires an official X archive import", {
             nextCommand: `${CLI_NAME} import twitter <provider-export> --json`,
           }),
         ],
@@ -119,7 +129,7 @@ export class TwitterPlugin implements TracePlugin {
     const observedAt = ctx.now();
     const observations: RawObservation[] = [];
     const records: TraceRecord[] = [];
-    const health = [];
+    const health: HealthFinding[] = [];
     const metrics: JsonObject = {};
     let partial = false;
     const requestPageLimit = request.budget.maxRequests ? Math.max(1, Math.trunc(request.budget.maxRequests)) : cfg.maxPages;
@@ -153,7 +163,7 @@ export class TwitterPlugin implements TracePlugin {
           partial = partial || Boolean(page.nextCursor);
           if (page.nextCursor) {
             health.push(
-              finding("critical", "twitter", "twitter_following_incomplete", "Following snapshot did not reach cursor exhaustion", {
+              TWITTER_FINDINGS.make("twitter_following_incomplete", "Following snapshot did not reach cursor exhaustion", {
                 nextCursor: page.nextCursor,
                 fetched: page.users.length,
                 maxPages: cfg.maxPages,
@@ -193,7 +203,7 @@ export class TwitterPlugin implements TracePlugin {
         const text = String(error);
         partial = true;
         health.push(
-          finding(looksLikeRateLimit(text) ? "critical" : "critical", "twitter", looksLikeRateLimit(text) ? "twitter_rate_limited" : "twitter_collection_failed", `Twitter ${collection} sync failed`, {
+          TWITTER_FINDINGS.make(looksLikeRateLimit(text) ? "twitter_rate_limited" : "twitter_collection_failed", `Twitter ${collection} sync failed`, {
             error: text,
           }),
         );
@@ -241,45 +251,6 @@ export class TwitterPlugin implements TracePlugin {
       partial: result.partial,
     };
   }
-
-  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
-    const cfg = configFromJson(ctx.config.pluginConfig("twitter"));
-    try {
-      const result = await new BirdClient(cfg).check(ctx.signal);
-      if (result.ok) {
-        return {
-          ok: true,
-          level: "ok",
-          message: result.text,
-          detail: { browser: cfg.cookieBrowser, profile: cfg.cookieProfile || null },
-        };
-      }
-      return {
-        ok: false,
-        level: "critical",
-        message: isChromeSafeStorageAccessIssue(result.text)
-          ? chromeSafeStorageAccessMessage("X")
-          : result.authFailed
-            ? "X browser session could not be authenticated."
-            : result.rateLimited
-              ? "X is currently rate limited."
-              : "X access could not be verified.",
-        detail: {
-          ...(isChromeSafeStorageAccessIssue(result.text) ? { reason: CHROME_SAFE_STORAGE_REASON } : {}),
-          authFailed: result.authFailed,
-          rateLimited: result.rateLimited,
-          text: result.text.slice(-1200),
-        },
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        level: "critical",
-        message: "X access could not be verified.",
-        detail: { error: String(error) },
-      };
-    }
-  }
 }
 
 export function createTwitterPlugin(): TracePlugin {
@@ -309,11 +280,6 @@ function configFromJson(cfg: JsonObject) {
     saturationPages: numberAt(cfg, "saturationPages", 1),
     recentSeedPages: numberAt(cfg, "recentSeedPages", 1),
   };
-}
-
-function setupFindingFromCheck(code: string, check: SetupCheck) {
-  if (check.ok) return [];
-  return [finding(check.level === "warning" ? "warning" : "critical", "twitter", code, check.message, check.detail ?? {})];
 }
 
 function normalizeState(value: unknown): TwitterState {

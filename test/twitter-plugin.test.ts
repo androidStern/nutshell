@@ -9,6 +9,7 @@ import {
   type TweetEnrichmentTarget,
   type TwitterEnrichmentState,
 } from "../src/plugins/builtin/twitter/enrichment";
+import { TWITTER_FINDINGS } from "../src/plugins/builtin/twitter/findings";
 import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 
 const originalPage = BirdClient.prototype.page;
@@ -38,7 +39,18 @@ test("twitter backfill refuses live transport and requires official X archive im
   expect(result.observations).toHaveLength(0);
   expect(result.health[0]?.code).toBe("twitter_provider_export_required");
   expect(((result.health[0]?.detail as JsonObject).nextCommand)).toBe("nutshell import twitter <provider-export> --json");
+  expect(result.health[0]?.guidance?.state).toBe("ready_empty");
+  expect(result.health[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(result.health[0]?.guidance?.confirm).toBe("nutshell import twitter <x-archive.zip> --json");
   expect(result.nextCheckpoint).toEqual({ existing: true });
+});
+
+test("twitter finding catalog attaches actionable guidance to every code", () => {
+  for (const sample of TWITTER_FINDINGS.samples()) {
+    expect(sample.guidance?.state, `${sample.code} needs a user state`).toBeTruthy();
+    expect((sample.guidance?.fix ?? "").length, `${sample.code} needs a fix`).toBeGreaterThan(0);
+    expect(sample.guidance?.confirm, `${sample.code} needs a confirm command`).toContain("nutshell");
+  }
 });
 
 test("twitter auth check fails closed even when account identity is configured", async () => {
@@ -66,9 +78,67 @@ test("twitter health probe reports Chrome Safe Storage as a permission block", a
   const findings = await plugin.check(context());
 
   expect(findings).toHaveLength(1);
-  expect(findings[0]?.code).toBe("twitter_auth");
+  expect(findings[0]?.code).toBe("twitter_keychain_blocked");
   expect(findings[0]?.message).toContain("macOS blocked access to Chrome Safe Storage");
   expect((findings[0]?.detail as JsonObject).reason).toBe("chrome_safe_storage_keychain");
+  expect(findings[0]?.guidance?.state).toBe("needs_permission");
+  expect(findings[0]?.guidance?.fix).toContain("Chrome Safe Storage");
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
+});
+
+test("twitter health probe reports signed-out sessions as needs_auth", async () => {
+  BirdClient.prototype.check = async () => ({
+    ok: false,
+    text: "401 unauthorized: login required",
+    rateLimited: false,
+    authFailed: true,
+  });
+  const plugin = new TwitterPlugin();
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("twitter_signed_out");
+  expect(findings[0]?.guidance?.state).toBe("needs_auth");
+  expect(findings[0]?.guidance?.url).toBe("https://x.com");
+  expect(findings[0]?.guidance?.fix).toContain("x.com");
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
+});
+
+test("twitter health probe reports non-auth session check failures as blocked bug", async () => {
+  BirdClient.prototype.check = async () => ({
+    ok: false,
+    text: "X current user check timed out after 30000ms",
+    rateLimited: false,
+    authFailed: false,
+  });
+  const plugin = new TwitterPlugin();
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("twitter_session_check_failed");
+  expect(findings[0]?.message).toBe("X browser session check failed");
+  expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+  expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
+});
+
+test("twitter health probe reports rate limits without a duplicate session finding", async () => {
+  BirdClient.prototype.check = async () => ({
+    ok: false,
+    text: "429 too many requests",
+    rateLimited: true,
+    authFailed: false,
+  });
+  const plugin = new TwitterPlugin();
+
+  const findings = await plugin.check(context());
+
+  expect(findings.map((item) => item.code)).toEqual(["twitter_rate_limited"]);
+  expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+  expect(findings[0]?.guidance?.fix).toContain("rate limit");
+  expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
 });
 
 test("twitter internal timeout override fails closed when Bird library shape changes", () => {
@@ -568,6 +638,9 @@ test("twitter enrichment rate limits stop the current run and schedule retry", a
   const queued = queue["1111111111111111111"] as JsonObject;
   expect(result.partial).toBe(true);
   expect(result.health[0]?.code).toBe("twitter_enrichment_rate_limited");
+  expect(result.health[0]?.guidance?.state).toBe("blocked_bug");
+  expect(result.health[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(result.health[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
   expect(queued.lastErrorCode).toBe("rate_limited");
   expect(typeof queued.nextAttemptAt).toBe("string");
 });

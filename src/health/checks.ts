@@ -22,10 +22,13 @@ import { localDateKey } from "../core/time";
 import { CLI_NAME, PRODUCT_NAME } from "../core/product";
 import { appStatusJson, inspectNutshellApp } from "../macos/app-status";
 import type { PluginRegistry } from "../plugins/registry";
+import { PODCASTS_FINDINGS } from "../plugins/builtin/podcasts/findings";
+import { TWITTER_FINDINGS } from "../plugins/builtin/twitter/findings";
 import { inspectLock } from "../runtime/lock";
 import { JsonlLogger } from "../runtime/logger";
 import type { TraceStore } from "../store/interface";
-import { makeFinding, reportStatus } from "./health";
+import { reportStatus } from "./health";
+import { SYSTEM_FINDINGS, restoredSetupFindings, systemFinding } from "./system-findings";
 
 export async function evaluateHealth(config: TraceConfig, store: TraceStore, registry: PluginRegistry, scope: HealthScope = {}): Promise<HealthReport> {
   const findings: HealthFinding[] = [];
@@ -40,7 +43,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   const lock = await inspectLock(join(config.root, "run.lock"), numberAt(runtimeCfg, "staleLockMs", 10 * 60_000));
   if (lock.present) {
     findings.push(
-      makeFinding(lock.stale ? "critical" : "warning", "system", lock.stale ? "lock_stale" : "lock_active", lock.stale ? "A stale runtime lock exists" : "A runtime lock is active", {
+      SYSTEM_FINDINGS.make(lock.stale ? "lock_stale" : "lock_active", lock.stale ? "A stale runtime lock exists" : "A runtime lock is active", {
         reason: lock.reason,
         command: lock.command,
         heartbeatAgeMs: lock.heartbeatAgeMs,
@@ -52,10 +55,10 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   try {
     const free = statSync(config.root);
     if (!free.isDirectory()) {
-      findings.push(makeFinding("critical", "system", "root_not_directory", `${PRODUCT_NAME} data root is not a directory`, { root: config.root }));
+      findings.push(SYSTEM_FINDINGS.make("root_not_directory", `${PRODUCT_NAME} data root is not a directory`, { root: config.root }));
     }
   } catch (error) {
-    findings.push(makeFinding("critical", "system", "root_missing", `${PRODUCT_NAME} data root is missing`, { error: String(error) }));
+    findings.push(SYSTEM_FINDINGS.make("root_missing", `${PRODUCT_NAME} data root is missing`, { error: String(error) }));
   }
 
   const diskFinding = checkDiskFree(config.root, runtimeCfg);
@@ -63,7 +66,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
 
   const snapshot = await store.healthSnapshot();
   if (!snapshot.dbOk) {
-    findings.push(makeFinding("critical", "system", "sqlite_quick_check", "SQLite quick_check failed", { detail: snapshot.dbDetail }));
+    findings.push(SYSTEM_FINDINGS.make("sqlite_quick_check", "SQLite quick_check failed", { detail: snapshot.dbDetail }));
   }
 
   const enabledSources = registry.enabled(config).map((plugin) => plugin.manifest.id).filter((source) => !scope.source || source === scope.source);
@@ -73,12 +76,14 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   for (const item of backfill) {
     if (item.status === "backfill_incomplete" || item.status === "backfill_partial") {
       findings.push(
-        makeFinding(
-          "warning",
-          item.source,
+        systemFinding(
           item.status,
+          item.source,
           `${item.source} coverage is ${item.status === "backfill_partial" ? "partial" : "incomplete"} for the configured cutoff`,
-          item as unknown as JsonObject,
+          {
+            ...(item as unknown as JsonObject),
+            nextCommand: item.bulkBackfill.nextCommand ?? item.liveBackfill.nextCommand,
+          },
         ),
       );
     }
@@ -95,7 +100,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
     const latestFinding = normalizeLatestFinding(findingForRun(latestFindingBySource.get(source), row));
     if (status === "critical") {
       findings.push(
-        makeFinding("critical", source, "last_run_failed", `${source} last sync failed`, {
+        systemFinding("last_run_failed", source, `${source} last sync failed`, {
           startedAt: String(row.started_at ?? ""),
           finishedAt: String(row.finished_at ?? ""),
           status,
@@ -104,7 +109,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
       );
     } else if (partial || !completed) {
       findings.push(
-        makeFinding("warning", source, "last_run_partial", `${source} last sync was partial`, {
+        systemFinding("last_run_partial", source, `${source} last sync was partial`, {
           startedAt: String(row.started_at ?? ""),
           finishedAt: String(row.finished_at ?? ""),
           status,
@@ -124,23 +129,23 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   const twitterFailures = numberAt(twitterEnrichment, "failed", 0);
   if ((!scope.source || scope.source === "twitter") && twitterRateLimited > 0) {
     findings.push(
-      makeFinding("critical", "twitter", "twitter_enrichment_rate_limited", "Twitter enrichment is paused by rate limits", twitterEnrichment),
+      TWITTER_FINDINGS.make("twitter_enrichment_rate_limited", "Twitter enrichment is paused by rate limits", twitterEnrichment),
     );
   } else if ((!scope.source || scope.source === "twitter") && twitterPending > 0) {
     findings.push(
-      makeFinding("warning", "twitter", "twitter_enrichment_pending", "Twitter enrichment has queued tweets that are not ready for dashboard rendering", twitterEnrichment),
+      TWITTER_FINDINGS.make("twitter_enrichment_pending", "Twitter enrichment has queued tweets that are not ready for dashboard rendering", twitterEnrichment),
     );
   } else if ((!scope.source || scope.source === "twitter") && twitterFailures > 0) {
     findings.push(
-      makeFinding("warning", "twitter", "twitter_enrichment_failed", "Twitter enrichment has retryable failures", twitterEnrichment),
+      TWITTER_FINDINGS.make("twitter_enrichment_failed", "Twitter enrichment has retryable failures", twitterEnrichment),
     );
   }
   for (const plugin of registry.enabled(config).filter((plugin) => !scope.source || plugin.manifest.id === scope.source)) {
     const setupStatus = pluginSetupStatus(config, plugin.manifest.id);
     if (setupStatus === "degraded") {
       findings.push(
-        makeFinding("critical", plugin.manifest.id, "plugin_setup_degraded", `${plugin.manifest.displayName} setup is degraded`, {
-          setupFindings: pluginSetupFindings(config, plugin.manifest.id),
+        systemFinding("plugin_setup_degraded", plugin.manifest.id, `${plugin.manifest.displayName} setup is degraded`, {
+          setupFindings: restoredSetupFindings(pluginSetupFindings(config, plugin.manifest.id)),
           nextAction: `${CLI_NAME} setup`,
         }),
       );
@@ -149,7 +154,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
     const sourceState = parseState(sourceStateBySource.get(plugin.manifest.id));
     if (plugin.manifest.id === "podcasts" && typeof sourceState.permissionBlockedAt === "string") {
       findings.push(
-        makeFinding("critical", "podcasts", "podcasts_permission_blocked", "Apple Podcasts sync is paused until app-data permission is fixed", {
+        PODCASTS_FINDINGS.make("podcasts_permission_blocked", "Apple Podcasts sync is paused until app-data permission is fixed", {
           blockedAt: sourceState.permissionBlockedAt,
           blockCode: typeof sourceState.permissionBlockCode === "string" ? sourceState.permissionBlockCode : "unknown",
           nextAction: "Run `nutshell setup`, grant Full Disk Access to Nutshell.app, then run `nutshell sync podcasts --mode recent --json` once.",
@@ -178,7 +183,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
     try {
       findings.push(...(await plugin.check(ctx)));
     } catch (error) {
-      findings.push(makeFinding("critical", plugin.manifest.id, "plugin_check_crashed", "Plugin health check crashed", { error: String(error) }));
+      findings.push(systemFinding("plugin_check_crashed", plugin.manifest.id, "Plugin health check crashed", { error: String(error) }));
     }
   }
 
@@ -191,7 +196,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
 
 function localOsAppOwnedHealthFinding(manifest: PluginManifest, latestRun: JsonObject | undefined): HealthFinding | null {
   if (latestRun) return null;
-  return makeFinding("warning", manifest.id, "app_owned_sync_not_verified", `${manifest.displayName} has not been verified by an app-owned sync yet`, {
+  return systemFinding("app_owned_sync_not_verified", manifest.id, `${manifest.displayName} has not been verified by an app-owned sync yet`, {
     reason: "This source depends on macOS app permissions, so terminal health avoids probing it directly.",
     nextAction: `${CLI_NAME} sync ${manifest.id} --mode recent --json, or wait for the app-owned background sync to run.`,
   });
@@ -290,21 +295,21 @@ function scheduledTimeFromAgentEvent(event: AgentLogEvent, intervalSeconds: numb
 function appFindings(app: AppBackgroundStatus): HealthFinding[] {
   const detail = appStatusJson(app);
   if (!app.installed) {
-    return [makeFinding("critical", "system", "nutshell_app_missing", `${PRODUCT_NAME}.app is not installed or could not be found`, detail)];
+    return [SYSTEM_FINDINGS.make("nutshell_app_missing", `${PRODUCT_NAME}.app is not installed or could not be found`, detail)];
   }
   const findings: HealthFinding[] = [];
   if (app.fullDiskAccess === "missing") {
-    findings.push(makeFinding("critical", "system", "nutshell_app_full_disk_access_missing", `${PRODUCT_NAME}.app does not have Full Disk Access`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_app_full_disk_access_missing", `${PRODUCT_NAME}.app does not have Full Disk Access`, detail));
   } else if (app.fullDiskAccess === "unknown") {
-    findings.push(makeFinding("warning", "system", "nutshell_app_full_disk_access_unknown", `${PRODUCT_NAME}.app Full Disk Access could not be determined`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_app_full_disk_access_unknown", `${PRODUCT_NAME}.app Full Disk Access could not be determined`, detail));
   }
   if (app.agent === "requiresApproval") {
-    findings.push(makeFinding("warning", "system", "nutshell_agent_requires_approval", `${PRODUCT_NAME} background agent requires approval`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_requires_approval", `${PRODUCT_NAME} background agent requires approval`, detail));
   } else if (app.agent === "notRegistered" || app.agent === "notFound") {
-    findings.push(makeFinding("warning", "system", "nutshell_agent_not_enabled", `${PRODUCT_NAME} background agent is not enabled`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_not_enabled", `${PRODUCT_NAME} background agent is not enabled`, detail));
   }
   if (app.backgroundSync === "disabled") {
-    findings.push(makeFinding("warning", "system", "nutshell_background_sync_disabled", `${PRODUCT_NAME} background sync is disabled`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_background_sync_disabled", `${PRODUCT_NAME} background sync is disabled`, detail));
   }
   return findings;
 }
@@ -549,13 +554,13 @@ function checkRootWritable(root: string): HealthFinding | null {
   try {
     writeFileSync(writeTest, "ok\n", "utf8");
   } catch (error) {
-    return makeFinding("critical", "system", "root_not_writable", `${PRODUCT_NAME} data root is not writable`, { phase: "write", error: String(error) });
+    return SYSTEM_FINDINGS.make("root_not_writable", `${PRODUCT_NAME} data root is not writable`, { phase: "write", error: String(error) });
   }
   try {
     unlinkSync(writeTest);
   } catch (error) {
     if (isMissingFileError(error)) return null;
-    return makeFinding("warning", "system", "root_write_test_cleanup_failed", `${PRODUCT_NAME} data root is writable, but health could not remove its temporary write test file`, {
+    return SYSTEM_FINDINGS.make("root_write_test_cleanup_failed", `${PRODUCT_NAME} data root is writable, but health could not remove its temporary write test file`, {
       phase: "cleanup",
       path: writeTest,
       error: String(error),
@@ -576,11 +581,11 @@ function checkDiskFree(root: string, runtimeCfg: JsonObject): HealthFinding | nu
     const warningBytes = numberAt(runtimeCfg, "diskWarningBytes", 2_000_000_000);
     const criticalBytes = numberAt(runtimeCfg, "diskCriticalBytes", 500_000_000);
     const detail = { root, availableBytes, totalBytes, warningBytes, criticalBytes };
-    if (availableBytes < criticalBytes) return makeFinding("critical", "system", "disk_free_low", `${PRODUCT_NAME} data root disk free space is critically low`, detail);
-    if (availableBytes < warningBytes) return makeFinding("warning", "system", "disk_free_low", `${PRODUCT_NAME} data root disk free space is low`, detail);
+    if (availableBytes < criticalBytes) return SYSTEM_FINDINGS.make("disk_free_low", `${PRODUCT_NAME} data root disk free space is critically low`, detail, "critical");
+    if (availableBytes < warningBytes) return SYSTEM_FINDINGS.make("disk_free_low", `${PRODUCT_NAME} data root disk free space is low`, detail);
     return null;
   } catch (error) {
-    return makeFinding("warning", "system", "disk_free_unknown", `${PRODUCT_NAME} data root disk free space could not be checked`, { root, error: String(error) });
+    return SYSTEM_FINDINGS.make("disk_free_unknown", `${PRODUCT_NAME} data root disk free space could not be checked`, { root, error: String(error) });
   }
 }
 
@@ -588,7 +593,7 @@ function checkProjectionFreshness(root: string, lastRuns: Json[], runtimeCfg: Js
   const findings: HealthFinding[] = [];
   const projectionsRoot = join(root, "projections");
   if (!existsSync(projectionsRoot)) {
-    return [makeFinding("warning", "system", "projections_missing", "Projection directory is missing", {})];
+    return [SYSTEM_FINDINGS.make("projections_missing", "Projection directory is missing", {})];
   }
   const latestRunAt = latestRecentRunFinishedAt(lastRuns);
   const dashboard = projectionFile(root, "dashboard", "status.json");
@@ -609,7 +614,7 @@ function projectionFile(root: string, kind: string, name: string): { kind: strin
 
 function projectionFileFinding(file: { kind: string; path: string }, latestRunAt: Date | null, staleMs: number): HealthFinding | null {
   if (!existsSync(file.path)) {
-    return makeFinding("warning", "system", "projection_missing", `${file.kind} projection is missing`, { kind: file.kind, path: file.path });
+    return SYSTEM_FINDINGS.make("projection_missing", `${file.kind} projection is missing`, { kind: file.kind, path: file.path });
   }
   const stat = statSync(file.path);
   const ageMs = Date.now() - stat.mtime.getTime();
@@ -623,8 +628,8 @@ function projectionFileFinding(file: { kind: string; path: string }, latestRunAt
     latestRunAt: latestRunAt ? latestRunAt.toISOString() : null,
     behindLatestRunMs,
   };
-  if (behindLatestRunMs > 5_000) return makeFinding("warning", "system", "projection_stale", `${file.kind} projection is older than the latest recent sync`, detail);
-  if (ageMs > staleMs) return makeFinding("warning", "system", "projection_stale", `${file.kind} projection is stale`, detail);
+  if (behindLatestRunMs > 5_000) return SYSTEM_FINDINGS.make("projection_stale", `${file.kind} projection is older than the latest recent sync`, detail);
+  if (ageMs > staleMs) return SYSTEM_FINDINGS.make("projection_stale", `${file.kind} projection is stale`, detail);
   return null;
 }
 

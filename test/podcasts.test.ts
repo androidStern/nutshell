@@ -34,6 +34,58 @@ test("podcasts health check reports schema drift", async () => {
     const findings = await plugin.check(context(root, dbPath));
     expect(findings[0]?.code).toBe("podcasts_db_probe_failed");
     expect(findings[0]?.level).toBe("critical");
+    expect(findings[0]?.guidance?.state).toBe("blocked_bug");
+    expect(findings[0]?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor podcasts");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("podcasts health check reports a missing database with guidance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-podcasts-"));
+  try {
+    const dbPath = join(root, "MTLibrary.sqlite");
+
+    const plugin = new PodcastsPlugin();
+    const findings = await plugin.check(context(root, dbPath));
+    expect(findings[0]?.code).toBe("podcasts_db_missing");
+    expect(findings[0]?.level).toBe("critical");
+    expect(findings[0]?.guidance?.state).toBe("ready_empty");
+    expect(findings[0]?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor podcasts");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("podcasts recent sync reports a missing database as podcasts_db_missing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-podcasts-"));
+  try {
+    const dbPath = join(root, "MTLibrary.sqlite");
+
+    const plugin = new PodcastsPlugin();
+    const result = await plugin.sync(
+      {
+        ...context(root, dbPath),
+        config: { dbPath, timeoutMs: 2_000, attempts: 1 },
+      },
+      {
+        source: "podcasts",
+        mode: "recent",
+        window: null,
+        collections: [],
+        budget: plugin.manifest.defaultBudget,
+        dryRun: false,
+      },
+      { version: 0, state: {} },
+    );
+    expect(result.completed).toBe(false);
+    expect(result.health[0]?.code).toBe("podcasts_db_missing");
+    expect(result.health[0]?.level).toBe("critical");
+    expect(result.health[0]?.guidance?.state).toBe("ready_empty");
+    expect(result.health[0]?.guidance?.fix?.length).toBeGreaterThan(0);
+    expect(result.health[0]?.guidance?.confirm).toBe("nutshell doctor podcasts");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

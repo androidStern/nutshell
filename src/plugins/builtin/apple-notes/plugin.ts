@@ -11,8 +11,9 @@ import type {
   TraceRecord,
 } from "../../../core/types";
 import { booleanAt, numberAt, stringArrayAt, stringAt } from "../../../config/config";
-import { finding, type TracePlugin } from "../../interface";
+import type { TracePlugin } from "../../interface";
 import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
+import { APPLE_NOTES_FINDINGS } from "./findings";
 import { AppleScriptNotesSource, FixtureNotesSource, JXANotesSource, type NotesSource } from "./jxa-source";
 import {
   noteMarkdownRelativePath,
@@ -42,6 +43,11 @@ interface AppleNotesState {
 
 type AppleNoteStateEntry = NonNullable<AppleNotesState["notes"]>[string];
 
+// SetupCheck plus the permission classification, so probe callers can route
+// permission failures to apple_notes_automation_permission_required and the
+// rest to apple_notes_access_failed.
+type ProbeCheck = SetupCheck & { permission?: boolean };
+
 const MIN_BODY_FETCH_MS = 1_000;
 const MIN_ARTIFACT_RESERVE_MS = 1_000;
 const MAX_BODY_BATCH_SIZE = 25;
@@ -57,6 +63,8 @@ export class AppleNotesPlugin implements TracePlugin {
     supportsBackfill: true,
     defaultBudget: { maxRuntimeMs: 240_000, maxRequests: null, minDelayMs: 0, stopOnRateLimit: true },
   };
+
+  readonly findings = APPLE_NOTES_FINDINGS;
 
   readonly setup = {
     summarize: async (_ctx: PluginSetupContext) => ({
@@ -79,12 +87,20 @@ export class AppleNotesPlugin implements TracePlugin {
     if (cfg.source === "fixture") {
       return existsSync(cfg.fixturePath)
         ? []
-        : [finding("critical", "apple_notes", "apple_notes_fixture_missing", "Apple Notes fixture is missing", { fixturePath: cfg.fixturePath })];
+        : [APPLE_NOTES_FINDINGS.make("apple_notes_fixture_missing", "Apple Notes fixture is missing", { fixturePath: cfg.fixturePath })];
     }
     const osascript = Bun.which("osascript");
-    if (!osascript) return [finding("critical", "apple_notes", "osascript_missing", "osascript is not available", {})];
+    if (!osascript) return [APPLE_NOTES_FINDINGS.make("osascript_missing", "osascript is not available", {})];
     const probe = await this.probe(cfg, ctx.signal);
-    return probe.ok ? [] : [finding(probe.level ?? "critical", "apple_notes", "apple_notes_access_probe_failed", probe.message, probe.detail ?? {})];
+    if (probe.ok) return [];
+    return [
+      APPLE_NOTES_FINDINGS.make(
+        probe.permission ? "apple_notes_automation_permission_required" : "apple_notes_access_failed",
+        probe.message,
+        probe.detail ?? {},
+        probe.level ?? "critical",
+      ),
+    ];
   }
 
   async sync(ctx: PluginContext, request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
@@ -109,9 +125,7 @@ export class AppleNotesPlugin implements TracePlugin {
         records: [],
         nextCheckpoint: checkpoint.state,
         health: [
-          finding(
-            "critical",
-            "apple_notes",
+          APPLE_NOTES_FINDINGS.make(
             permission ? "apple_notes_automation_permission_required" : "apple_notes_metadata_scan_failed",
             permission ? "Apple Notes is blocked by macOS automation permissions" : "Apple Notes metadata scan failed",
             {
@@ -136,7 +150,7 @@ export class AppleNotesPlugin implements TracePlugin {
     if (knownNotes >= 20 && seenIds.size < knownNotes * 0.5) {
       scanGuardActive = true;
       health.push(
-        finding("warning", "apple_notes", "apple_notes_scan_guard", "Metadata scan saw suspiciously few notes; missing detection skipped", {
+        APPLE_NOTES_FINDINGS.make("apple_notes_scan_guard", "Metadata scan saw suspiciously few notes; missing detection skipped", {
           known: knownNotes,
           seen: seenIds.size,
         }),
@@ -150,7 +164,7 @@ export class AppleNotesPlugin implements TracePlugin {
     if (!hasBodyBudget && fetchCandidates.length > 0) {
       budgetExhausted = true;
       health.push(
-        finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
+        APPLE_NOTES_FINDINGS.make("apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
           pendingBodyExports: fetchCandidates.length,
         }),
       );
@@ -179,7 +193,7 @@ export class AppleNotesPlugin implements TracePlugin {
         const pendingBodyExports = Math.max(0, fetchCandidates.length - bodyMap.size);
         if (pendingBodyExports > 0) {
           health.push(
-            finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
+            APPLE_NOTES_FINDINGS.make("apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
               pendingBodyExports,
             }),
           );
@@ -192,9 +206,7 @@ export class AppleNotesPlugin implements TracePlugin {
         records: [],
         nextCheckpoint: checkpoint.state,
         health: [
-          finding(
-            "critical",
-            "apple_notes",
+          APPLE_NOTES_FINDINGS.make(
             permission ? "apple_notes_automation_permission_required" : "apple_notes_body_fetch_failed",
             permission ? "Apple Notes is blocked by macOS automation permissions" : "Apple Notes body export failed",
             {
@@ -251,7 +263,7 @@ export class AppleNotesPlugin implements TracePlugin {
       } else if (body.error) {
         status = "failed";
         failedBodyIds.push(note.id);
-        health.push(finding("warning", "apple_notes", "apple_notes_body_failed", "Apple Notes body fetch failed", { id: note.id, error: body.error }));
+        health.push(APPLE_NOTES_FINDINGS.make("apple_notes_body_failed", "Apple Notes body fetch failed", { id: note.id, error: body.error }));
       } else {
         const converted = htmlToMarkdown(body.html);
         markdownBody = converted.markdown;
@@ -336,7 +348,7 @@ export class AppleNotesPlugin implements TracePlugin {
     const partial = budgetExhausted || bodyBacklog > 0;
     if (budgetExhausted && !health.some((item) => item.code === "apple_notes_runtime_budget_exhausted")) {
       health.push(
-        finding("warning", "apple_notes", "apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
+        APPLE_NOTES_FINDINGS.make("apple_notes_runtime_budget_exhausted", "Apple Notes run budget was exhausted before body export completed", {
           pendingBodyExports: bodyBacklog,
         }),
       );
@@ -410,37 +422,7 @@ export class AppleNotesPlugin implements TracePlugin {
     };
   }
 
-  private async setupCheck(ctx: PluginSetupContext): Promise<SetupCheck> {
-    const cfg = configFromJson(ctx.config.pluginConfig("apple_notes"));
-    if (cfg.source === "fixture" && !existsSync(cfg.fixturePath)) {
-      return {
-        ok: false,
-        level: "critical",
-        message: "Apple Notes fixture is missing.",
-        detail: { fixturePath: cfg.fixturePath },
-      };
-    }
-    if (cfg.source !== "fixture" && !Bun.which("osascript")) {
-      return {
-        ok: false,
-        level: "critical",
-        message: "AppleScript is not available, so Notes.app cannot be queried.",
-        detail: {},
-      };
-    }
-    try {
-      return await this.probe(cfg, ctx.signal);
-    } catch (error) {
-      return {
-        ok: false,
-        level: "critical",
-        message: isAppleNotesPermissionError(error) ? "Apple Notes is blocked by macOS automation permissions." : "Apple Notes access could not be verified.",
-        detail: { error: String(error) },
-      };
-    }
-  }
-
-  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<SetupCheck> {
+  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<ProbeCheck> {
     try {
       const source = this.sourceFactory(cfg);
       const timeoutMs = Math.min(cfg.osascriptTimeoutMs, 45_000);
@@ -464,14 +446,17 @@ export class AppleNotesPlugin implements TracePlugin {
             level: "critical",
             message: "Apple Notes metadata works, but body export returned no body for an accessible note.",
             detail: { noteId: accessible.id, title: accessible.title },
+            permission: false,
           };
         }
         if (body.error) {
+          const permission = isAppleNotesPermissionError(body.error);
           return {
             ok: false,
-            level: isAppleNotesPermissionError(body.error) ? "critical" : "warning",
+            level: permission ? "critical" : "warning",
             message: "Apple Notes metadata works, but body export reported an error.",
             detail: { noteId: accessible.id, title: accessible.title, error: body.error },
+            permission,
           };
         }
       }
@@ -484,11 +469,13 @@ export class AppleNotesPlugin implements TracePlugin {
         detail: { notes: metadata.length, bodyProbe: Boolean(accessible) },
       };
     } catch (error) {
+      const permission = isAppleNotesPermissionError(error);
       return {
         ok: false,
         level: "critical",
-        message: isAppleNotesPermissionError(error) ? "Apple Notes is blocked by macOS automation permissions." : "Apple Notes access could not be verified.",
+        message: permission ? "Apple Notes is blocked by macOS automation permissions." : "Apple Notes access could not be verified.",
         detail: { error: String(error) },
+        permission,
       };
     }
   }
@@ -515,11 +502,6 @@ function configFromJson(cfg: JsonObject) {
     tombstoneAfterMissingScans: numberAt(cfg, "tombstoneAfterMissingScans", 3),
     writeRawHtml: booleanAt(cfg, "writeRawHtml", true),
   };
-}
-
-function setupFindingFromCheck(source: "apple_notes", code: string, check: SetupCheck) {
-  if (check.ok) return [];
-  return [finding(check.level === "warning" ? "warning" : "critical", source, code, check.message, check.detail ?? {})];
 }
 
 function buildSource(cfg: ReturnType<typeof config>): NotesSource {

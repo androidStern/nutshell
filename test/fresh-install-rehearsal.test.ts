@@ -188,7 +188,7 @@ test("authenticated verifier classifies cookies plus keychain timeout as product
             {
               level: "critical",
               source,
-              code: source === "youtube" ? "youtube_auth_probe_failed" : "twitter_auth",
+              code: source === "youtube" ? "youtube_keychain_blocked" : "twitter_keychain_blocked",
               message: `${source} browser session check failed`,
               detail: { error: "Chrome Safe Storage keychain read timed out" },
               observedAt: "2026-05-28T00:00:00.000Z",
@@ -223,7 +223,7 @@ test("authenticated verifier classifies unreadable cookies plus keychain timeout
             {
               level: "critical",
               source,
-              code: source === "youtube" ? "youtube_auth_probe_failed" : "twitter_auth",
+              code: source === "youtube" ? "youtube_keychain_blocked" : "twitter_keychain_blocked",
               message: `${source} browser session check failed`,
               detail: { error: "Timed out after 30000ms reading Chrome Safe Storage" },
               observedAt: "2026-05-28T00:00:00.000Z",
@@ -276,12 +276,12 @@ test("authenticated verifier ignores unrelated system permission findings", asyn
 
 test("source-state classifier separates auth permission empty data and records", () => {
   expect(classifySourceState({ health: null, source: "youtube" })).toBe("blocked_bug");
-  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth", "sign in required")]), source: "youtube" })).toBe("needs_auth");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_signed_out", "sign in required")]), source: "youtube" })).toBe("needs_auth");
   expect(classifySourceState({ health: healthReport("critical", [finding("apple_notes", "apple_notes_permission", "Not authorized to send Apple events")]), source: "apple_notes" })).toBe("needs_permission");
-  expect(classifySourceState({ health: healthReport("critical", [finding("system", "nutshell_app_full_disk_access_missing", "Full Disk Access is missing"), finding("youtube", "youtube_auth_probe_failed", "sign in required")]), source: "youtube" })).toBe("needs_auth");
+  expect(classifySourceState({ health: healthReport("critical", [finding("system", "nutshell_app_full_disk_access_missing", "Full Disk Access is missing"), finding("youtube", "youtube_signed_out", "sign in required")]), source: "youtube" })).toBe("needs_auth");
   expect(classifySourceState({ health: healthReport("ok", []), source: "youtube" })).toBe("ready_empty");
-  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: ["SID"] })).toBe("blocked_bug");
-  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: [] })).toBe("blocked_bug");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_keychain_blocked", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: ["SID"] })).toBe("blocked_bug");
+  expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_keychain_blocked", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: [] })).toBe("blocked_bug");
   expect(classifySourceState({ health: healthReport("critical", []), source: "youtube", recordCount: 1 })).toBe("ready_with_data");
 });
 
@@ -516,7 +516,7 @@ test("final verifier rejects warning health even when required records exist", a
         code: 0,
         stdout: JSON.stringify({
           status: "warning",
-          findings: [{ level: "warning", source: "youtube", code: "youtube_auth", message: "auth warning", detail: {}, observedAt: "2026-05-28T00:00:00.000Z" }],
+          findings: [{ level: "warning", source: "youtube", code: "youtube_stagnation", message: "collector stopped for stagnation", detail: {}, observedAt: "2026-05-28T00:00:00.000Z" }],
           app: { installed: true, fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled" },
           scheduler: { lastRunAt: "2026-05-28T00:00:00.000Z", nextRunAt: "2026-05-28T00:15:00.000Z" },
         }),

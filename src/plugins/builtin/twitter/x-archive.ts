@@ -13,6 +13,7 @@ import {
   type TweetEnrichmentTarget,
   type TwitterEnrichmentState,
 } from "./enrichment";
+import { TWITTER_FINDINGS } from "./findings";
 
 export interface XArchiveRead {
   available: boolean;
@@ -53,11 +54,7 @@ export async function importXArchiveResult(
     records: read.records,
     nextCheckpoint: state,
     health: read.issues.map((issue) => ({
-      level: "warning",
-      source: "twitter",
-      code: "x_archive_import_issue",
-      message: issue,
-      detail: {},
+      ...TWITTER_FINDINGS.make("x_archive_import_issue", issue),
       observedAt,
     })),
     metrics: {
