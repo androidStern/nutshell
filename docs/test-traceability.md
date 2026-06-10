@@ -365,3 +365,48 @@ Criteria with no in-process test coverage in the audited files. Listed for later
 | Post-permission snapshot gate (both assertions) | honest-setup #25 | No coverage. Layer 3 gate work (requires the staged human session snapshot). |
 | Gate failure labels (`product_fail`/`harness_fail`/`fixture_stale`) | honest-setup #27 | Rehearsal reports use `blockerKind` but the three-way labeling contract is untested. Layer 3 gate work. |
 | Layer-4 checklist wiring | honest-setup #30 | Docs/process layer, not a unit test. |
+
+## Addendum (2026-06-10): coverage for honest-setup #19, #20, #23, #25, #26, #27
+
+Appended after the original audit (this file is append-only; earlier sections are unchanged).
+This addendum closes the Gaps rows for #19 and #20 (the concurrently created files are now
+audited here) and the `fixture_stale`, post-permission gate, and gate-label rows for #23, #25,
+#26, and #27. The #24 keep-alive row remains open (operator-scheduled `scripts/snapshot-keepalive.sh`).
+
+### test/state-matrix.test.ts
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| state matrix: `<source>` `<state>` (`<code>`) — one generated test per MATRIX row: each built-in source × each taxonomy state its real probe can express → exact finding code, guidance state/fix/confirm, doctor exit code; recorded fixtures only, no live network or user data | honest-setup #19; gates doc six-state taxonomy; honest-setup #10 | anchored |
+| state matrix completeness: every catalog code for these sources has a matrix row or an explicit exclusion | honest-setup #19 (matrix covers each applicable state; no silent coverage gaps) | anchored |
+| state matrix rows agree with catalog levels on the doctor exit code | honest-setup #19 (expected exit code per state is part of the matrix contract) | anchored |
+
+### test/golden-journeys.test.ts
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| journey 1: first run, every source verifies, background agent + smoke sync succeed | honest-setup #20 (journey: first-run all-pass); #8 | anchored |
+| journey 2: not logged in, retry after signing in, source verifies | honest-setup #20 (journey: not-logged-in → retry → pass); #3 | anchored |
+| journey 3: skip a failing source, re-run resumes on that source only | honest-setup #20 (journey: skip X → re-run resumes on X only); #1, #5 | anchored |
+| journey 4: import-later — decline the archive offer, keep the comeback command, skip the import | honest-setup #20 (journey: import-later path); #7 | anchored |
+| journey 5: decline the background agent — honest summary, no enable calls, no smoke sync | honest-setup #20 (journey: decline background agent); §4 steps 5–6 | anchored |
+
+### test/fresh-install-rehearsal.test.ts (tests added 2026-06-10)
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| authenticated verifier queues a stale fixture when no cookies are readable at all | honest-setup #23 (fixture preflight before product assertions; `fixture_stale` is its own verdict); #27 | anchored |
+| audit refuses to validate a release while a required gate is queued on a stale fixture | honest-setup #23 (queued-not-failed; release never validated while a required gate is queued) | anchored |
+| gate verdicts classify a harness throw as harness_fail and a failed product check as product_fail | honest-setup #27; gates doc "Verdicts" (do not blur the verdicts) | anchored |
+| permissions gate pre mode passes when every protected source reports needs_permission with fix text | honest-setup #25 (pre-snapshot assertion: `needs_permission` with correct fix text); #10 | anchored |
+| permissions gate pre mode fails a protected source that reports fake-ready | honest-setup #25; truthful-baseline §1 (no quiet fake success) | anchored |
+| permissions gate post mode passes when grants are app-owned and seeded notes are visible | honest-setup #25 (post-snapshot assertion: probes pass, grants owned by Nutshell.app); docs/post-permission-snapshot-session.md (three seeded notes) | anchored |
+| live-sync gate passes on live commits, ok health, and enabled background sync | honest-setup #26; gates doc "Live Sync And Dashboard Gate" | anchored |
+| live-sync gate fails as product_fail when a source commits no live records | honest-setup #26 (live = per-source sync commit counts, never store totals that may include imports); #27 | anchored |
+| live-sync gate queues a stale fixture before running any sync | honest-setup #23, #26 (same cookie preflight as the signed-in gate) | anchored |
+
+### Superseded (2026-06-10)
+
+| Test | File | Reason |
+| --- | --- | --- |
+| authenticated verifier classifies unreadable cookies plus keychain timeout as product bug | test/fresh-install-rehearsal.test.ts | Rewritten as "authenticated verifier queues a stale fixture when no cookies are readable at all". Honest-setup #23 redefines this exact arrangement: zero readable cookies at a signed-in gate means the fixture rotted, so the gate queues with verdict `fixture_stale` before any product assertion — it is neither a pass nor a product failure. The product-bug promise is not lost: keychain warnings with cookies still readable remain `blocked_bug`/product_fail, covered by "authenticated verifier classifies cookies plus keychain timeout as product bug". |

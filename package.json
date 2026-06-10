@@ -31,6 +31,8 @@
     "rehearse:verify-imports-local": "bun run scripts/fresh-install-rehearsal.ts verify-imports-local",
     "rehearse:verify-unauthenticated": "bun run scripts/fresh-install-rehearsal.ts verify-unauthenticated",
     "rehearse:verify-authenticated": "bun run scripts/fresh-install-rehearsal.ts verify-authenticated",
+    "rehearse:verify-permissions": "bun run scripts/fresh-install-rehearsal.ts verify-permissions",
+    "rehearse:verify-livesync": "bun run scripts/fresh-install-rehearsal.ts verify-livesync",
     "rehearse:verify-final": "bun run scripts/fresh-install-rehearsal.ts verify-final",
     "rehearse:audit-report": "bun run scripts/fresh-install-rehearsal.ts audit-report",
     "rehearse:snapshot-podcasts": "bun run scripts/fresh-install-rehearsal.ts snapshot-podcasts",

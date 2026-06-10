@@ -14,6 +14,8 @@ import {
   verifyCleanState,
   verifyFinalReleaseState,
   verifyHostPreflight,
+  verifyLiveSyncAndDashboard,
+  verifyPermissionsState,
   verifyUnauthenticatedBrowserState,
   verifyLocalProviderImports,
   writeReport,
@@ -206,40 +208,37 @@ test("authenticated verifier classifies cookies plus keychain timeout as product
   expect(report.checks.find((check) => check.name === "Google/YouTube browser auth cookies present after login")?.detail.observedState).toBe("blocked_bug");
 });
 
-test("authenticated verifier classifies unreadable cookies plus keychain timeout as product bug", async () => {
+// Supersedes "authenticated verifier classifies unreadable cookies plus
+// keychain timeout as product bug": under the criterion-23 fixture preflight,
+// ZERO readable cookies means the fixture itself rotted (or its keychain is
+// gone), so the gate queues as fixture_stale before any product assertion.
+// Keychain warnings WITH cookies still readable remain the product-bug path
+// (test above).
+test("authenticated verifier queues a stale fixture when no cookies are readable at all", async () => {
+  const commands: string[][] = [];
   const report = await verifyAuthenticatedBrowserState({
     cookieProbe: {
       google: async () => ({ cookies: [], warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 30000ms"] }),
       x: async () => ({ cookies: [], warnings: ["Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 30000ms"] }),
     },
     runner: async (command) => {
-      const source = command.includes("youtube") ? "youtube" : "twitter";
-      return commandResult(
-        2,
-        JSON.stringify({
-          status: "critical",
-          checkedAt: "2026-05-28T00:00:00.000Z",
-          findings: [
-            {
-              level: "critical",
-              source,
-              code: source === "youtube" ? "youtube_keychain_blocked" : "twitter_keychain_blocked",
-              message: `${source} browser session check failed`,
-              detail: { error: "Timed out after 30000ms reading Chrome Safe Storage" },
-              observedAt: "2026-05-28T00:00:00.000Z",
-            },
-          ],
-        }),
-      );
+      commands.push(command);
+      return commandResult(0, "{}");
     },
     env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
   });
 
-  expect(report.status).toBe("fail");
-  expect(report.contract.observedState).toBe("blocked_bug");
-  expect(report.contract.blockerKind).toBe("product_bug");
-  expect(report.evidence.youtubeState).toBe("blocked_bug");
-  expect(report.evidence.twitterState).toBe("blocked_bug");
+  expect(report.verdict).toBe("fixture_stale");
+  expect(report.status).toBe("blocked");
+  expect(commands).toEqual([]);
+  expect(report.checks).toHaveLength(1);
+  expect(report.checks[0]?.name).toBe("fixture preflight");
+  expect(report.checks[0]?.status).toBe("fail");
+  expect(report.checks[0]?.detail.reasons).toEqual([
+    "google_no_cookies_readable_keychain_blocked",
+    "x_no_cookies_readable_keychain_blocked",
+  ]);
+  expect(report.contract.blockerKind).toBe("missing_input");
 });
 
 test("authenticated verifier ignores unrelated system permission findings", async () => {
@@ -272,6 +271,209 @@ test("authenticated verifier ignores unrelated system permission findings", asyn
   expect(report.evidence.twitterState).toBe("ready_empty");
   expect(report.checks.find((check) => check.name === "youtube auth state is usable")?.status).toBe("pass");
   expect(report.checks.find((check) => check.name === "twitter auth state is usable")?.status).toBe("pass");
+});
+
+test("audit refuses to validate a release while a required gate is queued on a stale fixture", async () => {
+  const stale = await verifyAuthenticatedBrowserState({
+    cookieProbe: {
+      google: async () => ({ cookies: [], warnings: [] }),
+      x: async () => ({ cookies: [], warnings: [] }),
+    },
+    runner: async () => commandResult(0, "{}"),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+  expect(stale.verdict).toBe("fixture_stale");
+
+  const runs = requiredAggregateReports();
+  const index = runs.findIndex((run) => run.phase === "authenticated-browser-state");
+  if (index === -1) throw new Error("test fixture missing authenticated-browser-state");
+  runs.splice(index, 1, stale);
+
+  const audit = auditRehearsalReport({ runs });
+
+  expect(audit.status).not.toBe("pass");
+  expect(audit.checks.find((check) => check.name === "required gate queued: authenticated-browser-state (fixture_stale)")?.status).toBe("fail");
+  // Queued is distinct from product failure: the audit itself reports
+  // fixture_stale, not product_fail, when the queue is the only blocker.
+  expect(audit.verdict).toBe("fixture_stale");
+});
+
+test("gate verdicts classify a harness throw as harness_fail and a failed product check as product_fail", async () => {
+  const harness = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => {
+      throw new Error("tart exec transport died");
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+  expect(harness.verdict).toBe("harness_fail");
+  expect(harness.status).toBe("fail");
+  expect(harness.checks.find((check) => check.name === "gate harness ran without errors")?.status).toBe("fail");
+
+  const product = await verifyUnauthenticatedBrowserState({
+    runner: async () =>
+      commandResult(
+        2,
+        JSON.stringify({
+          status: "critical",
+          checkedAt: "2026-06-10T00:00:00.000Z",
+          findings: [
+            {
+              level: "critical",
+              source: "youtube",
+              code: "plugin_setup_degraded",
+              message: "generic degraded setup",
+              detail: {},
+              observedAt: "2026-06-10T00:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+  expect(product.status).toBe("fail");
+  expect(product.verdict).toBe("product_fail");
+});
+
+test("permissions gate pre mode passes when every protected source reports needs_permission with fix text", async () => {
+  const commands: string[][] = [];
+  const report = await verifyPermissionsState({
+    mode: "pre",
+    runner: async (command) => {
+      commands.push(command);
+      return commandResult(2, prePermissionDoctorJson());
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(commands.map((command) => command.join(" "))).toEqual(["nutshell doctor --json"]);
+  expect(report.phase).toBe("permissions-pre");
+  expect(report.status).toBe("pass");
+  expect(report.verdict).toBe("pass");
+  expect(report.checks.find((check) => check.name === "app permission root cause is reported")?.status).toBe("pass");
+  for (const source of ["youtube", "podcasts", "apple_notes", "twitter"]) {
+    expect(report.checks.find((check) => check.name === `${source} reports needs_permission before grants`)?.status).toBe("pass");
+  }
+});
+
+test("permissions gate pre mode fails a protected source that reports fake-ready", async () => {
+  const report = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => commandResult(2, prePermissionDoctorJson({ omitSource: "twitter" })),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "twitter reports needs_permission before grants");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.reason).toBe("fake_ready");
+});
+
+test("permissions gate post mode passes when grants are app-owned and seeded notes are visible", async () => {
+  const commands: string[][] = [];
+  const report = await verifyPermissionsState({
+    mode: "post",
+    runner: async (command) => {
+      commands.push(command);
+      if (command.includes("doctor")) {
+        return commandResult(
+          0,
+          JSON.stringify({
+            status: "ok",
+            checkedAt: "2026-06-10T00:00:00.000Z",
+            findings: [],
+            app: { installed: true, path: "/Applications/Nutshell.app", fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled" },
+            scheduler: { lastRunAt: "2026-06-10T00:00:00.000Z", nextRunAt: "2026-06-10T00:15:00.000Z" },
+          }),
+        );
+      }
+      return commandResult(
+        0,
+        JSON.stringify({
+          status: "ok",
+          sources: [{ source: "apple_notes", status: "ok", metrics: { uniqueNotes: 3 }, commit: { insertedRecords: 3 } }],
+        }),
+      );
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(commands.map((command) => command.join(" "))).toEqual(["nutshell doctor --json", "nutshell sync apple_notes --json"]);
+  expect(report.phase).toBe("permissions-post");
+  expect(report.status).toBe("pass");
+  expect(report.verdict).toBe("pass");
+  expect(report.checks.find((check) => check.name === "doctor reports zero needs_permission findings after grants")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "app status shows Full Disk Access granted to Nutshell.app")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "seeded Apple Notes are visible through the app")?.status).toBe("pass");
+});
+
+test("live-sync gate passes on live commits, ok health, and enabled background sync", async () => {
+  const commands: string[][] = [];
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) => {
+      commands.push(command);
+      if (command.includes("sync")) return commandResult(0, liveSyncReportJson());
+      return commandResult(0, liveHealthJson());
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(commands.map((command) => command.join(" "))).toEqual(["nutshell sync all --json", "nutshell health --json"]);
+  expect(report.phase).toBe("live-sync-dashboard");
+  expect(report.status).toBe("pass");
+  expect(report.verdict).toBe("pass");
+  expect(report.checks.find((check) => check.name === "fixture preflight")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "final health is ok with background sync enabled")?.status).toBe("pass");
+  expect(report.evidence.liveCommits).toEqual({ youtube: 4, podcasts: 2, apple_notes: 3, twitter: 5 });
+});
+
+test("live-sync gate fails as product_fail when a source commits no live records", async () => {
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) =>
+      command.includes("sync") ? commandResult(0, liveSyncReportJson({ youtubeInserted: 0 })) : commandResult(0, liveHealthJson()),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  const check = report.checks.find((item) => item.name === "live sync committed youtube records");
+  expect(check?.status).toBe("fail");
+  expect(check?.detail.reason).toBe("no_live_records_committed");
+});
+
+test("live-sync gate queues a stale fixture before running any sync", async () => {
+  const commands: string[][] = [];
+  const report = await verifyLiveSyncAndDashboard({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID"], warnings: [] }),
+      // auth_token rotted away; ct0 alone is not a signed-in session.
+      x: async () => ({ cookies: ["ct0"], warnings: [] }),
+    },
+    startDashboard: false,
+    runner: async (command) => {
+      commands.push(command);
+      return commandResult(0, "{}");
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.verdict).toBe("fixture_stale");
+  expect(report.status).toBe("blocked");
+  expect(commands).toEqual([]);
+  expect(report.checks).toHaveLength(1);
+  expect(report.checks[0]?.name).toBe("fixture preflight");
+  expect(report.checks[0]?.detail.reasons).toEqual(["x_missing_auth_cookie"]);
 });
 
 test("source-state classifier separates auth permission empty data and records", () => {
@@ -735,6 +937,60 @@ async function cleanRunner(command: string[]): Promise<CommandResult> {
 
 function commandResult(code: number, stdout = "", stderr = ""): CommandResult {
   return { code, stdout, stderr, timedOut: false };
+}
+
+function prePermissionDoctorJson(options: { omitSource?: string } = {}): string {
+  const guided = (source: string, code: string) => ({
+    level: "critical",
+    source,
+    code,
+    message: `${source} is blocked until Nutshell.app has its permissions`,
+    detail: {},
+    observedAt: "2026-06-10T00:00:00.000Z",
+    guidance: {
+      state: "needs_permission",
+      fix: "Rerun nutshell setup to open the permission window, or grant Full Disk Access to Nutshell.app in System Settings → Privacy & Security.",
+      confirm: "nutshell doctor",
+    },
+  });
+  const findings = [
+    guided("system", "nutshell_app_full_disk_access_missing"),
+    guided("youtube", "youtube_keychain_blocked"),
+    guided("podcasts", "podcasts_db_missing"),
+    guided("apple_notes", "apple_notes_permission"),
+    guided("twitter", "twitter_keychain_blocked"),
+  ].filter((finding) => finding.source !== options.omitSource);
+  return JSON.stringify({
+    status: "critical",
+    checkedAt: "2026-06-10T00:00:00.000Z",
+    findings,
+    app: { installed: true, path: "/Applications/Nutshell.app", fullDiskAccess: "missing", backgroundSync: "unknown", agent: "unknown" },
+    scheduler: { lastRunAt: null, nextRunAt: null },
+  });
+}
+
+function liveSyncReportJson(overrides: { youtubeInserted?: number } = {}): string {
+  return JSON.stringify({
+    status: "ok",
+    startedAt: "2026-06-10T00:00:00.000Z",
+    finishedAt: "2026-06-10T00:01:00.000Z",
+    sources: [
+      { source: "youtube", status: "ok", metrics: { emitted: 4 }, commit: { insertedRecords: overrides.youtubeInserted ?? 4 } },
+      { source: "podcasts", status: "ok", metrics: { emitted: 2 }, commit: { insertedRecords: 2 } },
+      { source: "apple_notes", status: "ok", metrics: { uniqueNotes: 3 }, commit: { insertedRecords: 3 } },
+      { source: "twitter", status: "ok", metrics: { observations: 5 }, commit: { insertedRecords: 5 } },
+    ],
+  });
+}
+
+function liveHealthJson(): string {
+  return JSON.stringify({
+    status: "ok",
+    checkedAt: "2026-06-10T00:00:00.000Z",
+    findings: [],
+    app: { installed: true, path: "/Applications/Nutshell.app", fullDiskAccess: "granted", backgroundSync: "enabled", agent: "enabled" },
+    scheduler: { lastRunAt: "2026-06-10T00:00:00.000Z", nextRunAt: "2026-06-10T00:15:00.000Z" },
+  });
 }
 
 function writeTestConfig(home: string): { root: string; configPath: string } {

@@ -40,10 +40,21 @@ export interface RehearsalCheck {
   detail: JsonObject;
 }
 
+// Three-way gate verdict (honest-setup criterion 27; docs/release-validation-gates.md
+// "Verdicts"): product_fail implicates the installed candidate, harness_fail
+// implicates the gate machinery only, and fixture_stale queues the gate behind
+// a fixture refresh without failing the candidate.
+export type RehearsalVerdict = "pass" | "product_fail" | "harness_fail" | "fixture_stale";
+
 export interface RehearsalReport {
   generatedAt: string;
   phase: string;
-  status: "pass" | "fail";
+  // "blocked" is the fixture_stale status: the gate neither passed nor failed
+  // the candidate — it is queued until the fixture is refreshed.
+  status: "pass" | "fail" | "blocked";
+  // Absent on legacy reports written before the verdict contract existed;
+  // readers go through reportVerdict(), which derives a verdict from status.
+  verdict?: RehearsalVerdict;
   contract: RehearsalContract;
   checks: RehearsalCheck[];
   evidence: JsonObject;
@@ -128,6 +139,12 @@ export interface FinalVerificationOptions extends RehearsalOptions {
   dashboardTimeoutMs?: number;
 }
 
+export interface PermissionsVerificationOptions {
+  mode: "pre" | "post";
+  runner?: CommandRunner;
+  env?: Record<string, string>;
+}
+
 export interface RehearsalAggregateReport {
   updatedAt?: string;
   runs: RehearsalReport[];
@@ -167,6 +184,26 @@ const REQUIRED_FULL_REHEARSAL_PHASES = [
   "complete",
 ] as const;
 const AUTH_PRESENT_BROWSER_SETUP_PHASES = ["browser-login-handoff", "browser-auth-seed-restore"] as const;
+const PERMISSIONS_PRE_PHASE = "permissions-pre";
+const PERMISSIONS_POST_PHASE = "permissions-post";
+const LIVE_SYNC_DASHBOARD_PHASE = "live-sync-dashboard";
+// Phases whose fixture_stale verdict queues the release (honest-setup
+// criterion 23): the full-rehearsal phases plus the standalone snapshot gates.
+const REQUIRED_GATE_PHASES = new Set<string>([
+  ...REQUIRED_FULL_REHEARSAL_PHASES,
+  ...AUTH_PRESENT_BROWSER_SETUP_PHASES,
+  PERMISSIONS_PRE_PHASE,
+  PERMISSIONS_POST_PHASE,
+  LIVE_SYNC_DASHBOARD_PHASE,
+]);
+// Cookie names that prove the auth-present fixture is still signed in
+// (docs/release-validation-gates.md "Fixture preflight").
+const GOOGLE_FIXTURE_AUTH_COOKIES = ["SAPISID", "__Secure-1PSID"];
+const X_FIXTURE_AUTH_COOKIES = ["auth_token"];
+const APP_PERMISSION_ROOT_CAUSE_CODES = ["nutshell_app_full_disk_access_missing", "nutshell_app_missing"];
+// The staged post-permission session seeds exactly three notes
+// (docs/post-permission-snapshot-session.md step 7).
+const SEEDED_NOTE_COUNT = 3;
 
 const REQUIRED_FINAL_CHECK_NAMES = [
   "final health command returns JSON",
@@ -310,6 +347,10 @@ export function defaultRehearsalPaths(home = homedir()): RehearsalPaths {
 }
 
 export async function verifyCleanState(options: RehearsalOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("clean-state", () => verifyCleanStateChecks(options));
+}
+
+async function verifyCleanStateChecks(options: RehearsalOptions): Promise<RehearsalReport> {
   const paths = mergePaths(options.paths);
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
@@ -338,6 +379,10 @@ export async function verifyCleanState(options: RehearsalOptions = {}): Promise<
 }
 
 export async function verifyInstalledProduct(options: RehearsalOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("installed-product", () => verifyInstalledProductChecks(options));
+}
+
+async function verifyInstalledProductChecks(options: RehearsalOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
   const checks: RehearsalCheck[] = [];
@@ -352,6 +397,10 @@ export async function verifyInstalledProduct(options: RehearsalOptions = {}): Pr
 }
 
 export async function verifyUnauthenticatedBrowserState(options: RehearsalOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("unauthenticated-browser-state", () => verifyUnauthenticatedBrowserStateChecks(options));
+}
+
+async function verifyUnauthenticatedBrowserStateChecks(options: RehearsalOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
   const youtube = await runJsonCommand<HealthReport>(["nutshell", "doctor", "youtube", "--json"], runner, env, 60_000);
@@ -371,14 +420,21 @@ export async function verifyUnauthenticatedBrowserState(options: RehearsalOption
 }
 
 export async function verifyAuthenticatedBrowserState(options: RehearsalOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("authenticated-browser-state", () => verifyAuthenticatedBrowserStateChecks(options));
+}
+
+async function verifyAuthenticatedBrowserStateChecks(options: RehearsalOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
   const browser = mergeBrowser(options.browser);
   const googleCookies = await browserProbeResult(options.cookieProbe?.google ? options.cookieProbe.google() : googleCookieProbe(browser));
   const xCookies = await browserProbeResult(options.cookieProbe?.x ? options.cookieProbe.x() : xCookieProbe(browser));
+  const preflight = fixturePreflight(googleCookies, xCookies);
+  if (!preflight.healthy) return fixtureStaleReport("authenticated-browser-state", preflight.check, googleCookies, xCookies);
   const youtube = await runJsonCommand<HealthReport>(["nutshell", "doctor", "youtube", "--json"], runner, env, 60_000);
   const twitter = await runJsonCommand<HealthReport>(["nutshell", "doctor", "twitter", "--json"], runner, env, 60_000);
   const checks = [
+    preflight.check,
     browserCookiesPresentCheck("Google/YouTube browser auth cookies present after login", googleCookies),
     jsonCommandCheck("youtube doctor returns JSON after login", youtube),
     authenticatedSourceUsableCheck("youtube auth state is usable", youtube.value, googleCookies, "youtube", [...YOUTUBE_AUTH_PROBE_CODES, "plugin_setup_degraded"]),
@@ -399,6 +455,10 @@ export async function verifyAuthenticatedBrowserState(options: RehearsalOptions 
 }
 
 export async function verifyFinalReleaseState(options: FinalVerificationOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("final-release-state", () => verifyFinalReleaseStateChecks(options));
+}
+
+async function verifyFinalReleaseStateChecks(options: FinalVerificationOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
   const requiredSources = options.requireSources ?? REQUIRED_SOURCES;
@@ -425,6 +485,10 @@ export async function verifyFinalReleaseState(options: FinalVerificationOptions 
 }
 
 export async function verifyHostPreflight(options: HostPreflightOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("host-preflight", () => verifyHostPreflightChecks(options));
+}
+
+async function verifyHostPreflightChecks(options: HostPreflightOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const env = normalizedEnv(options.env);
   const minFreeBytes = options.minFreeBytes ?? 50 * 1024 ** 3;
@@ -452,6 +516,10 @@ export async function verifyHostPreflight(options: HostPreflightOptions = {}): P
 }
 
 export async function verifyLocalProviderImports(options: LocalProviderImportOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase("local-provider-imports", () => verifyLocalProviderImportsChecks(options));
+}
+
+async function verifyLocalProviderImportsChecks(options: LocalProviderImportOptions): Promise<RehearsalReport> {
   const runner = options.runner ?? runCommand;
   const root = resolve(options.root ?? join(tmpdir(), "nutshell-import-gates", new Date().toISOString().replace(/[:.]/g, "-")));
   const configPath = resolve(options.configPath ?? resolveConfigPath(root));
@@ -485,6 +553,99 @@ export async function verifyLocalProviderImports(options: LocalProviderImportOpt
     recordStats: recordStats as unknown as JsonObject,
     xArchive,
     youtubeExport,
+  });
+}
+
+// Permissions gate (honest-setup criterion 25; gates doc "Permissions Gate").
+// pre: runs inside a clone of the auth-present snapshot with the release
+// installed and Full Disk Access never granted — doctor must report
+// needs_permission for every protected source, each finding carrying its own
+// fix and confirm text, with the Nutshell.app root cause leading. post: runs
+// inside a clone of the staged post-permission snapshot
+// (docs/post-permission-snapshot-session.md) — doctor must be clean of
+// needs_permission findings, the app status block must show Full Disk Access
+// granted, and the three seeded notes must be visible through the app.
+export async function verifyPermissionsState(options: PermissionsVerificationOptions): Promise<RehearsalReport> {
+  const phase = options.mode === "pre" ? PERMISSIONS_PRE_PHASE : PERMISSIONS_POST_PHASE;
+  return classifiedPhase(phase, () => verifyPermissionsStateChecks(phase, options));
+}
+
+async function verifyPermissionsStateChecks(phase: string, options: PermissionsVerificationOptions): Promise<RehearsalReport> {
+  const runner = options.runner ?? runCommand;
+  const env = normalizedEnv(options.env);
+  const doctor = await runJsonCommand<HealthReport>(["nutshell", "doctor", "--json"], runner, env, 120_000);
+  const findingCodes = (doctor.value?.findings ?? []).map((finding) => `${finding.source}/${finding.code}`);
+  if (options.mode === "pre") {
+    const checks: RehearsalCheck[] = [
+      jsonCommandCheck("doctor returns JSON before permission grants", doctor),
+      appPermissionRootCauseCheck(doctor.value),
+      ...REQUIRED_SOURCES.map((source) => needsPermissionBeforeGrantCheck(source, doctor.value)),
+    ];
+    return reportFor(phase, checks, {
+      mode: options.mode,
+      doctorExitCode: doctor.result.code,
+      findingCodes,
+      protectedSources: [...REQUIRED_SOURCES],
+    });
+  }
+  const notesSync = await runJsonCommand<JsonObject>(["nutshell", "sync", "apple_notes", "--json"], runner, env, 10 * 60_000);
+  const checks: RehearsalCheck[] = [
+    jsonCommandCheck("doctor returns JSON after permission grants", doctor),
+    zeroNeedsPermissionCheck(doctor.value),
+    fullDiskAccessGrantedCheck(doctor.value),
+    seededNotesVisibleCheck(notesSync.value),
+  ];
+  return reportFor(phase, checks, {
+    mode: options.mode,
+    doctorExitCode: doctor.result.code,
+    findingCodes,
+    notesSyncExitCode: notesSync.result.code,
+  });
+}
+
+// Live-sync/dashboard gate (honest-setup criterion 26; gates doc "Live Sync
+// And Dashboard Gate"). Runs headlessly from a clone of the post-permission
+// snapshot with the same cookie fixture preflight as the signed-in gate: a
+// stale fixture short-circuits with verdict fixture_stale before any product
+// assertion runs.
+export async function verifyLiveSyncAndDashboard(options: FinalVerificationOptions = {}): Promise<RehearsalReport> {
+  return classifiedPhase(LIVE_SYNC_DASHBOARD_PHASE, () => verifyLiveSyncAndDashboardChecks(options));
+}
+
+async function verifyLiveSyncAndDashboardChecks(options: FinalVerificationOptions): Promise<RehearsalReport> {
+  const runner = options.runner ?? runCommand;
+  const env = normalizedEnv(options.env);
+  const browser = mergeBrowser(options.browser);
+  const requiredSources = options.requireSources ?? REQUIRED_SOURCES;
+  const googleCookies = await browserProbeResult(options.cookieProbe?.google ? options.cookieProbe.google() : googleCookieProbe(browser));
+  const xCookies = await browserProbeResult(options.cookieProbe?.x ? options.cookieProbe.x() : xCookieProbe(browser));
+  const preflight = fixturePreflight(googleCookies, xCookies);
+  if (!preflight.healthy) return fixtureStaleReport(LIVE_SYNC_DASHBOARD_PHASE, preflight.check, googleCookies, xCookies);
+
+  const sync = await runJsonCommand<JsonObject>(["nutshell", "sync", "all", "--json"], runner, env, 30 * 60_000);
+  const health = await runJsonCommand<HealthReport>(["nutshell", "health", "--json"], runner, env, 120_000);
+  const checks: RehearsalCheck[] = [
+    preflight.check,
+    jsonCommandCheck("live sync command returns JSON", sync),
+    liveCommitRecordsCheck("youtube", sync.value),
+    liveCommitRecordsCheck("twitter", sync.value),
+    podcastsSeedSyncCheck(sync.value),
+    appleNotesLiveRecordsCheck(sync.value),
+    jsonCommandCheck("final health command returns JSON", health),
+    liveHealthCheck(health.value),
+  ];
+  const dashboard = options.startDashboard === false ? null : await verifyDashboard(runner, env, options.dashboardTimeoutMs ?? 30_000, requiredSources);
+  if (dashboard) checks.push(...dashboard.checks);
+  return reportFor(LIVE_SYNC_DASHBOARD_PHASE, checks, {
+    syncExitCode: sync.result.code,
+    healthExitCode: health.result.code,
+    liveCommits: liveCommitCounts(sync.value),
+    healthStatus: health.value?.status ?? null,
+    browserWarnings: {
+      google: googleCookies.warnings,
+      x: xCookies.warnings,
+    },
+    dashboard: dashboard?.evidence ?? {},
   });
 }
 
@@ -524,14 +685,16 @@ export function prepareFreshInstallReportPath(reportPath: string, forceNewReport
 
 export function auditRehearsalReportFile(path: string): RehearsalReport {
   const resolved = resolve(path);
+  // A missing or unparsable report file is harness breakage (the harness wrote
+  // the file), not a product failure — label it harness_fail (criterion 27).
   if (!existsSync(resolved)) {
-    return reportFor("aggregate-report-audit", [fail("fresh-install report exists", { path: resolved })], { path: resolved });
+    return reportFor("aggregate-report-audit", [fail("fresh-install report exists", { path: resolved })], { path: resolved }, "harness_fail");
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(resolved, "utf8"));
   } catch (error) {
-    return reportFor("aggregate-report-audit", [fail("fresh-install report parses as JSON", { path: resolved, error: String(error) })], { path: resolved });
+    return reportFor("aggregate-report-audit", [fail("fresh-install report parses as JSON", { path: resolved, error: String(error) })], { path: resolved }, "harness_fail");
   }
   return auditRehearsalReport(parsed, resolved);
 }
@@ -570,6 +733,26 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
       ? pass("no failed phases are present in final report", { phaseCount: runs.length })
       : fail("no failed phases are present in final report", { failedPhases: failedRuns.map((run) => run.phase) }),
   );
+
+  // Criterion 23: a required gate queued on a stale fixture must never
+  // validate the release — but it is queued, not failed. The check name keeps
+  // that distinct from product failure; the queue clears with a fixture
+  // refresh, never with a product fix.
+  const queuedRuns = runs.filter((run) => REQUIRED_GATE_PHASES.has(run.phase) && reportVerdict(run) === "fixture_stale");
+  if (queuedRuns.length) {
+    for (const run of queuedRuns) {
+      checks.push(
+        fail(`required gate queued: ${run.phase} (fixture_stale)`, {
+          phase: run.phase,
+          verdict: "fixture_stale",
+          reason: "fixture refresh required before this gate can produce release evidence",
+        }),
+      );
+    }
+  } else {
+    checks.push(pass("no required gate is queued on a stale fixture", { phaseCount: runs.length }));
+  }
+
   checks.push(...releaseContractChecks(runs));
 
   const local = runs.find((run) => run.phase === "local-release-checks");
@@ -601,12 +784,34 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
   checks.push(...requiredChecksPassed(final, REQUIRED_FINAL_CHECK_NAMES));
   checks.push(...requiredReleaseEvidencePassed(runs));
 
-  return reportFor("aggregate-report-audit", checks, {
-    path,
-    phaseCount: runs.length,
-    requiredPhases: [...REQUIRED_FULL_REHEARSAL_PHASES],
-    authPresentBrowserSetupPhases: [...AUTH_PRESENT_BROWSER_SETUP_PHASES],
-  });
+  // The audit's own verdict: when the only non-passing runs are queued
+  // fixture_stale gates, the release is blocked behind a fixture refresh —
+  // verdict fixture_stale, not product_fail (the candidate is not implicated).
+  // Any other failing check classifies product_fail by the default rule.
+  const queuedOnly = queuedRuns.length > 0 && failedRuns.every((run) => reportVerdict(run) === "fixture_stale");
+  return reportFor(
+    "aggregate-report-audit",
+    checks,
+    {
+      path,
+      phaseCount: runs.length,
+      requiredPhases: [...REQUIRED_FULL_REHEARSAL_PHASES],
+      authPresentBrowserSetupPhases: [...AUTH_PRESENT_BROWSER_SETUP_PHASES],
+      queuedPhases: queuedRuns.map((run) => run.phase),
+    },
+    queuedOnly ? "fixture_stale" : undefined,
+  );
+}
+
+// Legacy reports written before the three-way verdict contract (criterion 27)
+// carry no verdict field. Derive one from status: those reports recorded "fail"
+// only for failed product assertions (harness breakage crashed the run instead
+// of writing a report), so fail → product_fail; "blocked" was introduced
+// together with verdicts but maps to fixture_stale defensively; pass → pass.
+export function reportVerdict(report: RehearsalReport): RehearsalVerdict {
+  if (report.verdict) return report.verdict;
+  if (report.status === "blocked") return "fixture_stale";
+  return report.status === "pass" ? "pass" : "product_fail";
 }
 
 function requiredReleaseEvidencePassed(runs: RehearsalReport[]): RehearsalCheck[] {
@@ -1165,6 +1370,144 @@ function keychainOrSafeStorageWarnings(warnings: readonly string[]): string[] {
   return warnings.filter((warning) => /keychain|safe storage|Chrome Safe Storage|decrypt|security.*find-generic-password|timeout/i.test(warning));
 }
 
+function appPermissionRootCauseCheck(health: HealthReport | null): RehearsalCheck {
+  const name = "app permission root cause is reported";
+  if (!health) return fail(name, { reason: "missing_health_json" });
+  const matched = health.findings.filter((finding) => APP_PERMISSION_ROOT_CAUSE_CODES.includes(finding.code)).map((finding) => finding.code);
+  return matched.length
+    ? pass(name, { matched })
+    : fail(name, { acceptedCodes: APP_PERMISSION_ROOT_CAUSE_CODES, codes: health.findings.map((finding) => `${finding.source}/${finding.code}`) });
+}
+
+function needsPermissionBeforeGrantCheck(source: SourceId, health: HealthReport | null): RehearsalCheck {
+  const name = `${source} reports needs_permission before grants`;
+  if (!health) return fail(name, { source, reason: "missing_health_json" });
+  const sourceFindings = health.findings.filter((finding) => finding.source === source);
+  const needsPermission = sourceFindings.filter((finding) => finding.guidance?.state === "needs_permission");
+  if (!needsPermission.length) {
+    // A protected source with no problem finding before any grant is
+    // fake-ready: the product claims usability it cannot have (criterion 25).
+    return fail(name, {
+      source,
+      reason: sourceFindings.length ? "no_needs_permission_finding" : "fake_ready",
+      codes: sourceFindings.map((finding) => finding.code),
+    });
+  }
+  const missingGuidance = needsPermission.filter((finding) => !finding.guidance?.fix?.trim() || !finding.guidance?.confirm?.trim());
+  return missingGuidance.length
+    ? fail(name, { source, reason: "missing_fix_or_confirm", codes: missingGuidance.map((finding) => finding.code) })
+    : pass(name, { source, codes: needsPermission.map((finding) => finding.code) });
+}
+
+function zeroNeedsPermissionCheck(health: HealthReport | null): RehearsalCheck {
+  const name = "doctor reports zero needs_permission findings after grants";
+  if (!health) return fail(name, { reason: "missing_health_json" });
+  const needsPermission = health.findings.filter((finding) => finding.guidance?.state === "needs_permission");
+  return needsPermission.length
+    ? fail(name, { codes: needsPermission.map((finding) => `${finding.source}/${finding.code}`) })
+    : pass(name, { findingCount: health.findings.length });
+}
+
+function fullDiskAccessGrantedCheck(health: HealthReport | null): RehearsalCheck {
+  const name = "app status shows Full Disk Access granted to Nutshell.app";
+  if (!health) return fail(name, { reason: "missing_health_json" });
+  const app = health.app;
+  return app?.installed && app.fullDiskAccess === "granted"
+    ? pass(name, { path: app.path, fullDiskAccess: app.fullDiskAccess })
+    : fail(name, { app: (app ?? {}) as unknown as JsonObject });
+}
+
+// Seeded-notes proof choice (criterion 25 post mode): `nutshell sync
+// apple_notes --json` over doctor. The sync report's apple_notes
+// metrics.uniqueNotes is the existing harness primitive for note visibility
+// (the same field the foreground-sync phase asserts on), and it proves the
+// three staged notes are readable through the app identity even on a re-run
+// clone where the records were already committed (commit.insertedRecords would
+// be 0 there). Doctor-without-critical-findings would only prove the Notes
+// automation channel works, not that the seeded notes are visible.
+function seededNotesVisibleCheck(sync: JsonObject | null): RehearsalCheck {
+  const name = "seeded Apple Notes are visible through the app";
+  const sourceReport = syncSourceFor(sync, "apple_notes");
+  if (!sourceReport) return fail(name, { reason: "missing_source_report" });
+  const status = typeof sourceReport.status === "string" ? sourceReport.status : "unknown";
+  const metrics = sourceReport.metrics && typeof sourceReport.metrics === "object" && !Array.isArray(sourceReport.metrics) ? (sourceReport.metrics as JsonObject) : {};
+  const uniqueNotes = typeof metrics.uniqueNotes === "number" && Number.isFinite(metrics.uniqueNotes) ? metrics.uniqueNotes : 0;
+  return status === "ok" && uniqueNotes >= SEEDED_NOTE_COUNT
+    ? pass(name, { status, uniqueNotes, expectedAtLeast: SEEDED_NOTE_COUNT })
+    : fail(name, { status, uniqueNotes, expectedAtLeast: SEEDED_NOTE_COUNT });
+}
+
+// SyncReport (src/core/types.ts) over --json: sources[] each carry status,
+// metrics, and commit { insertedRecords }. The per-source commit count is the
+// live-ingestion proof; store totals are deliberately not used because they
+// can include archive-imported records (gates doc: imports must not stand in
+// for live signed-in sync records).
+function syncSourceFor(sync: JsonObject | null, source: SourceId): JsonObject | null {
+  if (!sync) return null;
+  const sources = Array.isArray(sync.sources) ? sync.sources : [];
+  for (const item of sources) {
+    if (item && typeof item === "object" && !Array.isArray(item) && (item as JsonObject).source === source) return item as JsonObject;
+  }
+  return null;
+}
+
+function commitInsertedRecords(sourceReport: JsonObject | null): number {
+  const commit = sourceReport?.commit;
+  if (!commit || typeof commit !== "object" || Array.isArray(commit)) return 0;
+  const inserted = (commit as JsonObject).insertedRecords;
+  return typeof inserted === "number" && Number.isFinite(inserted) ? inserted : 0;
+}
+
+function liveCommitRecordsCheck(source: SourceId, sync: JsonObject | null): RehearsalCheck {
+  const name = `live sync committed ${source} records`;
+  const sourceReport = syncSourceFor(sync, source);
+  if (!sourceReport) return fail(name, { source, reason: "missing_source_report" });
+  const status = typeof sourceReport.status === "string" ? sourceReport.status : "unknown";
+  const insertedRecords = commitInsertedRecords(sourceReport);
+  if (status !== "ok") return fail(name, { source, status, insertedRecords, reason: `source_status_${status}` });
+  return insertedRecords > 0
+    ? pass(name, { source, status, insertedRecords })
+    : fail(name, { source, status, insertedRecords, reason: "no_live_records_committed" });
+}
+
+function podcastsSeedSyncCheck(sync: JsonObject | null): RehearsalCheck {
+  const name = "podcasts seed syncs through the normal plugin path";
+  const sourceReport = syncSourceFor(sync, "podcasts");
+  if (!sourceReport) return fail(name, { reason: "missing_source_report" });
+  const status = typeof sourceReport.status === "string" ? sourceReport.status : "unknown";
+  return status === "ok"
+    ? pass(name, { status, insertedRecords: commitInsertedRecords(sourceReport) })
+    : fail(name, { status, findings: Array.isArray(sourceReport.findings) ? sourceReport.findings.slice(0, 5) : [] });
+}
+
+function appleNotesLiveRecordsCheck(sync: JsonObject | null): RehearsalCheck {
+  const name = "apple_notes sync produced note records";
+  const sourceReport = syncSourceFor(sync, "apple_notes");
+  if (!sourceReport) return fail(name, { reason: "missing_source_report" });
+  const status = typeof sourceReport.status === "string" ? sourceReport.status : "unknown";
+  const insertedRecords = commitInsertedRecords(sourceReport);
+  return status === "ok" && insertedRecords > 0
+    ? pass(name, { status, insertedRecords })
+    : fail(name, { status, insertedRecords, reason: status === "ok" ? "no_note_records_committed" : `source_status_${status}` });
+}
+
+function liveHealthCheck(health: HealthReport | null): RehearsalCheck {
+  const name = "final health is ok with background sync enabled";
+  if (!health) return fail(name, { reason: "missing_health_json" });
+  const failures: string[] = [];
+  if (health.status !== "ok") failures.push(`health_${health.status}`);
+  if (health.app?.backgroundSync !== "enabled") failures.push("background_sync_not_enabled");
+  return failures.length
+    ? fail(name, { failures, status: health.status, app: (health.app ?? {}) as unknown as JsonObject })
+    : pass(name, { status: health.status, backgroundSync: health.app.backgroundSync });
+}
+
+function liveCommitCounts(sync: JsonObject | null): JsonObject {
+  const counts: JsonObject = {};
+  for (const source of REQUIRED_SOURCES) counts[source] = commitInsertedRecords(syncSourceFor(sync, source));
+  return counts;
+}
+
 function finalHealthCheck(health: HealthReport | null): RehearsalCheck {
   if (!health) return fail("final health proves app-owned background sync", { reason: "missing_health_json" });
   const app = health.app;
@@ -1266,7 +1609,7 @@ function isRehearsalReport(input: unknown): input is RehearsalReport {
   return (
     typeof item.generatedAt === "string" &&
     typeof item.phase === "string" &&
-    (item.status === "pass" || item.status === "fail") &&
+    (item.status === "pass" || item.status === "fail" || item.status === "blocked") &&
     Array.isArray(item.checks) &&
     Boolean(item.evidence) &&
     typeof item.evidence === "object" &&
@@ -1459,26 +1802,117 @@ async function exited(proc: Bun.Subprocess<"ignore", "pipe", "pipe">): Promise<b
   return Promise.race([proc.exited.then(() => true), delay(0).then(() => false)]);
 }
 
-export function makeRehearsalReport(phase: string, checks: RehearsalCheck[], evidence: JsonObject): RehearsalReport {
+export function makeRehearsalReport(phase: string, checks: RehearsalCheck[], evidence: JsonObject, verdict?: RehearsalVerdict): RehearsalReport {
   const pass = !checks.some((check) => check.status === "fail");
+  // Criterion 27 default classification: all checks pass → pass; any failed
+  // check is a failed product-behavior assertion → product_fail. harness_fail
+  // and fixture_stale are always passed in explicitly, because only the call
+  // site knows whether the harness machinery or a fixture broke.
+  const resolvedVerdict = verdict ?? (pass ? "pass" : "product_fail");
   return {
     generatedAt: new Date().toISOString(),
     phase,
-    status: pass ? "pass" : "fail",
-    contract: contractForPhase(phase, pass, evidence),
+    status: resolvedVerdict === "fixture_stale" ? "blocked" : pass ? "pass" : "fail",
+    verdict: resolvedVerdict,
+    contract: contractForPhase(phase, pass, evidence, resolvedVerdict),
     checks,
     evidence,
   };
 }
 
-function reportFor(phase: string, checks: RehearsalCheck[], evidence: JsonObject): RehearsalReport {
-  return makeRehearsalReport(phase, checks, evidence);
+function reportFor(phase: string, checks: RehearsalCheck[], evidence: JsonObject, verdict?: RehearsalVerdict): RehearsalReport {
+  return makeRehearsalReport(phase, checks, evidence, verdict);
 }
 
-function contractForPhase(phase: string, phasePassed: boolean, evidence: JsonObject): RehearsalContract {
+// Shared verdict boundary (criterion 27): every verify* gate runs inside this
+// wrapper so a throw out of the harness machinery — missing tools, unreadable
+// paths, subprocess spawn failures, JSON the harness itself wrote malformed —
+// is recorded as harness_fail. The candidate is not implicated: fix the
+// harness and rerun. Failed product checks classify product_fail through
+// makeRehearsalReport; fixture preflights classify fixture_stale explicitly.
+async function classifiedPhase(phase: string, run: () => Promise<RehearsalReport>): Promise<RehearsalReport> {
+  try {
+    return await run();
+  } catch (error) {
+    return makeRehearsalReport(
+      phase,
+      [fail("gate harness ran without errors", { error: String(error) })],
+      { harnessError: String(error) },
+      "harness_fail",
+    );
+  }
+}
+
+interface FixturePreflightResult {
+  healthy: boolean;
+  check: RehearsalCheck;
+}
+
+// Fixture-health preflight (criterion 23; gates doc "Fixture preflight"): runs
+// before any product assertion in the signed-in gates. Zero readable cookies
+// means the fixture rotted or its keychain is gone — the gate queues with
+// verdict fixture_stale and never fails the candidate. Keychain/Safe Storage
+// warnings WITH cookies still readable are the opposite case: the fixture is
+// fine and the product's decryption path is broken, so the preflight passes
+// and the product checks classify blocked_bug → product_fail.
+function fixturePreflight(google: BrowserProbeResult, x: BrowserProbeResult): FixturePreflightResult {
+  const reasons = [
+    ...probeFixtureReasons("google", google, GOOGLE_FIXTURE_AUTH_COOKIES),
+    ...probeFixtureReasons("x", x, X_FIXTURE_AUTH_COOKIES),
+  ];
+  const detail: JsonObject = {
+    google: { cookies: google.cookies, warnings: google.warnings },
+    x: { cookies: x.cookies, warnings: x.warnings },
+    requiredCookies: { google: GOOGLE_FIXTURE_AUTH_COOKIES, x: X_FIXTURE_AUTH_COOKIES },
+  };
+  if (!reasons.length) return { healthy: true, check: pass("fixture preflight", detail) };
+  return {
+    healthy: false,
+    check: fail("fixture preflight", {
+      ...detail,
+      verdict: "fixture_stale",
+      reasons,
+      fix: "Refresh the auth-present snapshot: run scripts/snapshot-keepalive.sh, or the manual re-login in docs/rehearsal-browser-auth-seeds.md if the keep-alive also reports stale.",
+    }),
+  };
+}
+
+function probeFixtureReasons(name: string, probe: BrowserProbeResult, requiredCookies: string[]): string[] {
+  const keychainWarnings = keychainOrSafeStorageWarnings(probe.warnings);
+  if (probe.cookies.length === 0) {
+    return [keychainWarnings.length ? `${name}_no_cookies_readable_keychain_blocked` : `${name}_no_cookies_readable`];
+  }
+  // Cookies readable but keychain warnings present: a product decryption bug,
+  // not a stale fixture — leave it to the product checks (blocked_bug).
+  if (keychainWarnings.length) return [];
+  return requiredCookies.some((cookie) => probe.cookies.includes(cookie)) ? [] : [`${name}_missing_auth_cookie`];
+}
+
+// A stale fixture queues the gate (criterion 23): no product assertion runs,
+// the report carries verdict fixture_stale and status "blocked" — distinct
+// from both pass and product failure.
+function fixtureStaleReport(phase: string, preflightCheck: RehearsalCheck, google: BrowserProbeResult, x: BrowserProbeResult): RehearsalReport {
+  return makeRehearsalReport(
+    phase,
+    [preflightCheck],
+    {
+      fixturePreflight: preflightCheck.detail,
+      browserWarnings: { google: google.warnings, x: x.warnings },
+    },
+    "fixture_stale",
+  );
+}
+
+function contractForPhase(phase: string, phasePassed: boolean, evidence: JsonObject, verdict: RehearsalVerdict): RehearsalContract {
   const expected = expectedContractForPhase(phase);
   const diagnosticAction = typeof evidence.diagnosticAction === "string" ? evidence.diagnosticAction : null;
-  const blockerKind = phasePassed && !diagnosticAction ? "none" : blockerKindForPhase(phase, evidence, diagnosticAction);
+  const blockerKind =
+    phasePassed && !diagnosticAction
+      ? "none"
+      : verdict === "fixture_stale"
+        ? // A stale fixture is an unusable gate input, not a product blocker.
+          "missing_input"
+        : blockerKindForPhase(phase, evidence, diagnosticAction);
   return {
     ...expected,
     observedState: phasePassed ? expected.expectedState : observedStateForFailedPhase(phase, evidence),
@@ -1519,6 +1953,12 @@ function expectedContractForPhase(phase: string): Omit<RehearsalContract, "obser
       return { userStory: "User allows Notes automation for the installed app path.", expectedState: "handoff", source: "apple_notes" };
     case "foreground-sync":
       return { userStory: "Foreground sync produces live records for every enabled source.", expectedState: "ready_with_data", source: "all" };
+    case PERMISSIONS_PRE_PHASE:
+      return { userStory: "Before any grant, protected sources report needs_permission with the Nutshell.app root cause and exact fix text.", expectedState: "needs_permission", source: "all" };
+    case PERMISSIONS_POST_PHASE:
+      return { userStory: "After the staged permission session, Nutshell.app owns the grants, probes pass, and the seeded notes are visible.", expectedState: "ready_with_data", source: "all" };
+    case LIVE_SYNC_DASHBOARD_PHASE:
+      return { userStory: "Live signed-in sync and the dashboard prove records for every required source from the post-permission snapshot.", expectedState: "ready_with_data", source: "all" };
     case "background-sync":
       return { userStory: "The app-owned background agent runs a scheduled sync.", expectedState: "ready_with_data", source: "all" };
     case "final-release-state":

@@ -15,7 +15,9 @@ import {
   verifyFinalReleaseState,
   verifyHostPreflight,
   verifyInstalledProduct,
+  verifyLiveSyncAndDashboard,
   verifyLocalProviderImports,
+  verifyPermissionsState,
   verifyUnauthenticatedBrowserState,
   writeReport,
   runCommand,
@@ -48,6 +50,8 @@ type Command =
   | "verify-imports-local"
   | "verify-unauthenticated"
   | "verify-authenticated"
+  | "verify-permissions"
+  | "verify-livesync"
   | "verify-final";
 
 const firstArg = process.argv[2];
@@ -208,6 +212,23 @@ try {
 
   if (command === "preflight-host") {
     const report = await verifyHostPreflight(hostPreflightOptionsFromArgs(args));
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "verify-permissions") {
+    const flags = parseFlags(args);
+    const mode = requiredStringFlag(flags, "mode");
+    if (mode !== "pre" && mode !== "post") throw new Error(`--mode must be "pre" or "post", got: ${mode}`);
+    const report = await verifyPermissionsState({ mode });
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "verify-livesync") {
+    const report = await verifyLiveSyncAndDashboard({ ...optionsFromArgs(args), startDashboard: !hasFlag(args, "--no-dashboard"), dashboardTimeoutMs: 60_000 });
     persistReport(args, report);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     process.exit(report.status === "pass" ? 0 : 1);
@@ -870,6 +891,8 @@ Usage:
   bun run scripts/fresh-install-rehearsal.ts verify-imports-local --x-archive <zip> --youtube-export <zip> [--root <isolated-root>] [--report <path>]
   bun run scripts/fresh-install-rehearsal.ts foreground-sync [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts background-sync [--wait-background-ms <ms>] [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts verify-permissions --mode pre|post [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts verify-livesync [--report <path>] [--append] [--no-dashboard]
   bun run scripts/fresh-install-rehearsal.ts verify-final [--report <path>] [--append] [--no-dashboard]
   bun run scripts/fresh-install-rehearsal.ts complete-report --report <path>
 
@@ -881,6 +904,8 @@ Common flags:
   --profile <name>    Browser profile used by browser-backed plugins.
   --report <path>     Write this phase report.
   --append            Append this phase to an aggregate report instead of replacing it.
+  --mode <pre|post>   Permissions gate state under test: pre (release installed, no grants)
+                      or post (clone of the post-permission snapshot).
   --install-command   Published user install command. Defaults to Homebrew tap install.
   --install-source    Human-readable public artifact source. Defaults to install command.
   --release-id        Release tag, commit, or artifact identifier recorded in the final report.
