@@ -10,7 +10,7 @@ This file captures operational lessons from the strict Nutshell fresh-install re
 - Test user: `nutshelltest`
 - Test user password and keychain password: `nutshelltest`
 - Host input folder: `~/Documents/NutshellRehearsalShare`
-- Public product under test for the next strict attempt: `v0.1.17`
+- Public product under test for the next strict attempt: `v0.1.18`
 - Do not trust a VM name that says "Clean Baseline". Verify clean state from inside the VM before claiming clean evidence.
 
 ## Hard Rules
@@ -35,6 +35,15 @@ Use Tart when VirtualBuddy GUI control is unreliable.
 - Do not make the user repeat Google/X login for every clean VM. After the run proves signed-out behavior, use `docs/rehearsal-browser-auth-seeds.md` and the Tart auth seed scripts to restore the private Chrome profile plus login keychain, then record `browser-auth-seed-restore` before authenticated checks.
 - If `nutshell doctor`, `nutshell health`, or `nutshell sync` reads protected/browser state from a Tart exec or terminal-owned process instead of `Nutshell.app`, freeze the attempt. The public CLI is expected to hand these protected commands to the installed app wrapper on macOS.
 - macOS launchctl may report the app-owned agent through ServiceManagement as `program identifier = Contents/Library/LaunchServices/NutshellAgent` plus `parent bundle identifier = com.winterfell.nutshell`, not as a full `Nutshell.app/...` path. That is valid app-owned evidence; raw CLI/Bun/Homebrew Cellar targets are not.
+
+## Tart UI Control Lessons
+
+- Host `cliclick` is the reliable fallback for Tart UI when Computer Use or guest AppleScript cannot bind to the guest session.
+- `screencapture` images are Retina pixels, while `cliclick` uses screen points. Divide screenshot coordinates by 2 before clicking.
+- Before clicking a permission dialog, activate Tart and capture the screen: `osascript -e 'tell application "Tart" to activate'` then `screencapture -x /tmp/nutshell-tart-screen.png`.
+- Use ImageMagick crops or pixel inspection to identify the actual button/control, then click once. Do not keep guessing coordinates.
+- The Tart guest-agent/System Events prompt is a VM-control permission, not Nutshell product evidence. The user has approved it for rehearsal operations, but guest AppleScript can still fail with assistive-access errors. If that happens, dismiss the prompt and use host `cliclick` plus screenshots.
+- For the Full Disk Access file picker, the path-entry sequence has worked: focus Tart, press `cmd+shift+g`, type `/Users/admin/Applications/Nutshell.app`, press return, select `Nutshell`, and click Open.
 
 ## VirtualBuddy Gates
 
@@ -107,6 +116,7 @@ Use this sequence before running product checks:
 - Attempt `nutshell-strict-attempt-v0.1.14-20260609e` failed after user-completed Google/X login because Chrome Safe Storage keychain reads timed out from the product browser-auth path. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.14-tart-run-20260609e.failed-frozen.json` as a failed `0.1.14` rehearsal. The fix is not to patch that VM; publish a new artifact and start a new clean clone.
 - Attempt `nutshell-strict-attempt-v0.1.15-20260609a` failed at `published-install`: Homebrew installed formula `0.1.15`, but the installed command printed `nutshell 0.1.14` because `PRODUCT_VERSION` was still hardcoded. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.15-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Release certification now checks source, compiled, and package-installed CLI versions against `package.json`.
 - Attempt `nutshell-strict-attempt-v0.1.16-20260609a` failed at `authenticated-browser-state`: Google and X were visibly signed in, but both browser cookie probes and doctors timed out reading Chrome Safe Storage through the macOS keychain. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.16-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Private auth seed captured at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`.
+- Attempt `nutshell-strict-attempt-v0.1.17-20260610a` failed at `setup-flow`: clean baseline, public Homebrew install, installed version/app visibility, pre-permission state, and signed-out YouTube/X behavior passed, but the CLI setup's Full Disk Access handoff timed out before the user/agent finished granting FDA. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`. The fix is a longer permission handoff timeout in `v0.1.18`; do not reuse this VM as pass evidence.
 
 ## Attention Triggers
 
@@ -122,6 +132,12 @@ Stop and get the user's attention for:
 Use chat first. If the user asked to be interrupted aggressively, also send a macOS notification and email.
 
 ## Current Strict Attempt State
+
+- The next strict attempt must use public `v0.1.18` after the setup permission handoff timeout fix is published.
+- Fresh Tart attempt `nutshell-strict-attempt-v0.1.17-20260610a` is frozen failed. It passed clean state, public install, installed product checks, pre-permission state, and signed-out YouTube/X auth behavior, then failed at `setup-flow` because the FDA handoff timed out. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`.
+- Reusable auth-present seed is available at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`. Use it only after the same run proves signed-out behavior, then record `browser-auth-seed-restore`.
+
+## Historical VirtualBuddy State
 
 - Official Google/YouTube export was found in Downloads and copied to `~/Documents/NutshellRehearsalShare/archives/google-youtube-export.zip`.
 - Strict host preflight passed and wrote `dist/rehearsal/fresh-install-report-strict-preflight-20260609.json`.

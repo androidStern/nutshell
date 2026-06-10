@@ -34,7 +34,10 @@ export interface SetupRuntimeOptions {
   host?: HostCapabilities;
   secretStore?: FileSecretStore;
   setupPluginTimeoutMs?: number;
+  permissionHandoffTimeoutMs?: number;
 }
+
+export const DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS = 60 * 60_000;
 
 interface PendingImport {
   source: SourceId;
@@ -54,6 +57,7 @@ export class SetupRuntime {
   readonly logger: JsonlLogger;
   readonly secretStore: FileSecretStore;
   readonly setupPluginTimeoutMs: number;
+  readonly permissionHandoffTimeoutMs: number;
 
   constructor(options: SetupRuntimeOptions = {}) {
     const configPath = options.configPath ?? resolveConfigPath(options.root);
@@ -65,6 +69,7 @@ export class SetupRuntime {
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
     this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
+    this.permissionHandoffTimeoutMs = options.permissionHandoffTimeoutMs ?? permissionHandoffTimeoutMs();
   }
 
   async run(request: SetupRequest): Promise<SetupReport> {
@@ -390,9 +395,16 @@ export class SetupRuntime {
       status = await inspectNutshellApp(this.config, appPath);
       return { status, setup };
     }
-    status = await waitForFullDiskAccess(this.config, appPath, 15 * 60_000);
+    status = await waitForFullDiskAccess(this.config, appPath, this.permissionHandoffTimeoutMs);
     return { status, setup };
   }
+}
+
+export function permissionHandoffTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+  const value = env.NUTSHELL_SETUP_PERMISSION_TIMEOUT_MS;
+  if (!value) return DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS;
 }
 
 async function waitForFullDiskAccess(config: TraceConfig, appPath: string, timeoutMs: number): Promise<Awaited<ReturnType<typeof inspectNutshellApp>>> {

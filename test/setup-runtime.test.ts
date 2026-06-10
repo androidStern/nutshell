@@ -12,11 +12,18 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 import { YouTubePlugin } from "../src/plugins/builtin/youtube/plugin";
 import type { TracePlugin } from "../src/plugins/interface";
 import { PluginRegistry } from "../src/plugins/registry";
-import { SetupRuntime } from "../src/setup/setup-runtime";
+import { DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS, SetupRuntime, permissionHandoffTimeoutMs } from "../src/setup/setup-runtime";
 import type { HostCapabilities, HostRunResult, PluginSetupContext } from "../src/setup/types";
 import { pluginSetupStatus } from "../src/setup/config-draft";
 import { FakeSetupUI } from "../src/testing/fake-setup-ui";
 import { openStore } from "../src/store/sqlite-store";
+
+test("setup permission handoff timeout defaults to a real user window and can be overridden", () => {
+  expect(DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS).toBe(60 * 60_000);
+  expect(permissionHandoffTimeoutMs({})).toBe(DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS);
+  expect(permissionHandoffTimeoutMs({ NUTSHELL_SETUP_PERMISSION_TIMEOUT_MS: "1234" })).toBe(1234);
+  expect(permissionHandoffTimeoutMs({ NUTSHELL_SETUP_PERMISSION_TIMEOUT_MS: "nope" })).toBe(DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS);
+});
 
 test("setup marks selected plugins ready without source-specific core steps", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-"));
