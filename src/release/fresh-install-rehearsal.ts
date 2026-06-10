@@ -142,7 +142,7 @@ const REQUIRED_FULL_REHEARSAL_PHASES = [
   "pre-permission-app-state",
   "unauthenticated-browser-state",
   "setup-flow",
-  "browser-login-handoff",
+  "auth-present-browser-setup",
   "authenticated-browser-state",
   "stage-podcast-seed",
   "provider-archive-imports",
@@ -152,6 +152,7 @@ const REQUIRED_FULL_REHEARSAL_PHASES = [
   "final-release-state",
   "complete",
 ] as const;
+const AUTH_PRESENT_BROWSER_SETUP_PHASES = ["browser-login-handoff", "browser-auth-seed-restore"] as const;
 
 const REQUIRED_FINAL_CHECK_NAMES = [
   "final health command returns JSON",
@@ -262,6 +263,12 @@ const REQUIRED_STAGE_PODCAST_SEED_CHECK_NAMES = [
 const REQUIRED_MANUAL_HANDOFF_CHECK_NAMES = [
   "browser-login-handoff",
   "apple-notes-handoff",
+] as const;
+const REQUIRED_AUTH_SEED_RESTORE_CHECK_NAMES = [
+  "browser auth seed restore declared",
+  "browser auth seed manifest exists",
+  "Chrome profile exists after auth seed restore",
+  "login keychain exists after auth seed restore",
 ] as const;
 
 interface RecordStats {
@@ -485,6 +492,7 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
 
   const phaseNames = runs.map((run) => run.phase);
   for (const phase of REQUIRED_FULL_REHEARSAL_PHASES) {
+    if (phase === "auth-present-browser-setup") continue;
     const matches = runs.filter((run) => run.phase === phase);
     const passing = matches.filter((run) => run.status === "pass");
     checks.push(
@@ -498,6 +506,7 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
           }),
     );
   }
+  checks.push(authPresentBrowserSetupPhaseCheck(runs));
   checks.push(phaseOrderCheck(runs));
 
   const failedRuns = runs.filter((run) => run.status !== "pass");
@@ -527,7 +536,7 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
   checks.push(...requiredChecksPassed(authenticated, REQUIRED_AUTHENTICATED_CHECK_NAMES));
   const podcastSeed = runs.find((run) => run.phase === "stage-podcast-seed");
   checks.push(...requiredChecksPassed(podcastSeed, REQUIRED_STAGE_PODCAST_SEED_CHECK_NAMES));
-  checks.push(...requiredChecksPassed(runs.find((run) => run.phase === "browser-login-handoff"), [REQUIRED_MANUAL_HANDOFF_CHECK_NAMES[0]]));
+  checks.push(...requiredAuthPresentBrowserSetupChecksPassed(runs));
   checks.push(...requiredChecksPassed(runs.find((run) => run.phase === "apple-notes-handoff"), [REQUIRED_MANUAL_HANDOFF_CHECK_NAMES[1]]));
   const imports = runs.find((run) => run.phase === "provider-archive-imports");
   checks.push(...requiredChecksPassed(imports, REQUIRED_PROVIDER_IMPORT_CHECK_NAMES));
@@ -541,6 +550,7 @@ export function auditRehearsalReport(input: unknown, path = ""): RehearsalReport
     path,
     phaseCount: runs.length,
     requiredPhases: [...REQUIRED_FULL_REHEARSAL_PHASES],
+    authPresentBrowserSetupPhases: [...AUTH_PRESENT_BROWSER_SETUP_PHASES],
   });
 }
 
@@ -564,6 +574,19 @@ function requiredReleaseEvidencePassed(runs: RehearsalReport[]): RehearsalCheck[
     evidenceNestedStringCheck(final, "final report records the dashboard URL", ["dashboard", "url"]),
     evidenceObjectHasKeyCheck(final, "final report records source counts", "recordCounts"),
   ];
+}
+
+function authPresentBrowserSetupPhaseCheck(runs: RehearsalReport[]): RehearsalCheck {
+  const matches = runs.filter((run) => isAuthPresentBrowserSetupPhase(run.phase));
+  const passing = matches.filter((run) => run.status === "pass");
+  return passing.length === 1 && matches.length === 1
+    ? pass("required auth-present browser setup phase passed", { phase: passing[0]!.phase })
+    : fail("required auth-present browser setup phase passed", {
+        acceptedPhases: [...AUTH_PRESENT_BROWSER_SETUP_PHASES],
+        matches: matches.map((run) => `${run.status}:${run.phase}`),
+        passing: passing.map((run) => run.phase),
+        observedPhases: runs.map((run) => run.phase),
+      });
 }
 
 function releaseContractChecks(runs: RehearsalReport[]): RehearsalCheck[] {
@@ -1117,6 +1140,24 @@ function requiredChecksPassed(report: RehearsalReport | undefined, names: readon
   });
 }
 
+function requiredAuthPresentBrowserSetupChecksPassed(runs: RehearsalReport[]): RehearsalCheck[] {
+  const setup = runs.find((run) => isAuthPresentBrowserSetupPhase(run.phase));
+  if (!setup) {
+    return [
+      fail("required check passed: auth-present browser setup", {
+        reason: "phase_missing",
+        acceptedPhases: [...AUTH_PRESENT_BROWSER_SETUP_PHASES],
+      }),
+    ];
+  }
+  if (setup.phase === "browser-auth-seed-restore") return requiredChecksPassed(setup, REQUIRED_AUTH_SEED_RESTORE_CHECK_NAMES);
+  return requiredChecksPassed(setup, [REQUIRED_MANUAL_HANDOFF_CHECK_NAMES[0]]);
+}
+
+function isAuthPresentBrowserSetupPhase(phase: string): phase is (typeof AUTH_PRESENT_BROWSER_SETUP_PHASES)[number] {
+  return AUTH_PRESENT_BROWSER_SETUP_PHASES.includes(phase as (typeof AUTH_PRESENT_BROWSER_SETUP_PHASES)[number]);
+}
+
 function requiredCheckPrefixesPassed(report: RehearsalReport | undefined, prefixes: readonly string[]): RehearsalCheck[] {
   return prefixes.map((prefix) => {
     if (!report) return fail(`required check prefix passed: ${prefix}`, { reason: "phase_missing" });
@@ -1134,15 +1175,17 @@ function requiredCheckPrefixesPassed(report: RehearsalReport | undefined, prefix
 }
 
 function phaseOrderCheck(runs: RehearsalReport[]): RehearsalCheck {
-  const phaseIndexes = REQUIRED_FULL_REHEARSAL_PHASES.map((phase) => runs.findIndex((run) => run.phase === phase));
-  const missing = REQUIRED_FULL_REHEARSAL_PHASES.filter((_, index) => phaseIndexes[index] === -1);
+  const authPhase = runs.find((run) => isAuthPresentBrowserSetupPhase(run.phase))?.phase ?? "auth-present-browser-setup";
+  const expectedPhases = REQUIRED_FULL_REHEARSAL_PHASES.map((phase) => (phase === "auth-present-browser-setup" ? authPhase : phase));
+  const phaseIndexes = expectedPhases.map((phase) => runs.findIndex((run) => run.phase === phase));
+  const missing = expectedPhases.filter((_, index) => phaseIndexes[index] === -1);
   const ordered = missing.length === 0 && phaseIndexes.every((index, position) => position === 0 || index > phaseIndexes[position - 1]!);
   return ordered
-    ? pass("required phases appear in release-flow order", { phases: [...REQUIRED_FULL_REHEARSAL_PHASES] })
+    ? pass("required phases appear in release-flow order", { phases: expectedPhases })
     : fail("required phases appear in release-flow order", {
         missing: [...missing],
         observedPhases: runs.map((run) => run.phase),
-        expectedPhases: [...REQUIRED_FULL_REHEARSAL_PHASES],
+        expectedPhases,
       });
 }
 
@@ -1309,6 +1352,8 @@ function expectedContractForPhase(phase: string): Omit<RehearsalContract, "obser
       return { userStory: "Signed-out browser-backed sources fail explicitly as missing auth.", expectedState: "needs_auth", source: "all" };
     case "browser-login-handoff":
       return { userStory: "User signs into Google and X in the VM browser profile.", expectedState: "handoff", source: "all" };
+    case "browser-auth-seed-restore":
+      return { userStory: "A declared private browser auth seed establishes Google and X signed-in state without repeated user login.", expectedState: "handoff", source: "all" };
     case "authenticated-browser-state":
       return { userStory: "Signed-in browser-backed sources are usable without keychain or Safe Storage failures.", expectedState: "ready_empty", source: "all" };
     case "stage-podcast-seed":

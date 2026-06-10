@@ -1,8 +1,8 @@
 # Rehearsal Browser Auth Seeds
 
-Browser auth seeds exist to avoid repeatedly asking the user to complete Google and X login while debugging downstream fresh-install phases. They are private test inputs, like provider exports and Podcasts snapshots.
+Browser auth seeds exist to avoid repeatedly asking the user to complete Google and X login while testing downstream fresh-install phases. They are private test inputs, like provider exports and Podcasts snapshots.
 
-They do not count as clean release-pass evidence. A final release rehearsal still has to start with no Google or X cookies, prove signed-out behavior, then create authenticated browser state through the explicit login handoff.
+They can establish the auth-present browser state only after the same run has proven the clean signed-out state. They do not excuse product failures: if doctors or sync cannot use the restored cookies/keychain through the installed product, the run is blocked.
 
 ## What Must Be Saved
 
@@ -44,7 +44,7 @@ The script quits Chrome, writes `chrome-profile.tgz`, copies `login.keychain-db`
 
 ## Restore
 
-Use restored auth only for downstream debugging after the release flow has already proven the signed-out state somewhere else. Do not use it to satisfy `browser-login-handoff` in the release-pass report.
+Use restored auth only after the release flow has already proven the signed-out state in the same clean VM attempt. Record it as `browser-auth-seed-restore`, not as `browser-login-handoff`.
 
 Start the target Tart VM with the same host share, then run:
 
@@ -58,7 +58,16 @@ If the guest password is not the Tart default `admin`, set:
 NUTSHELL_VM_PASSWORD=<guest-password> scripts/tart-browser-auth-restore.sh <vm-name> <snapshot-name>
 ```
 
-After restore, reboot or stop/start the VM, unlock the desktop, and verify auth through the product surface. If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid evidence. Fix the product or the restore path before continuing.
+After restore, reboot or stop/start the VM, unlock the desktop, record the restore phase, and verify auth through the product surface:
+
+```bash
+bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore \
+  --browser-auth-seed <snapshot-name> \
+  --report <fresh-install-report.json> \
+  --append
+```
+
+If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Fix the product or the restore path before continuing.
 
 ## Current Product Bug
 

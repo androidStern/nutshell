@@ -464,6 +464,40 @@ test("aggregate report audit fails when provider import proof is incomplete", ()
   expect(report.checks.find((check) => check.name === "required check passed: youtube official provider archive imports")?.status).toBe("fail");
 });
 
+test("aggregate report audit accepts declared auth seed restore instead of repeated browser login", () => {
+  const runs = requiredAggregateReports();
+  const loginIndex = runs.findIndex((run) => run.phase === "browser-login-handoff");
+  if (loginIndex === -1) throw new Error("test fixture missing browser-login-handoff");
+  runs.splice(loginIndex, 1, fakeReport("browser-auth-seed-restore", [
+    "browser auth seed restore declared",
+    "browser auth seed manifest exists",
+    "Chrome profile exists after auth seed restore",
+    "login keychain exists after auth seed restore",
+  ]));
+
+  const report = auditRehearsalReport({ runs });
+
+  expect(report.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "required auth-present browser setup phase passed")?.status).toBe("pass");
+});
+
+test("aggregate report audit rejects both manual browser login and auth seed restore in one final report", () => {
+  const runs = requiredAggregateReports();
+  const loginIndex = runs.findIndex((run) => run.phase === "browser-login-handoff");
+  if (loginIndex === -1) throw new Error("test fixture missing browser-login-handoff");
+  runs.splice(loginIndex + 1, 0, fakeReport("browser-auth-seed-restore", [
+    "browser auth seed restore declared",
+    "browser auth seed manifest exists",
+    "Chrome profile exists after auth seed restore",
+    "login keychain exists after auth seed restore",
+  ]));
+
+  const report = auditRehearsalReport({ runs });
+
+  expect(report.status).toBe("fail");
+  expect(report.checks.find((check) => check.name === "required auth-present browser setup phase passed")?.status).toBe("fail");
+});
+
 test("aggregate report audit rejects browser login before setup", () => {
   const runs = requiredAggregateReports();
   const setupIndex = runs.findIndex((run) => run.phase === "setup-flow");

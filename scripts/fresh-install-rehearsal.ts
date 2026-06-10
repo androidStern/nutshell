@@ -29,6 +29,7 @@ type Command =
   | "help"
   | "audit-report"
   | "preflight-host"
+  | "record-auth-seed-restore"
   | "run"
   | "snapshot-podcasts"
   | "verify-clean"
@@ -67,6 +68,18 @@ try {
     const reportPath = requiredStringFlag(flags, "report");
     const report = auditRehearsalReportFile(reportPath);
     if (flags.append) appendReport(resolve(reportPath), report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "record-auth-seed-restore") {
+    const flags = parseFlags(args);
+    const report = recordBrowserAuthSeedRestore({
+      seed: requiredStringFlag(flags, "browser-auth-seed"),
+      seedRoot: stringFlag(flags, "auth-seed-root") ?? "/Volumes/My Shared Files/share/auth-profiles",
+      home: stringFlag(flags, "home") ?? defaultRehearsalPaths().home,
+    });
+    persistReport(args, report);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     process.exit(report.status === "pass" ? 0 : 1);
   }
@@ -307,6 +320,45 @@ async function stagePodcastSeed(seed: string | null): Promise<RehearsalReport> {
     detail: { source, destination, bytes: statSync(destination).size, manifest: podcastSnapshotManifestPath(destination) },
   });
   return aggregateReport("stage-podcast-seed", checks, { source, destination, bytes: statSync(destination).size });
+}
+
+function recordBrowserAuthSeedRestore(input: { seed: string; seedRoot: string; home: string }): RehearsalReport {
+  const seedPath = input.seed.startsWith("/") ? input.seed : join(input.seedRoot, input.seed);
+  const manifestPath = join(seedPath, "manifest.json");
+  const profileArchive = join(seedPath, "chrome-profile.tgz");
+  const seedKeychain = join(seedPath, "login.keychain-db");
+  const restoredProfile = join(input.home, "Library", "Application Support", "Google", "Chrome");
+  const restoredKeychain = join(input.home, "Library", "Keychains", "login.keychain-db");
+  const checks: RehearsalReport["checks"] = [
+    input.seed.trim()
+      ? { name: "browser auth seed restore declared", status: "pass", detail: { seed: input.seed, seedPath } }
+      : { name: "browser auth seed restore declared", status: "fail", detail: { seed: input.seed } },
+    existsSync(manifestPath)
+      ? { name: "browser auth seed manifest exists", status: "pass", detail: { manifestPath, bytes: statSync(manifestPath).size } }
+      : { name: "browser auth seed manifest exists", status: "fail", detail: { manifestPath } },
+    existsSync(profileArchive)
+      ? { name: "browser auth seed Chrome archive exists", status: "pass", detail: { profileArchive, bytes: statSync(profileArchive).size } }
+      : { name: "browser auth seed Chrome archive exists", status: "fail", detail: { profileArchive } },
+    existsSync(seedKeychain)
+      ? { name: "browser auth seed login keychain exists", status: "pass", detail: { seedKeychain, bytes: statSync(seedKeychain).size } }
+      : { name: "browser auth seed login keychain exists", status: "fail", detail: { seedKeychain } },
+    existsSync(restoredProfile)
+      ? { name: "Chrome profile exists after auth seed restore", status: "pass", detail: { restoredProfile } }
+      : { name: "Chrome profile exists after auth seed restore", status: "fail", detail: { restoredProfile } },
+    existsSync(restoredKeychain)
+      ? { name: "login keychain exists after auth seed restore", status: "pass", detail: { restoredKeychain, bytes: statSync(restoredKeychain).size } }
+      : { name: "login keychain exists after auth seed restore", status: "fail", detail: { restoredKeychain } },
+  ];
+  return aggregateReport("browser-auth-seed-restore", checks, {
+    seed: input.seed,
+    seedPath,
+    manifestPath,
+    profileArchive,
+    seedKeychain,
+    restoredProfile,
+    restoredKeychain,
+    fixture: "browser_auth_seed",
+  });
 }
 
 async function runSetupFlow(): Promise<RehearsalReport> {
@@ -684,6 +736,7 @@ Usage:
   bun run scripts/fresh-install-rehearsal.ts verify-clean --reset-privacy [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-installed [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-unauthenticated [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore --browser-auth-seed <name> [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-authenticated [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-final [--report <path>] [--append] [--no-dashboard]
 
@@ -702,6 +755,8 @@ Common flags:
   --x-archive         Official X archive zip for historical import proof.
   --youtube-export    Official Google/YouTube export for historical import proof.
   --podcasts-seed     SQLite-safe Apple Podcasts seed snapshot.
+  --browser-auth-seed Declared private Chrome/keychain auth seed restored before authenticated checks.
+  --auth-seed-root    Auth seed directory. Defaults to Tart shared folder auth-profiles path.
   --min-free-gb       Required free disk for host preflight. Defaults to 50.
   --disk-path         Disk path used by host preflight. Defaults to current HOME.
   --allow-test-account-fallback

@@ -11,7 +11,7 @@ The rehearsal has two environments:
 
 Private seed files must stay outside git. Do not commit Apple Podcasts databases, X archives, Google exports, browser profiles, or rehearsal reports with private account data.
 
-For repeated downstream debugging, private browser auth seeds may be captured and restored as described in `docs/rehearsal-browser-auth-seeds.md`. Those seeds reduce repeated Google/X login handoffs, but they are not clean release-pass evidence. A final pass still must prove the signed-out state and then create the signed-in state through the explicit browser-login handoff.
+For repeated downstream validation, private browser auth seeds may be captured and restored as described in `docs/rehearsal-browser-auth-seeds.md`. A final pass still must prove the signed-out state first. After that proof, the signed-in state may come from either the explicit browser-login handoff or a declared `browser-auth-seed-restore` phase.
 
 ## Product Contract
 
@@ -32,7 +32,7 @@ Required user stories:
 
 1. A fresh user installs the published app with no old Nutshell app, config, data, agents, permissions, Google cookies, or X cookies.
 2. Before login, YouTube and X fail explicitly as `needs_auth`, not as a generic critical result, empty success, or keychain mystery.
-3. After the user signs into Google and X in the VM Chrome profile, YouTube and X doctors pass without Chrome Safe Storage or Keychain timeout warnings.
+3. After Google and X auth is present in the VM Chrome profile, either through user login handoff or a declared browser auth seed restore, YouTube and X doctors pass without Chrome Safe Storage or Keychain timeout warnings.
 4. If browser cookies exist but the doctor still fails, classify the result as `blocked_bug`, stop the release claim, fix the product, publish a new artifact, and rerun from clean.
 5. Before permissions, Full Disk Access and Notes automation failures are `needs_permission`; after permissions, `Nutshell.app` owns the permission and sync succeeds.
 6. Official X archive import and official Google/YouTube export import both run through public import commands and produce canonical records.
