@@ -1,18 +1,25 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { hostBuildArch, machoArchName, resolveBuildArch } from "./lib/build-arch.ts";
 
 const repo = resolve(import.meta.dir, "..");
 const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
 const appName = "Nutshell.app";
 const appBundleId = "com.winterfell.nutshell";
-const buildRoot = join(tmpdir(), "nutshell-macos-build");
+const arch = resolveBuildArch(process.argv.slice(2), process.env);
+const buildRoot = join(tmpdir(), `nutshell-macos-build-${arch}`);
 const appRoot = join(buildRoot, appName);
-const distAppRoot = join(repo, "dist", "macos", appName);
+const distAppRoot = join(repo, "dist", "macos", `darwin-${arch}`, appName);
 const installPath = "/Applications/Nutshell.app";
 const coreEntitlements = join(repo, "macos", "nutshell-core.entitlements.plist");
+const corePath = join(repo, "dist", "compile", `darwin-${arch}`, "nutshell");
 const install = process.argv.includes("--install");
-const swiftTarget = process.env.NUTSHELL_SWIFT_TARGET ?? "arm64-apple-macosx14.0";
+const swiftTarget = process.env.NUTSHELL_SWIFT_TARGET ?? `${machoArchName(arch)}-apple-macosx14.0`;
+
+if (install && arch !== hostBuildArch()) {
+  throw new Error(`refusing to install a ${arch} app on a ${hostBuildArch()} host; drop --install or build the host arch`);
+}
 
 await ensureCore();
 buildBundle();
@@ -25,13 +32,13 @@ if (install) {
   process.stdout.write(`${installPath}\n`);
 } else {
   rmSync(distAppRoot, { recursive: true, force: true });
-  mkdirSync(join(repo, "dist", "macos"), { recursive: true });
+  mkdirSync(dirname(distAppRoot), { recursive: true });
   await copyBundle(appRoot, distAppRoot);
   process.stdout.write(`${distAppRoot}\n`);
 }
 
 async function ensureCore(): Promise<void> {
-  await run(["bun", "run", "build:compile"]);
+  await run(["bun", "run", join(repo, "scripts", "build-compile.ts"), "--arch", arch]);
 }
 
 function buildBundle(): void {
@@ -48,7 +55,7 @@ function buildBundle(): void {
     join(repo, "macos", "com.winterfell.nutshell.agent.plist"),
     join(appRoot, "Contents", "Library", "LaunchAgents", "com.winterfell.nutshell.agent.plist"),
   );
-  cpSync(join(repo, "bin", "nutshell"), join(appRoot, "Contents", "Resources", "nutshell-core"));
+  cpSync(corePath, join(appRoot, "Contents", "Resources", "nutshell-core"));
 }
 
 function writeVersionedInfoPlist(destination: string): void {
@@ -88,7 +95,18 @@ async function compileSwift(): Promise<void> {
   await run(["chmod", "0755", join(appRoot, "Contents", "MacOS", "Nutshell")]);
   await run(["chmod", "0755", join(appRoot, "Contents", "Library", "LaunchServices", "NutshellAgent")]);
   await run(["chmod", "0755", join(appRoot, "Contents", "Resources", "nutshell-core")]);
+  await verifyArch(join(appRoot, "Contents", "MacOS", "Nutshell"));
+  await verifyArch(join(appRoot, "Contents", "Library", "LaunchServices", "NutshellAgent"));
+  await verifyArch(join(appRoot, "Contents", "Resources", "nutshell-core"));
   await stripXattrs(appRoot);
+}
+
+async function verifyArch(path: string): Promise<void> {
+  const result = await runResult(["lipo", "-archs", path]);
+  if (result.code !== 0) throw new Error(`lipo -archs ${path} failed\n${result.stdout}${result.stderr}`);
+  const archs = result.stdout.trim();
+  const expected = machoArchName(arch);
+  if (archs !== expected) throw new Error(`${path} architecture mismatch: lipo reported "${archs}", expected "${expected}"`);
 }
 
 async function signBundle(): Promise<void> {
@@ -161,7 +179,7 @@ async function codesignIdentity(): Promise<string | null> {
     .split("\n")
     .map((line) => line.match(/"([^"]*Developer ID Application:[^"]+)"/)?.[1])
     .filter((item): item is string => Boolean(item));
-  return developerIds.length === 1 ? developerIds[0] : null;
+  return developerIds.length === 1 ? developerIds[0] ?? null : null;
 }
 
 async function run(cmd: string[]): Promise<void> {

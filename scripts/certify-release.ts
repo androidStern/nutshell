@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { hostBuildArch, type BuildArch } from "./lib/build-arch.ts";
 
 type CertStatus = "pass" | "fail";
 
@@ -13,6 +14,7 @@ interface CertStep {
 const repo = resolve(import.meta.dir, "..");
 const tmp = mkdtempSync(join(tmpdir(), "nutshell-certify-"));
 const report: CertStep[] = [];
+const hostAppBundle = join(repo, "dist", "macos", `darwin-${hostBuildArch()}`, "Nutshell.app");
 
 await step("build, tests, macOS app, and tarball", async () => {
   await run(["bun", "run", "typecheck"]);
@@ -59,29 +61,80 @@ await step("removed commands fail", async () => {
   return { checked: commands.length };
 });
 
-await step("release tarball contains CLI and app bundle", async () => {
-  const tarball = releaseTarballPath();
-  const manifestPath = join(tarball.replace(/\.tar\.gz$/, ""), "manifest.json");
-  if (!existsSync(tarball)) throw new Error(`missing tarball: ${tarball}`);
-  await run(["tar", "-xzf", tarball, "-C", join(tmp)]);
-  const extractedRoot = join(tmp, basename(tarball, ".tar.gz"));
-  const manifest = JSON.parse(readFileSync(join(extractedRoot, "manifest.json"), "utf8")) as { files: Array<{ path: string }> };
+await step("release tarballs contain CLI and app bundle for every release arch", async () => {
+  const detail: Record<string, unknown> = {};
+  for (const arch of releaseArches()) {
+    const tarball = releaseTarballPath(arch);
+    if (!existsSync(tarball)) throw new Error(`missing tarball: ${tarball}`);
+    if (!existsSync(`${tarball}.sha256`)) throw new Error(`missing sha256 file: ${tarball}.sha256`);
+    await run(["tar", "-xzf", tarball, "-C", join(tmp)]);
+    const extractedRoot = join(tmp, basename(tarball, ".tar.gz"));
+    const manifest = JSON.parse(readFileSync(join(extractedRoot, "manifest.json"), "utf8")) as { arch: string; files: Array<{ path: string }> };
+    if (manifest.arch !== arch) throw new Error(`${tarball} manifest arch mismatch: ${manifest.arch} vs ${arch}`);
     const paths = new Set(manifest.files.map((file) => file.path));
-    if (!paths.has("bin/nutshell")) throw new Error("tarball manifest is missing bin/nutshell");
+    if (!paths.has("bin/nutshell")) throw new Error(`${arch} tarball manifest is missing bin/nutshell`);
     if (process.platform === "darwin" && ![...paths].some((path) => path.startsWith("Nutshell.app/"))) {
-      throw new Error("darwin tarball manifest is missing Nutshell.app");
+      throw new Error(`darwin ${arch} tarball manifest is missing Nutshell.app`);
     }
     if (process.platform === "darwin" && !paths.has("Nutshell.app/Contents/Resources/Nutshell.icns")) {
-      throw new Error("darwin tarball manifest is missing Nutshell.app icon");
+      throw new Error(`darwin ${arch} tarball manifest is missing Nutshell.app icon`);
     }
     if (process.platform === "darwin" && !paths.has("Nutshell.app/Contents/Resources/nutshell-ascii-animation.mp4")) {
-      throw new Error("darwin tarball manifest is missing Nutshell.app setup background video");
+      throw new Error(`darwin ${arch} tarball manifest is missing Nutshell.app setup background video`);
     }
-    return { tarball, manifestPath, files: paths.size };
-  });
+    detail[arch] = { tarball, files: paths.size };
+  }
+  return detail;
+});
+
+await step("homebrew formula selects per-arch tarballs with matching SHAs", async () => {
+  if (process.platform !== "darwin") return { skipped: "not darwin" };
+  const formulaPath = join(repo, "dist", "release", "homebrew", "nutshell.rb");
+  const formula = readFileSync(formulaPath, "utf8");
+  if (!formula.includes("depends_on macos: :sonoma")) {
+    throw new Error("formula is missing `depends_on macos: :sonoma` (the Swift app targets macosx14.0)");
+  }
+  const blocks: Record<string, { url: string; sha256: string }> = {};
+  for (const [arch, blockName] of [["arm64", "on_arm"], ["x64", "on_intel"]] as const) {
+    const match = formula.match(new RegExp(`${blockName} do\\n\\s+url "([^"]+)"\\n\\s+sha256 "([0-9a-f]{64})"\\n\\s+end`));
+    if (!match || !match[1] || !match[2]) throw new Error(`formula is missing a ${blockName} block with url and sha256`);
+    const [, url, sha256] = match;
+    const tarball = releaseTarballPath(arch);
+    if (basename(url) !== basename(tarball)) {
+      throw new Error(`${blockName} url points at ${basename(url)}, expected ${basename(tarball)}`);
+    }
+    const recordedSha = readFileSync(`${tarball}.sha256`, "utf8").trim().split(/\s+/)[0];
+    if (sha256 !== recordedSha) throw new Error(`${blockName} sha256 ${sha256} does not match ${tarball}.sha256 (${recordedSha})`);
+    blocks[blockName] = { url, sha256 };
+  }
+  return { formulaPath, ...blocks };
+});
+
+await step("x64 artifacts run under Rosetta", async () => {
+  if (process.platform !== "darwin") return { skipped: "not darwin" };
+  const rosetta = await runResult(["arch", "-x86_64", "/usr/bin/true"]);
+  if (rosetta.code !== 0) return { skipped: "Rosetta is not installed (`arch -x86_64 /usr/bin/true` failed); x64 smoke not run on this host" };
+  const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
+  const tarball = releaseTarballPath("x64");
+  const smokeRoot = join(tmp, "intel-smoke");
+  mkdirSync(smokeRoot, { recursive: true });
+  await run(["tar", "-xzf", tarball, "-C", smokeRoot]);
+  const extractedRoot = join(smokeRoot, basename(tarball, ".tar.gz"));
+  const cli = join(extractedRoot, "bin", "nutshell");
+  const version = (await runText(["arch", "-x86_64", cli, "--version"])).trim();
+  if (version !== `nutshell ${pkg.version}`) throw new Error(`x64 CLI version mismatch under Rosetta: ${version} vs ${pkg.version}`);
+  const help = await runText(["arch", "-x86_64", cli, "help"]);
+  if (!help.includes("nutshell setup")) throw new Error("x64 CLI help under Rosetta is missing nutshell setup");
+  const appExecutable = join(extractedRoot, "Nutshell.app", "Contents", "MacOS", "Nutshell");
+  const appHelp = await runText(["arch", "-x86_64", appExecutable, "help"]);
+  for (const expected of ["register-agent", "enable-sync", "status", "verify"]) {
+    if (!appHelp.includes(expected)) throw new Error(`x64 Nutshell.app help under Rosetta is missing ${expected}`);
+  }
+  return { tarball, version, appExecutable };
+});
 
 await step("app-owned helper surface is present and setup uses it", async () => {
-  const appExecutable = join(repo, "dist", "macos", "Nutshell.app", "Contents", "MacOS", "Nutshell");
+  const appExecutable = join(hostAppBundle, "Contents", "MacOS", "Nutshell");
   if (process.platform === "darwin" && !existsSync(appExecutable)) throw new Error(`missing app executable: ${appExecutable}`);
   if (existsSync(appExecutable)) {
     const help = await runText([appExecutable, "help"]);
@@ -108,8 +161,8 @@ await step("app-owned helper surface is present and setup uses it", async () => 
 await step("macOS app does not link beta-only Swift runtime libraries", async () => {
   if (process.platform !== "darwin") return { skipped: "not darwin" };
   const executables = [
-    join(repo, "dist", "macos", "Nutshell.app", "Contents", "MacOS", "Nutshell"),
-    join(repo, "dist", "macos", "Nutshell.app", "Contents", "Library", "LaunchServices", "NutshellAgent"),
+    join(hostAppBundle, "Contents", "MacOS", "Nutshell"),
+    join(hostAppBundle, "Contents", "Library", "LaunchServices", "NutshellAgent"),
   ];
   for (const executable of executables) {
     const libraries = await runText(["otool", "-L", executable]);
@@ -201,10 +254,14 @@ async function runResult(cmd: string[], env: Record<string, string> = {}): Promi
   return { code, stdout, stderr };
 }
 
-function releaseTarballPath(): string {
+function releaseArches(): BuildArch[] {
+  return process.platform === "darwin" ? ["arm64", "x64"] : [hostBuildArch()];
+}
+
+function releaseTarballPath(arch: BuildArch): string {
   const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
   const platform = process.platform === "darwin" ? "darwin" : process.platform;
-  return join(repo, "dist", "release", `nutshell-${pkg.version}-${platform}-${process.arch}.tar.gz`);
+  return join(repo, "dist", "release", `nutshell-${pkg.version}-${platform}-${arch}.tar.gz`);
 }
 
 function forbiddenUserSurfaceWords(): string[] {

@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseBuildArch, resolveBuildArch } from "../scripts/lib/build-arch.ts";
+import { homebrewFormula } from "../scripts/lib/homebrew-formula.ts";
 
 test("tarball installer copies CLI and app without removed commands", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-install-test-"));
@@ -48,6 +50,7 @@ test("homebrew packaging does not define raw protected-data service", () => {
   const files = [
     join(process.cwd(), "packaging", "homebrew", "nutshell.rb"),
     join(process.cwd(), "scripts", "build-tarball.ts"),
+    join(process.cwd(), "scripts", "lib", "homebrew-formula.ts"),
   ];
   for (const file of files) {
     const text = readFileSync(file, "utf8");
@@ -55,6 +58,45 @@ test("homebrew packaging does not define raw protected-data service", () => {
     expect(text).not.toMatch(/brew\s+services/);
     expect(text).not.toMatch(/nutshell\s+sync/);
   }
+});
+
+test("generated homebrew formula selects per-architecture tarballs", () => {
+  const armUrl = "https://github.com/androidStern/nutshell/releases/download/v9.9.9/nutshell-9.9.9-darwin-arm64.tar.gz";
+  const x64Url = "https://github.com/androidStern/nutshell/releases/download/v9.9.9/nutshell-9.9.9-darwin-x64.tar.gz";
+  const armSha = "a".repeat(64);
+  const x64Sha = "b".repeat(64);
+  const formula = homebrewFormula({
+    version: "9.9.9",
+    homepage: "https://github.com/androidStern/nutshell",
+    arm64: { url: armUrl, sha256: armSha },
+    x64: { url: x64Url, sha256: x64Sha },
+  });
+
+  expect(formula).toContain("class Nutshell < Formula");
+  expect(formula).toContain('desc "Local personal trace ingestion runtime"');
+  expect(formula).toContain('version "9.9.9"');
+  // The Swift app is built with -target <arch>-apple-macosx14.0, so the formula floor is Sonoma.
+  expect(formula).toContain("depends_on macos: :sonoma");
+  expect(formula).toContain(`on_arm do\n    url "${armUrl}"\n    sha256 "${armSha}"\n  end`);
+  expect(formula).toContain(`on_intel do\n    url "${x64Url}"\n    sha256 "${x64Sha}"\n  end`);
+  // No top-level url/sha256 outside the per-arch blocks (two-space indent is formula body level).
+  expect(formula).not.toMatch(/\n {2}url /);
+  expect(formula).not.toMatch(/\n {2}sha256 /);
+  expect(formula).toContain('bin.install "bin/nutshell"');
+  expect(formula).toContain('prefix.install "Nutshell.app" if File.directory?("Nutshell.app")');
+  expect(formula).toContain("def caveats");
+  expect(formula).toContain("nutshell setup");
+  expect(formula).toContain("test do");
+  expect(formula).toContain('system bin/"nutshell", "--version"');
+});
+
+test("build arch resolution prefers flag, then env, then host", () => {
+  expect(resolveBuildArch(["--arch", "x64"], {})).toBe("x64");
+  expect(resolveBuildArch(["--arch=arm64"], { NUTSHELL_BUILD_ARCH: "x64" })).toBe("arm64");
+  expect(resolveBuildArch([], { NUTSHELL_BUILD_ARCH: "x64" })).toBe("x64");
+  expect(resolveBuildArch([], {})).toBe(parseBuildArch(process.arch));
+  expect(() => resolveBuildArch(["--arch", "riscv"], {})).toThrow(/unsupported build arch/);
+  expect(() => resolveBuildArch(["--arch"], {})).toThrow(/--arch requires a value/);
 });
 
 async function run(cmd: string[], env: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {

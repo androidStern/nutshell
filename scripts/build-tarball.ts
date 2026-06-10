@@ -1,60 +1,105 @@
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { archFlag, hostBuildArch, parseBuildArch, type BuildArch } from "./lib/build-arch.ts";
+import { homebrewFormula } from "./lib/homebrew-formula.ts";
 
 const repo = resolve(import.meta.dir, "..");
 const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { version: string };
 const platform = process.platform === "darwin" ? "darwin" : process.platform;
-const arch = process.arch;
-const name = `nutshell-${pkg.version}-${platform}-${arch}`;
 const releaseRoot = join(repo, "dist", "release");
-const stage = join(releaseRoot, name);
-const tarball = join(releaseRoot, `${name}.tar.gz`);
-const binary = join(repo, "bin", "nutshell");
-const appBundle = join(repo, "dist", "macos", "Nutshell.app");
 const releaseHomepage = "https://github.com/androidStern/nutshell";
 const defaultReleaseBaseUrl = `${releaseHomepage}/releases/download`;
 
-await run(["bun", "run", "build:compile"]);
-if (process.platform === "darwin") {
-  await run(["bun", "run", "build:macos-app"]);
+const arches = targetArches();
+const outputs: string[] = [];
+const shaByArch = new Map<BuildArch, string>();
+
+for (const arch of arches) {
+  shaByArch.set(arch, await buildArchTarball(arch));
 }
 
-if (!existsSync(binary)) {
-  throw new Error("bin/nutshell is missing. Run `bun run build:compile` first.");
+const armSha = shaByArch.get("arm64");
+const x64Sha = shaByArch.get("x64");
+if (armSha !== undefined && x64Sha !== undefined) {
+  const formula = homebrewFormula({
+    version: pkg.version,
+    homepage: releaseHomepage,
+    arm64: { url: releaseUrl(pkg.version, tarballName("arm64")), sha256: armSha },
+    x64: { url: releaseUrl(pkg.version, tarballName("x64")), sha256: x64Sha },
+  });
+  mkdirSync(join(releaseRoot, "homebrew"), { recursive: true });
+  const formulaPath = join(releaseRoot, "homebrew", "nutshell.rb");
+  writeFileSync(formulaPath, formula);
+  outputs.push(formulaPath);
+} else {
+  console.warn(`warning: single-arch build (${arches.join(", ")}); skipping Homebrew formula generation, which needs both arm64 and x64 SHAs`);
 }
-if (process.platform === "darwin" && !existsSync(appBundle)) {
-  throw new Error("dist/macos/Nutshell.app is missing. Run `bun run build:macos-app` before `bun run build:tarball`.");
+
+process.stdout.write(`${outputs.join("\n")}\n`);
+
+function targetArches(): BuildArch[] {
+  const requested = archFlag(process.argv.slice(2)) ?? process.env.NUTSHELL_BUILD_ARCH;
+  if (requested !== undefined) {
+    const arch = parseBuildArch(requested);
+    if (platform !== "darwin" && arch !== hostBuildArch()) {
+      throw new Error(`cross-arch builds are only supported on darwin; host is ${hostBuildArch()}`);
+    }
+    return [arch];
+  }
+  if (platform === "darwin") return ["arm64", "x64"];
+  return [hostBuildArch()];
 }
 
-rmSync(stage, { recursive: true, force: true });
-mkdirSync(join(stage, "bin"), { recursive: true });
-cpSync(binary, join(stage, "bin", "nutshell"));
-if (existsSync(appBundle)) {
-  cpSync(appBundle, join(stage, "Nutshell.app"), { recursive: true });
+async function buildArchTarball(arch: BuildArch): Promise<string> {
+  await run(["bun", "run", join(repo, "scripts", "build-compile.ts"), "--arch", arch]);
+  if (platform === "darwin") {
+    await run(["bun", "run", join(repo, "scripts", "build-macos-app.ts"), "--arch", arch]);
+  }
+
+  const binary = join(repo, "dist", "compile", `${platform}-${arch}`, "nutshell");
+  const appBundle = join(repo, "dist", "macos", `darwin-${arch}`, "Nutshell.app");
+  if (!existsSync(binary)) {
+    throw new Error(`${binary} is missing. Run \`bun run scripts/build-compile.ts --arch ${arch}\` first.`);
+  }
+  if (platform === "darwin" && !existsSync(appBundle)) {
+    throw new Error(`${appBundle} is missing. Run \`bun run scripts/build-macos-app.ts --arch ${arch}\` before \`bun run build:tarball\`.`);
+  }
+
+  const name = `nutshell-${pkg.version}-${platform}-${arch}`;
+  const stage = join(releaseRoot, name);
+  const tarball = join(releaseRoot, `${name}.tar.gz`);
+
+  rmSync(stage, { recursive: true, force: true });
+  mkdirSync(join(stage, "bin"), { recursive: true });
+  cpSync(binary, join(stage, "bin", "nutshell"));
+  if (existsSync(appBundle)) {
+    cpSync(appBundle, join(stage, "Nutshell.app"), { recursive: true });
+  }
+  cpSync(join(repo, "packaging", "tarball", "install.sh"), join(stage, "install.sh"));
+  cpSync(join(repo, "packaging", "tarball", "uninstall.sh"), join(stage, "uninstall.sh"));
+  cpSync(join(repo, "packaging", "tarball", "README.md"), join(stage, "README.md"));
+  writeFileSync(join(stage, "VERSION"), `${pkg.version}\n`);
+  writeFileSync(join(stage, "manifest.json"), `${JSON.stringify(manifest(stage, pkg.version, platform, arch), null, 2)}\n`);
+
+  await run(["chmod", "0755", join(stage, "bin", "nutshell"), join(stage, "install.sh"), join(stage, "uninstall.sh")]);
+  rmSync(tarball, { force: true });
+  await run(["tar", "-C", releaseRoot, "-czf", tarball, name]);
+
+  const sha = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+  writeFileSync(`${tarball}.sha256`, `${sha}  ${basename(tarball)}\n`);
+  rmSync(stage, { recursive: true, force: true });
+
+  outputs.push(tarball, `${tarball}.sha256`);
+  return sha;
 }
-cpSync(join(repo, "packaging", "tarball", "install.sh"), join(stage, "install.sh"));
-cpSync(join(repo, "packaging", "tarball", "uninstall.sh"), join(stage, "uninstall.sh"));
-cpSync(join(repo, "packaging", "tarball", "README.md"), join(stage, "README.md"));
-writeFileSync(join(stage, "VERSION"), `${pkg.version}\n`);
-writeFileSync(join(stage, "manifest.json"), `${JSON.stringify(manifest(stage, pkg.version, platform, arch), null, 2)}\n`);
 
-await run(["chmod", "0755", join(stage, "bin", "nutshell"), join(stage, "install.sh"), join(stage, "uninstall.sh")]);
-rmSync(tarball, { force: true });
-await run(["tar", "-C", releaseRoot, "-czf", tarball, name]);
-
-const sha = createHash("sha256").update(readFileSync(tarball)).digest("hex");
-writeFileSync(`${tarball}.sha256`, `${sha}  ${basename(tarball)}\n`);
-
-const formula = homebrewFormula(pkg.version, releaseUrl(pkg.version, basename(tarball)), sha);
-mkdirSync(join(releaseRoot, "homebrew"), { recursive: true });
-writeFileSync(join(releaseRoot, "homebrew", "nutshell.rb"), formula);
-rmSync(stage, { recursive: true, force: true });
-
-process.stdout.write(`${tarball}\n${tarball}.sha256\n${join(releaseRoot, "homebrew", "nutshell.rb")}\n`);
+function tarballName(arch: BuildArch): string {
+  return `nutshell-${pkg.version}-${platform}-${arch}.tar.gz`;
+}
 
 async function run(cmd: string[]): Promise<void> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(cmd, { cwd: repo, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) {
     throw new Error(`${cmd.join(" ")} failed\n${stdout}${stderr}`);
@@ -99,34 +144,4 @@ function fileList(root: string): string[] {
 function releaseUrl(version: string, fileName: string): string {
   const base = process.env.NUTSHELL_RELEASE_BASE_URL || `${defaultReleaseBaseUrl}/v${version}`;
   return `${base.replace(/\/$/, "")}/${fileName}`;
-}
-
-function homebrewFormula(version: string, url: string, sha256: string): string {
-  return `class Nutshell < Formula
-  desc "Local personal trace ingestion runtime"
-  homepage "${releaseHomepage}"
-  url "${url}"
-  version "${version}"
-  sha256 "${sha256}"
-  license "MIT"
-
-  def install
-    bin.install "bin/nutshell"
-    prefix.install "Nutshell.app" if File.directory?("Nutshell.app")
-  end
-
-  def caveats
-    <<~EOS
-      Run \`nutshell setup\` after install. Protected-data sync is owned by Nutshell.app, not a Homebrew service.
-    EOS
-  end
-
-  test do
-    ENV["NUTSHELL_CONFIG"] = testpath/"nutconfig.jsonc"
-    ENV["NUTSHELL_ROOT"] = testpath/"Nutshell"
-    system bin/"nutshell", "--version"
-    assert_match "nutshell setup", shell_output("#{bin}/nutshell help")
-  end
-end
-`;
 }

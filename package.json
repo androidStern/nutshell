@@ -21,6 +21,8 @@
     "build:macos-app": "bun run scripts/build-macos-app.ts",
     "install:macos-app": "bun run scripts/build-macos-app.ts --install",
     "build:tarball": "bun run scripts/build-tarball.ts",
+    "build:tarball:arm64": "bun run scripts/build-tarball.ts --arch arm64",
+    "build:tarball:x64": "bun run scripts/build-tarball.ts --arch x64",
     "certify:release": "bun run scripts/certify-release.ts",
     "test:battle": "bun run scripts/battle-test.ts",
     "rehearse:fresh-install": "bun run scripts/fresh-install-rehearsal.ts",
