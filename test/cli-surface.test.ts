@@ -9,14 +9,21 @@ setDefaultTimeout(15_000);
 test("help exposes only the minimal product CLI", async () => {
   const result = await runCli(["help"]);
   expect(result.exitCode).toBe(0);
+  // Exact public surface: six commands, one descriptive line each.
+  expect(result.stdout.trim().split("\n")).toHaveLength(6);
   expect(result.stdout).toContain("nutshell setup");
-  expect(result.stdout).toContain("nutshell sync [all|plugin] [--json]");
-  expect(result.stdout).toContain("nutshell import <plugin> <archive-path>");
+  expect(result.stdout).toContain("safe to re-run anytime");
+  expect(result.stdout).toContain("nutshell sync [all|source] [--json]");
+  expect(result.stdout).toContain("nutshell health [--json]");
+  expect(result.stdout).toContain("nutshell doctor [source] [--json]");
   expect(result.stdout).toContain("nutshell dashboard [--no-open]");
-  expect(result.stdout).toContain("nutshell doctor [plugin] [--json]");
-  expect(result.stdout).not.toContain("nutshell enrich");
+  expect(result.stdout).toContain("nutshell import <source> <archive>");
+  expect(result.stdout).toContain("nutshell import twitter ~/Downloads/x-archive.zip");
+  // Removed user surfaces must not leak back into help (mirrors certify-release).
+  for (const forbidden of ["init", "launchd", "migrate", "legacy", "waive", "preserve", "canonical", "repair-plan", "enrich"]) {
+    expect(result.stdout).not.toContain(forbidden);
+  }
   expect(result.stdout).not.toContain("nutshell app ");
-  expect(result.stdout).not.toContain("nutshell launchd");
   expect(result.stdout).not.toContain("nutshell query");
   expect(result.stdout).not.toContain("nutshell day");
   expect(result.stdout).not.toContain("--root");

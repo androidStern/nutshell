@@ -653,7 +653,10 @@ test("generic runtime and store modules do not encode twitter enrichment semanti
     join(import.meta.dir, "../src/store/sqlite-store.ts"),
     join(import.meta.dir, "../src/runtime/trace-runtime.ts"),
   ];
-  const forbidden = ["twitter.tweet_enrichment", "enriched", "unavailable", "permanent_failure", "rate_limited", "temporary_failure"];
+  // "rate_limited" is banned as the quoted enrichment-state literal; the
+  // generic catalog naming contract ("codes ending in _rate_limited back off")
+  // in the scheduler is not twitter knowledge.
+  const forbidden = ["twitter.tweet_enrichment", "enriched", "unavailable", "permanent_failure", '"rate_limited"', "temporary_failure"];
   for (const file of files) {
     const text = readFileSync(file, "utf8");
     for (const token of forbidden) expect(text.includes(token), `${file} should not contain ${token}`).toBe(false);

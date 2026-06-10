@@ -11,11 +11,13 @@ import { JsonlLogger } from "./runtime/logger";
 import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
 import { formatHealthText } from "./health/reporters";
+import { formatSyncText } from "./health/sync-reporter";
 import { runProcess } from "./runtime/process";
 import { appExecutable, ensureStableAppPath, runNutshellAppCommand } from "./macos/app-status";
 import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sqlite-worker";
 import { serveDashboard } from "./dashboard/server";
 import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
+import { SetupCancelledError } from "./setup/ui-clack";
 import type { SourceId, SyncMode, SyncRequest } from "./core/types";
 
 async function main(argv: string[]): Promise<number> {
@@ -56,14 +58,23 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === "setup") {
     const setup = new SetupRuntime({ root, configPath: configFile });
-    const report = await setup.run({
-      json: hasFlag(args, "--json"),
-      assumeYes: hasFlag(args, "--yes"),
-      backgroundAgent: !hasFlag(args, "--no-background-agent"),
-      syncHandoff: !hasFlag(args, "--no-sync-handoff") && !hasFlag(args, "--no-smoke-sync"),
-    });
-    if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    return exitCodeForSetup(report);
+    try {
+      const report = await setup.run({
+        json: hasFlag(args, "--json"),
+        assumeYes: hasFlag(args, "--yes"),
+        backgroundAgent: !hasFlag(args, "--no-background-agent"),
+        syncHandoff: !hasFlag(args, "--no-sync-handoff") && !hasFlag(args, "--no-smoke-sync"),
+      });
+      if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      return exitCodeForSetup(report);
+    } catch (error) {
+      if (error instanceof SetupCancelledError) {
+        process.stderr.write("Setup cancelled.\n");
+        return 1;
+      }
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
   }
 
   let runtime: TraceRuntime | null = null;
@@ -74,12 +85,14 @@ async function main(argv: string[]): Promise<number> {
   try {
     if (command === "sync") {
       const originalArgs = [...args];
-      const request = parseSync(args);
+      const parsed = parseSync(args);
+      const request: SyncRequest = parsed.source === null ? parsed : { ...parsed, source: resolveSource(parsed.source, builtinSourceIds()) };
       const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, request.budget.maxRuntimeMs + 180_000);
       if (appExit !== null) return appExit;
       const runtime = getRuntime();
       const report = await runtime.sync(request);
-      print(args, report);
+      if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      else process.stdout.write(formatSyncText(report));
       if (request.failOnPartial && report.sources.some((source) => source.status === "partial")) return 75;
       return report.status === "critical" ? 2 : report.status === "warning" ? 1 : 0;
     }
@@ -99,7 +112,8 @@ async function main(argv: string[]): Promise<number> {
       const originalArgs = [...args];
       const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, 120_000);
       if (appExit !== null) return appExit;
-      const source = args[0] && !args[0].startsWith("--") ? (args.shift() as SourceId) : undefined;
+      const sourceArg = args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
+      const source = sourceArg ? resolveSource(sourceArg, builtinSourceIds()) : undefined;
       const runtime = getRuntime();
       const report = await runtime.health(source ? { source } : {});
       if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -127,7 +141,7 @@ async function main(argv: string[]): Promise<number> {
       const dryRun = hasFlag(args, "--dry-run");
       const runtime = getRuntime();
       const report = await runtime.importProviderExport({
-        source: parsed.source,
+        source: resolveSource(parsed.source, builtinSourceIds()),
         path: parsed.path,
         dryRun,
         budget: DEFAULT_SYNC_BUDGET,
@@ -319,14 +333,48 @@ function appBundlePath(rawPath: string | undefined, root: string, configPath: st
   return ensureStableAppPath(loadConfig(root, configPath));
 }
 
+// One line per public command. Static text only — printing help must never
+// touch config, disk state, or the network.
+const COMMAND_HELP: Record<string, string> = {
+  [`${CLI_NAME} setup`]: "first-run and fix-it flow — safe to re-run anytime",
+  [`${CLI_NAME} sync [all|source] [--json]`]: "sync now instead of waiting for background sync",
+  [`${CLI_NAME} health [--json]`]: "is everything OK right now",
+  [`${CLI_NAME} doctor [source] [--json]`]: "what is wrong and how to fix it",
+  [`${CLI_NAME} dashboard [--no-open]`]: "open the local dashboard",
+  [`${CLI_NAME} import <source> <archive>`]: `load an official provider export, e.g. ${CLI_NAME} import twitter ~/Downloads/x-archive.zip`,
+};
+
 function helpText(): string {
-  return `${CLI_NAME} setup
-${CLI_NAME} sync [all|plugin] [--json]
-${CLI_NAME} health [--json]
-${CLI_NAME} dashboard [--no-open] [--host 127.0.0.1] [--port 0]
-${CLI_NAME} doctor [plugin] [--json]
-${CLI_NAME} import <plugin> <archive-path> [--dry-run] [--json]
-`;
+  const width = Math.max(...Object.keys(COMMAND_HELP).map((usage) => usage.length)) + 2;
+  return Object.entries(COMMAND_HELP)
+    .map(([usage, description]) => `${usage.padEnd(width)}${description}\n`)
+    .join("");
+}
+
+// Documented source aliases. Canonical ids come from the loaded plugin
+// registry; this map is the only alias knowledge the CLI carries.
+const SOURCE_ALIASES: Record<string, SourceId> = {
+  x: "twitter",
+  notes: "apple_notes",
+  podcast: "podcasts",
+};
+
+function resolveSource(arg: string, registryIds: SourceId[]): SourceId {
+  const resolved = SOURCE_ALIASES[arg] ?? arg;
+  if (registryIds.includes(resolved)) return resolved;
+  const valid = registryIds
+    .map((id) => {
+      const aliases = Object.keys(SOURCE_ALIASES).filter((alias) => SOURCE_ALIASES[alias] === id);
+      return aliases.length ? `${id} (${aliases.join(", ")})` : id;
+    })
+    .join(", ");
+  throw new UsageError(`unknown source '${arg}' — valid sources: ${valid}`);
+}
+
+function builtinSourceIds(): SourceId[] {
+  return loadBuiltinPlugins()
+    .list()
+    .map((plugin) => plugin.manifest.id);
 }
 
 if (import.meta.main) {

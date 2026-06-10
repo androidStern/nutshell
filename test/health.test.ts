@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config/config";
 import type { HealthFinding, JsonObject, PluginSyncResult, TraceRecord } from "../src/core/types";
+import { backfillStatusFromStore } from "../src/health/checks";
 import { PluginRegistry } from "../src/plugins/registry";
 import { TraceRuntime } from "../src/runtime/trace-runtime";
 import { FakePlugin } from "../src/testing/fake-plugin";
@@ -370,7 +371,9 @@ test("source-scoped health runs only the requested plugin probe", async () => {
 
 test("health uses app-owned run history for local OS sources instead of terminal probes", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-health-local-os-"));
+  const originalBundleId = process.env.NUTSHELL_APP_BUNDLE_ID;
   try {
+    delete process.env.NUTSHELL_APP_BUNDLE_ID;
     const appPath = writeHealthyApp(root);
     const config = loadConfig(root);
     config.data.app = { path: appPath };
@@ -406,13 +409,17 @@ test("health uses app-owned run history for local OS sources instead of terminal
     expect(report.findings.some((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified")).toBe(false);
     await runtime.close();
   } finally {
+    if (originalBundleId === undefined) delete process.env.NUTSHELL_APP_BUNDLE_ID;
+    else process.env.NUTSHELL_APP_BUNDLE_ID = originalBundleId;
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 test("health warns when a local OS source has not yet run through the app", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-health-local-os-unverified-"));
+  const originalBundleId = process.env.NUTSHELL_APP_BUNDLE_ID;
   try {
+    delete process.env.NUTSHELL_APP_BUNDLE_ID;
     const appPath = writeHealthyApp(root);
     const config = loadConfig(root);
     config.data.app = { path: appPath };
@@ -432,6 +439,67 @@ test("health warns when a local OS source has not yet run through the app", asyn
     expect(finding?.level).toBe("warning");
     expect(String((finding?.detail as JsonObject).reason)).toContain("terminal health avoids probing");
     await runtime.close();
+  } finally {
+    if (originalBundleId === undefined) delete process.env.NUTSHELL_APP_BUNDLE_ID;
+    else process.env.NUTSHELL_APP_BUNDLE_ID = originalBundleId;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health probes local OS sources directly when running inside the app identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-local-os-app-owned-"));
+  const originalBundleId = process.env.NUTSHELL_APP_BUNDLE_ID;
+  try {
+    delete process.env.NUTSHELL_APP_BUNDLE_ID;
+    const appPath = writeHealthyApp(root);
+    const config = loadConfig(root);
+    config.data.app = { path: appPath };
+    config.data.plugins = { apple_notes: { enabled: true } };
+    let checked = false;
+    const plugin = localOsPlugin("apple_notes", "Apple Notes", async () => {
+      checked = true;
+      return [];
+    });
+    const store = openStore(join(root, "trace.sqlite"));
+    const runtime = new TraceRuntime({ root, config, store, registry: new PluginRegistry([plugin]) });
+
+    const terminalReport = await runtime.health();
+    expect(checked).toBe(false);
+    expect(terminalReport.findings.some((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified")).toBe(true);
+
+    process.env.NUTSHELL_APP_BUNDLE_ID = "com.winterfell.nutshell";
+    const appOwnedReport = await runtime.health();
+    expect(checked).toBe(true);
+    expect(appOwnedReport.findings.some((item) => item.source === "apple_notes" && item.code === "app_owned_sync_not_verified")).toBe(false);
+    await runtime.close();
+  } finally {
+    if (originalBundleId === undefined) delete process.env.NUTSHELL_APP_BUNDLE_ID;
+    else process.env.NUTSHELL_APP_BUNDLE_ID = originalBundleId;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("backfillStatusFromStore reports the same coverage as a full health evaluation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-health-backfill-store-"));
+  try {
+    const config = loadConfig(root);
+    config.data.backfill = { cutoffDate: "2026-01-01", cutoffDates: {}, lookbackMonths: 6 };
+    const store = openStore(join(root, "trace.sqlite"));
+    const checkpoint = await store.loadCheckpoint("youtube");
+    await store.commitSync({
+      source: "youtube",
+      run: { id: "youtube-backfill", command: "test", mode: "backfill", startedAt: new Date("2026-05-21T12:00:00Z") },
+      result: resultWithRecords("youtube", [record("youtube.watched", "one", "watched", "2025-12-31T12:00:00Z")]),
+      expectedCheckpointVersion: checkpoint.version,
+    });
+
+    const items = await backfillStatusFromStore(config, store, ["youtube", "twitter"]);
+
+    expect(items.map((item) => item.source)).toEqual(["youtube", "twitter"]);
+    expect(items.find((item) => item.source === "youtube")?.status).toBe("backfill_complete");
+    expect(items.find((item) => item.source === "youtube")?.targets.cutoffDate).toBe("2026-01-01");
+    expect(items.find((item) => item.source === "twitter")?.status).toBe("backfill_incomplete");
+    await store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

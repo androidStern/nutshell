@@ -371,14 +371,14 @@ function degradedPluginsConfig(code: string, updatedAt = "2026-05-24T12:00:00Z")
   };
 }
 
-const scheduledRecentSync = {
+const scheduledRecentSync: SyncRequest = {
   source: null,
   mode: "recent",
   window: null,
   collections: [],
   budget: DEFAULT_SYNC_BUDGET,
   dryRun: false,
-} as const;
+};
 
 test("scheduled sync probes a degraded plugin and skips when the probe still fails", async () => {
   const root = mkdtempSync(join(tmpdir(), "trace-runtime-degraded-"));

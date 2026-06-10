@@ -97,8 +97,11 @@ await step("app-owned helper surface is present and setup uses it", async () => 
   for (const expected of ['"register-agent"', '"enable-sync"']) {
     if (!setupRuntime.includes(expected)) throw new Error(`setup runtime is missing app-owned command ${expected}`);
   }
-  if (setupRuntime.includes('"__sync-once"')) throw new Error("setup runtime must not run full ingestion during setup");
-  if (/nutshell\s+sync/.test(setupRuntime)) throw new Error("setup runtime must not run full ingestion during setup");
+  if (setupRuntime.includes('"__sync-once"')) throw new Error("setup may run only a bounded app-owned smoke sync; the __sync-once bridge is banned in setup");
+  for (const expected of ['"--timeout"', '"--mode", "recent"']) {
+    if (!setupRuntime.includes(expected)) throw new Error(`setup may run only a bounded app-owned smoke sync; setup runtime is missing ${expected}`);
+  }
+  if (setupRuntime.includes('"--mode", "backfill"')) throw new Error('setup may run only a bounded app-owned smoke sync; "--mode", "backfill" is banned in setup');
   return { appExecutable };
 });
 

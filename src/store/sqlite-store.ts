@@ -169,8 +169,8 @@ export class SQLiteTraceStore implements TraceStore {
       this.db
         .query(
           `insert or replace into health_findings (
-            id, run_id, level, source, code, message, detail_json, observed_at
-          ) values (?, ?, ?, ?, ?, ?, ?, ?)`,
+            id, run_id, level, source, code, message, detail_json, guidance_json, observed_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -180,6 +180,7 @@ export class SQLiteTraceStore implements TraceStore {
           finding.code,
           finding.message,
           stableJson(finding.detail),
+          finding.guidance ? JSON.stringify(finding.guidance) : null,
           toIso(finding.observedAt),
         );
     }
@@ -290,7 +291,7 @@ export class SQLiteTraceStore implements TraceStore {
       .all() as unknown as Json[];
     const latestFindings = this.db
       .query(
-        `select source, level, code, message, detail_json, observed_at, run_id
+        `select source, level, code, message, detail_json, guidance_json, observed_at, run_id
          from health_findings
          where id in (
            select id from health_findings h2

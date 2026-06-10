@@ -95,6 +95,7 @@ create table if not exists health_findings (
   code text not null,
   message text not null,
   detail_json text not null,
+  guidance_json text,
   observed_at text not null
 );
 

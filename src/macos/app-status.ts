@@ -12,6 +12,8 @@ interface AppCommandResult {
   stderr?: unknown;
 }
 
+const APP_BUNDLE_ID = "com.winterfell.nutshell";
+
 export function configuredAppPath(config: TraceConfig, explicit?: string): string {
   const requested = explicit || process.env[APP_PATH_ENV];
   if (requested) return resolve(expandHome(requested));
@@ -109,7 +111,11 @@ export async function runNutshellAppCommand(appPath: string, args: string[], tim
 
 export function shouldRunAppCommandDirect(env: Record<string, string | undefined> = process.env, platform: NodeJS.Platform = process.platform): boolean {
   if (platform !== "darwin") return true;
-  return env.NUTSHELL_APP_BUNDLE_ID === "com.winterfell.nutshell";
+  return isAppOwnedProcess(env);
+}
+
+export function isAppOwnedProcess(env: Record<string, string | undefined> = process.env): boolean {
+  return env.NUTSHELL_APP_BUNDLE_ID === APP_BUNDLE_ID;
 }
 
 async function waitForPath(path: string, timeoutMs: number): Promise<boolean> {

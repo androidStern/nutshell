@@ -1,16 +1,18 @@
 import { existsSync } from "node:fs";
 import type { HealthFinding, JsonObject, SourceId, UserState } from "../core/types";
 import { DEFAULT_SYNC_BUDGET } from "../config/defaults";
-import { loadConfig, logPath, numberAt, objectAt, resolveConfigPath, resolveRoot, type TraceConfig } from "../config/config";
+import { loadConfig, logPath, numberAt, objectAt, resolveConfigPath, resolveRoot, storePath, type TraceConfig } from "../config/config";
 import { CLI_NAME, PRODUCT_NAME } from "../core/product";
+import { backfillStatusFromStore } from "../health/checks";
 import { reportStatus as healthReportStatus } from "../health/health";
 import { setupFinding } from "./setup-findings";
-import { appExecutable, ensureStableAppPath } from "../macos/app-status";
+import { appExecutable, ensureStableAppPath, runNutshellAppCommand } from "../macos/app-status";
 import { loadBuiltinPlugins, type PluginRegistry } from "../plugins/registry";
 import type { TracePlugin } from "../plugins/interface";
 import { redactText } from "../core/redaction";
 import { JsonlLogger } from "../runtime/logger";
 import { TraceRuntime } from "../runtime/trace-runtime";
+import { openStore } from "../store/sqlite-store";
 import { JsonConfigDraft } from "./config-draft";
 import { defaultSecretStore, type FileSecretStore } from "./secret-store";
 import { DefaultHostCapabilities } from "./host";
@@ -29,6 +31,10 @@ import type {
   SetupUI,
 } from "./types";
 
+// Runs a Nutshell.app helper command through the app identity. Defaults to
+// the real app bridge; tests inject a scripted runner.
+export type AppCommandRunner = (appPath: string, args: string[], timeoutMs: number) => Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>;
+
 export interface SetupRuntimeOptions {
   root?: string;
   configPath?: string;
@@ -38,11 +44,17 @@ export interface SetupRuntimeOptions {
   host?: HostCapabilities;
   secretStore?: FileSecretStore;
   prober?: SetupProber;
+  appCommandRunner?: AppCommandRunner;
   setupPluginTimeoutMs?: number;
   permissionHandoffTimeoutMs?: number;
 }
 
 export const DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS = 60 * 60_000;
+
+// The smoke sync is bounded twice: the sync itself runs in recent mode with a
+// 60s per-source budget, and the app command as a whole is killed after this.
+const SMOKE_SYNC_ARGS = ["sync", "all", "--mode", "recent", "--timeout", "60", "--json"];
+const SMOKE_SYNC_TIMEOUT_MS = 180_000;
 
 // Humans never hit this; it exists so a misbehaving scripted UI (tests,
 // automation) fails loudly instead of spinning forever.
@@ -84,6 +96,7 @@ export class SetupRuntime {
   readonly logger: JsonlLogger;
   readonly secretStore: FileSecretStore;
   readonly prober: SetupProber;
+  readonly appCommandRunner: AppCommandRunner;
   readonly setupPluginTimeoutMs: number;
   readonly permissionHandoffTimeoutMs: number;
 
@@ -97,6 +110,7 @@ export class SetupRuntime {
     this.logger = new JsonlLogger(logPath(this.config));
     this.secretStore = options.secretStore ?? defaultSecretStore(this.config.root);
     this.prober = options.prober ?? new DefaultSetupProber(this.config, this.logger);
+    this.appCommandRunner = options.appCommandRunner ?? runNutshellAppCommand;
     this.setupPluginTimeoutMs = options.setupPluginTimeoutMs ?? setupPluginTimeoutMs(this.config);
     this.permissionHandoffTimeoutMs = options.permissionHandoffTimeoutMs ?? permissionHandoffTimeoutMs();
   }
@@ -170,19 +184,29 @@ export class SetupRuntime {
     // and before any plugin verification.
     appPermission ??= await this.prepareAppPermission(request);
 
+    // Already-imported archives render "imported" and are not re-offered. Read
+    // and release the store before any offers run — the import path opens its
+    // own runtime and needs the database lock free.
+    const importedArchives = await this.completedArchiveImports(toSetup);
+
     for (const plugin of toSetup) {
       const ctx = this.pluginSetupContext(plugin, draft, secretDraft.plugin(plugin.manifest.id), controller.signal);
       const { report, summary } = await this.setupPlugin(plugin, ctx, priorFindings.get(plugin.manifest.id));
       reports.push(report);
       draft.setPluginSetupStatus(plugin.manifest.id, report.status, report.findings);
       if (report.status === "ready" && report.importCommand && plugin.importProviderExport) {
-        const offer = summary?.archiveImport;
-        const archivePath = offer ? await this.offerArchiveImport(offer) : null;
-        if (archivePath) {
-          pendingImports.push({ source: plugin.manifest.id, path: archivePath });
+        if (importedArchives.has(plugin.manifest.id)) {
           report.archiveImport = "imported";
-        } else if (offer) {
-          report.archiveImport = "skipped";
+          this.logger.event("setup: archive already imported", { source: plugin.manifest.id });
+        } else {
+          const offer = summary?.archiveImport;
+          const archivePath = offer ? await this.offerArchiveImport(offer) : null;
+          if (archivePath) {
+            pendingImports.push({ source: plugin.manifest.id, path: archivePath });
+            report.archiveImport = "imported";
+          } else if (offer) {
+            report.archiveImport = "skipped";
+          }
         }
       }
     }
@@ -202,7 +226,7 @@ export class SetupRuntime {
     const backgroundAgent = request.backgroundAgent
       ? await this.enableBackgroundAgent(request, appPermission)
       : skippedAction("background agent disabled by request");
-    const syncHandoff = request.syncHandoff ? syncHandoffAction(backgroundAgent) : skippedAction("background sync handoff disabled by request");
+    const syncHandoff = request.syncHandoff ? await this.handOffInitialSync(backgroundAgent) : skippedAction("background sync handoff disabled by request");
     const finishedAt = new Date();
     const status =
       reports.some((item) => item.status === "degraded" || item.archiveImport === "failed") || !backgroundAgent.ok || !syncHandoff.ok
@@ -583,6 +607,30 @@ export class SetupRuntime {
     return selected;
   }
 
+  // Sources whose official provider export already covers the configured
+  // cutoff. Their archive offers are answered by the store, not the user. A
+  // missing store is a normal first run; a store that cannot be read is
+  // treated the same way (offer again — imports stay idempotent) with a
+  // warning in the log.
+  private async completedArchiveImports(plugins: TracePlugin[]): Promise<Set<SourceId>> {
+    const sources = plugins.filter((plugin) => plugin.importProviderExport).map((plugin) => plugin.manifest.id);
+    if (!sources.length) return new Set();
+    const path = storePath(this.config);
+    if (!existsSync(path)) return new Set();
+    try {
+      const store = openStore(path);
+      try {
+        const items = await backfillStatusFromStore(this.config, store, sources);
+        return new Set(items.filter((item) => item.bulkBackfill.status === "complete").map((item) => item.source));
+      } finally {
+        await store.close();
+      }
+    } catch (error) {
+      this.logger.warn("setup: could not read archive import status; offering imports again", { path, error: String(error) });
+      return new Set();
+    }
+  }
+
   private async runImports(imports: PendingImport[]): Promise<Array<{ source: SourceId; ok: true } | { source: SourceId; ok: false; finding: HealthFinding }>> {
     const output: Array<{ source: SourceId; ok: true } | { source: SourceId; ok: false; finding: HealthFinding }> = [];
     if (!imports.length) return output;
@@ -661,6 +709,77 @@ export class SetupRuntime {
       detail: { register: jsonRunResult(register), enable: jsonRunResult(enable), status: finalStatus ? macStatusJson(finalStatus) : null },
     };
   }
+
+  // The smoke sync only runs once the background agent is proven enabled;
+  // everything else gets an honest non-attempt message.
+  private async handOffInitialSync(backgroundAgent: SetupReport["backgroundAgent"]): Promise<SetupReport["syncHandoff"]> {
+    if (!backgroundAgent.ok) {
+      return {
+        attempted: false,
+        ok: false,
+        message: "initial sync not handed off; background agent is not enabled",
+        detail: { reason: backgroundAgent.message, backgroundAgent: backgroundAgent.detail },
+      };
+    }
+    if (backgroundAgent.message !== "background agent enabled") {
+      return {
+        attempted: false,
+        ok: true,
+        message: "initial sync not scheduled; background service was not enabled",
+        detail: { reason: backgroundAgent.message },
+      };
+    }
+    return this.runSmokeSync();
+  }
+
+  // One bounded smoke sync through the app identity. It proves the enabled
+  // agent can actually ingest; it never grows into full ingestion (recent
+  // mode, per-source budget, hard app-command timeout).
+  private async runSmokeSync(): Promise<SetupReport["syncHandoff"]> {
+    const appPath = ensureStableAppPath(this.config);
+    this.logger.event("setup: smoke sync started", { appPath });
+    let result: { code: number; stdout: string; stderr: string; timedOut: boolean };
+    try {
+      result = await this.ui.spinner({
+        title: "Running a quick first sync",
+        run: () => this.appCommandRunner(appPath, [...SMOKE_SYNC_ARGS], SMOKE_SYNC_TIMEOUT_MS),
+      });
+    } catch (error) {
+      this.logger.error("setup: smoke sync failed to run", { error: String(error) });
+      return { attempted: true, ok: false, message: "smoke sync failed to run", detail: { error: redactText(String(error)) } };
+    }
+    const parsed = result.timedOut ? null : parseSmokeSyncReport(result.stdout);
+    if (!parsed) {
+      this.logger.error("setup: smoke sync failed to run", { code: result.code, timedOut: result.timedOut });
+      return {
+        attempted: true,
+        ok: false,
+        message: "smoke sync failed to run",
+        detail: {
+          code: result.code,
+          timedOut: result.timedOut,
+          stderr: redactText(result.stderr.slice(-800)),
+          stdout: redactText(result.stdout.slice(-400)),
+        },
+      };
+    }
+    const ok = parsed.status !== "critical";
+    const records = parsed.sources.reduce((sum, source) => sum + source.insertedRecords, 0);
+    const firstCritical = parsed.sources.find((source) => source.status === "critical")?.source;
+    const message = ok
+      ? `smoke sync ok: ${records} ${records === 1 ? "record" : "records"} across ${parsed.sources.length} ${parsed.sources.length === 1 ? "source" : "sources"}`
+      : `smoke sync critical: ${firstCritical ?? "no source completed"}`;
+    this.logger.event("setup: smoke sync finished", { status: parsed.status, records });
+    return {
+      attempted: true,
+      ok,
+      message,
+      detail: {
+        status: parsed.status,
+        sources: parsed.sources.map((source) => ({ source: source.source, status: source.status, insertedRecords: source.insertedRecords })),
+      },
+    };
+  }
 }
 
 export function permissionHandoffTimeoutMs(env: Record<string, string | undefined> = process.env): number {
@@ -674,29 +793,42 @@ function skippedAction(message: string): SetupReport["backgroundAgent"] {
   return { attempted: false, ok: true, message, detail: {} };
 }
 
-function syncHandoffAction(backgroundAgent: SetupReport["backgroundAgent"]): SetupReport["syncHandoff"] {
-  if (!backgroundAgent.ok) {
-    return {
-      attempted: false,
-      ok: false,
-      message: "initial sync not handed off; background agent is not enabled",
-      detail: { reason: backgroundAgent.message, backgroundAgent: backgroundAgent.detail },
-    };
+interface SmokeSyncSource {
+  source: string;
+  status: string;
+  insertedRecords: number;
+}
+
+interface SmokeSyncReport {
+  status: string;
+  sources: SmokeSyncSource[];
+}
+
+// Parses the `sync all --json` report the app prints. Returns null for
+// anything that is not a recognizable sync report, so the caller reports an
+// honest failure instead of inventing a result.
+export function parseSmokeSyncReport(stdout: string): SmokeSyncReport | null {
+  const start = stdout.indexOf("{");
+  if (start < 0) return null;
+  try {
+    const parsed = JSON.parse(stdout.slice(start)) as { status?: unknown; sources?: unknown };
+    if (typeof parsed.status !== "string" || !Array.isArray(parsed.sources)) return null;
+    const sources: SmokeSyncSource[] = [];
+    for (const raw of parsed.sources) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+      const record = raw as { source?: unknown; status?: unknown; commit?: unknown };
+      if (typeof record.source !== "string" || typeof record.status !== "string") return null;
+      const commit = record.commit && typeof record.commit === "object" && !Array.isArray(record.commit) ? (record.commit as { insertedRecords?: unknown }) : null;
+      sources.push({
+        source: record.source,
+        status: record.status,
+        insertedRecords: typeof commit?.insertedRecords === "number" ? commit.insertedRecords : 0,
+      });
+    }
+    return { status: parsed.status, sources };
+  } catch {
+    return null;
   }
-  if (backgroundAgent.message === "background service left disabled by user choice") {
-    return {
-      attempted: false,
-      ok: true,
-      message: "initial sync not scheduled; background service was not enabled",
-      detail: { reason: "background service was not enabled" },
-    };
-  }
-  return {
-    attempted: false,
-    ok: true,
-    message: "initial sync handed off to background agent",
-    detail: { reason: "setup runs bounded plugin checks only; ingestion happens after setup" },
-  };
 }
 
 function jsonRunResult(result: { code: number; stdout: string; stderr: string }): JsonObject {
@@ -765,6 +897,9 @@ export function formatSetupSummaryText(report: SetupReport): string {
         lines.push(`    fix:  ${lead.guidance.fix}`);
         lines.push(`    then: ${lead.guidance.confirm}`);
       }
+    }
+    if (plugin.archiveImport === "imported") {
+      lines.push("    history import complete ✓");
     }
     if (plugin.archiveImport === "skipped" && plugin.importCommand) {
       lines.push(`    history import pending — when your export arrives: ${plugin.importCommand}`);

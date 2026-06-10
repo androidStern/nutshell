@@ -20,13 +20,14 @@ import type {
 } from "../core/types";
 import { localDateKey } from "../core/time";
 import { CLI_NAME, PRODUCT_NAME } from "../core/product";
-import { appStatusJson, inspectNutshellApp } from "../macos/app-status";
+import { appStatusJson, inspectNutshellApp, isAppOwnedProcess } from "../macos/app-status";
 import type { PluginRegistry } from "../plugins/registry";
 import { PODCASTS_FINDINGS } from "../plugins/builtin/podcasts/findings";
 import { TWITTER_FINDINGS } from "../plugins/builtin/twitter/findings";
 import { inspectLock } from "../runtime/lock";
 import { JsonlLogger } from "../runtime/logger";
 import type { TraceStore } from "../store/interface";
+import { guidanceFromJson } from "./guidance";
 import { reportStatus } from "./health";
 import { SYSTEM_FINDINGS, restoredSetupFindings, systemFinding } from "./system-findings";
 
@@ -162,7 +163,7 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
       );
       continue;
     }
-    if (plugin.manifest.authKind === "local_os" && app.installed) {
+    if (plugin.manifest.authKind === "local_os" && app.installed && !isAppOwnedProcess()) {
       const appOwnedFinding = localOsAppOwnedHealthFinding(plugin.manifest, recentRunBySource.get(plugin.manifest.id));
       if (appOwnedFinding) findings.push(appOwnedFinding);
       continue;
@@ -192,6 +193,11 @@ export async function evaluateHealth(config: TraceConfig, store: TraceStore, reg
   const scheduler = schedulerHealth(config, snapshot.lastRuns, app, checkedAt);
 
   return { status: reportStatus(findings), checkedAt, findings, backfill, app, scheduler };
+}
+
+export async function backfillStatusFromStore(config: TraceConfig, store: TraceStore, sources: SourceId[], checkedAt: Date = new Date()): Promise<BackfillHealthItem[]> {
+  const snapshot = await store.healthSnapshot();
+  return evaluateBackfill(config, sources, snapshot.recordCounts, snapshot.lastRuns, snapshot.lastBackfillRuns, snapshot.sourceStates, snapshot.latestFindings, checkedAt);
 }
 
 function localOsAppOwnedHealthFinding(manifest: PluginManifest, latestRun: JsonObject | undefined): HealthFinding | null {
@@ -536,12 +542,32 @@ function normalizeLatestFinding(row: JsonObject | undefined): JsonObject | null 
       detail = row.detail_json;
     }
   }
+  const guidance = latestFindingGuidance(row);
   return {
     level: row.level ?? null,
     code: row.code ?? null,
     message: row.message ?? null,
     observedAt: row.observed_at ?? null,
     detail,
+    ...(guidance ? { guidance } : {}),
+  };
+}
+
+function latestFindingGuidance(row: JsonObject): JsonObject | null {
+  if (typeof row.guidance_json !== "string") return null;
+  let parsed: Json;
+  try {
+    parsed = JSON.parse(row.guidance_json) as Json;
+  } catch {
+    return null;
+  }
+  const guidance = guidanceFromJson(parsed);
+  if (!guidance) return null;
+  return {
+    state: guidance.state,
+    fix: guidance.fix,
+    confirm: guidance.confirm,
+    ...(guidance.url ? { url: guidance.url } : {}),
   };
 }
 

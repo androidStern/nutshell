@@ -13,7 +13,7 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 import { YouTubePlugin } from "../src/plugins/builtin/youtube/plugin";
 import type { TracePlugin } from "../src/plugins/interface";
 import { PluginRegistry } from "../src/plugins/registry";
-import { DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS, SetupRuntime, exitCodeForSetup, permissionHandoffTimeoutMs } from "../src/setup/setup-runtime";
+import { DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS, SetupRuntime, exitCodeForSetup, permissionHandoffTimeoutMs, type AppCommandRunner } from "../src/setup/setup-runtime";
 import type { SetupProber } from "../src/setup/probe";
 import type { HostCapabilities, HostRunResult, MacAppStatus, MacHostCapabilities, PluginSetupContext } from "../src/setup/types";
 import { pluginSetupFindings, pluginSetupStatus } from "../src/setup/config-draft";
@@ -363,13 +363,14 @@ test("setup enables background sync through the installed app helper", async () 
       ui,
       host,
       prober: new FakeSetupProber(),
+      appCommandRunner: emptySmokeSyncRunner(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
 
     expect(report.backgroundAgent.ok).toBe(true);
     expect(report.syncHandoff.ok).toBe(true);
-    expect(report.syncHandoff.attempted).toBe(false);
+    expect(report.syncHandoff.attempted).toBe(true);
     expect((loadConfig(root).data.app as JsonObject).path).toBe(appPath);
     // Full Disk Access was already granted: the permission window never opens.
     expect(host.permissionWindowOpens).toBe(0);
@@ -414,6 +415,7 @@ test("setup opens the app permission window before any plugin probe and before e
       ui,
       host,
       prober,
+      appCommandRunner: emptySmokeSyncRunner(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
@@ -470,6 +472,216 @@ test("setup refuses to claim handoff when app-owned status stays disabled", asyn
       [executable, "enable-sync"],
       [executable, "register-agent"],
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup runs one bounded smoke sync through the app identity and reports its real result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-sync-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    installFakeApp(appPath);
+    const grantedMarker = join(root, "permission-granted");
+    const enabledMarker = join(root, "background-enabled");
+    writeFileSync(grantedMarker, "yes\n");
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    config.data.app = { path: appPath };
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["ready"]];
+    ui.confirms = [true];
+    const host = new FakeHost(
+      null,
+      (run) => {
+        if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
+      },
+      { appPath, grantedMarker, enabledMarker },
+    );
+    const runnerCalls: Array<{ appPath: string; args: string[]; timeoutMs: number }> = [];
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new SetupPlugin("ready")]),
+      ui,
+      host,
+      prober: new FakeSetupProber(),
+      appCommandRunner: async (commandAppPath, args, timeoutMs) => {
+        runnerCalls.push({ appPath: commandAppPath, args: [...args], timeoutMs });
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            status: "ok",
+            sources: [
+              { source: "youtube", status: "ok", commit: { insertedRecords: 5 } },
+              { source: "podcasts", status: "ok", commit: { insertedRecords: 7 } },
+              { source: "apple_notes", status: "ok" },
+              { source: "twitter", status: "warning", commit: { insertedRecords: 0 } },
+            ],
+          }),
+          stderr: "",
+          timedOut: false,
+        };
+      },
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
+
+    expect(runnerCalls.length).toBe(1);
+    expect(runnerCalls[0]?.appPath).toBe(appPath);
+    const args = runnerCalls[0]!.args;
+    expect(args).toContain("--timeout");
+    const modeIndex = args.indexOf("--mode");
+    expect(modeIndex).toBeGreaterThanOrEqual(0);
+    expect(args[modeIndex + 1]).toBe("recent");
+    expect(report.syncHandoff.attempted).toBe(true);
+    expect(report.syncHandoff.ok).toBe(true);
+    expect(report.syncHandoff.message).toContain("12 records");
+    expect(report.status).toBe("ok");
+    // The real result appears in the final summary, not just the report JSON.
+    expect(ui.notes.some((note) => note.includes("smoke sync ok: 12 records across 4 sources"))).toBe(true);
+    expect(ui.notes.every((note) => !note.includes("handed off to background agent"))).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a smoke sync that fails to run is reported honestly and degrades the setup report", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-fail-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    installFakeApp(appPath);
+    const grantedMarker = join(root, "permission-granted");
+    const enabledMarker = join(root, "background-enabled");
+    writeFileSync(grantedMarker, "yes\n");
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    config.data.app = { path: appPath };
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["ready"]];
+    ui.confirms = [true];
+    const host = new FakeHost(
+      null,
+      (run) => {
+        if (run.args[0] === "enable-sync") writeFileSync(enabledMarker, "yes\n");
+      },
+      { appPath, grantedMarker, enabledMarker },
+    );
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new SetupPlugin("ready")]),
+      ui,
+      host,
+      prober: new FakeSetupProber(),
+      appCommandRunner: async () => ({ code: 2, stdout: "launchctl exploded mid-flight", stderr: "boom", timedOut: false }),
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
+
+    expect(report.syncHandoff.attempted).toBe(true);
+    expect(report.syncHandoff.ok).toBe(false);
+    expect(report.syncHandoff.message).toBe("smoke sync failed to run");
+    expect(report.syncHandoff.detail.code).toBe(2);
+    expect(report.status).toBe("warning");
+    expect(exitCodeForSetup(report)).toBe(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("declining the background service skips the smoke sync with an honest message", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-declined-"));
+  try {
+    const appPath = join(root, "Applications", "Nutshell.app");
+    installFakeApp(appPath);
+    const grantedMarker = join(root, "permission-granted");
+    const enabledMarker = join(root, "background-enabled");
+    writeFileSync(grantedMarker, "yes\n");
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    config.data.app = { path: appPath };
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["ready"]];
+    ui.confirms = [false];
+    const host = new FakeHost(null, null, { appPath, grantedMarker, enabledMarker });
+    const runnerCalls: string[][] = [];
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([new SetupPlugin("ready")]),
+      ui,
+      host,
+      prober: new FakeSetupProber(),
+      appCommandRunner: async (_appPath, args) => {
+        runnerCalls.push([...args]);
+        return { code: 0, stdout: JSON.stringify({ status: "ok", sources: [] }), stderr: "", timedOut: false };
+      },
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
+
+    expect(runnerCalls.length).toBe(0);
+    expect(report.syncHandoff.attempted).toBe(false);
+    expect(report.syncHandoff.ok).toBe(true);
+    expect(report.syncHandoff.message).toBe("initial sync not scheduled; background service was not enabled");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an already-imported archive renders imported and is not re-offered", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-setup-already-imported-"));
+  try {
+    // Seed the store with an import-shaped checkpoint: the official YouTube
+    // export already covers the configured cutoff, exactly what a real
+    // `nutshell import youtube <export.zip>` leaves behind.
+    const store = openStore(join(root, "nutshell.sqlite"));
+    try {
+      await store.commitSync({
+        source: "youtube",
+        run: { id: "seed-import", command: "import youtube", mode: "backfill", startedAt: new Date() },
+        result: {
+          ...fakeResult("youtube"),
+          observations: [],
+          records: [],
+          nextCheckpoint: {
+            backfill: {
+              imports: {
+                google_youtube: { oldest: "2001-01-01T00:00:00.000Z", newest: "2026-01-01T00:00:00.000Z", counts: { records: 3 } },
+              },
+            },
+          },
+        },
+        expectedCheckpointVersion: 0,
+      });
+    } finally {
+      await store.close();
+    }
+    const config = loadConfig(root);
+    config.data.plugins = {};
+    const ui = new FakeSetupUI();
+    ui.multiselectValues = [["youtube"]];
+    // Sentinel: if setup offered the archive import anyway, this confirm
+    // would be consumed and the import path would run.
+    ui.confirms = [true];
+    const plugin = new SetupPlugin("youtube", [], true);
+    const runtime = new SetupRuntime({
+      root,
+      config,
+      registry: new PluginRegistry([plugin]),
+      ui,
+      host: new FakeHost(),
+      prober: new FakeSetupProber(),
+    });
+
+    const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
+
+    expect(report.plugins.find((item) => item.source === "youtube")?.archiveImport).toBe("imported");
+    expect(plugin.importedPath).toBeNull();
+    expect(ui.confirms.length).toBe(1);
+    expect(ui.notes.some((note) => note.includes("history import complete"))).toBe(true);
+    expect(ui.notes.every((note) => !note.includes("history import pending"))).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -749,6 +961,11 @@ function installFakeApp(appPath: string): string {
   mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
   writeFileSync(executable, "");
   return executable;
+}
+
+// A scripted app-command runner whose smoke sync succeeds with no sources.
+function emptySmokeSyncRunner(): AppCommandRunner {
+  return async () => ({ code: 0, stdout: JSON.stringify({ status: "ok", sources: [] }), stderr: "", timedOut: false });
 }
 
 class NoMultiselectUI extends FakeSetupUI {
