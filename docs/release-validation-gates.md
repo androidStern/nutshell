@@ -13,10 +13,27 @@ The product has to explain each source in user terms:
 - `ready_with_data`: the source is reachable and produced canonical records.
 - `blocked_bug`: the user state should work, but Nutshell cannot inspect or sync it.
 
+These states are machine-readable. Every problem finding carries `finding.guidance.state` with one of these values, plus `fix` and `confirm` text authored at the source. Gates assert on the field, not on prose.
+
 Important rule: if Chrome is visibly signed in and Nutshell still fails because of Chrome Safe Storage, Keychain, cookie decryption, or a browser handoff timeout, that is `blocked_bug`. It is not `needs_auth`, and it is not a release pass.
+
+## Verdicts
+
+Every gate report labels each failure with exactly one verdict:
+
+- `product_fail`: the installed product misbehaved. Freeze the report, fix code separately, publish a new artifact, restart the gate from a clean state.
+- `harness_fail`: the gate machinery broke — VM boot, share mount, exec transport, probe plumbing. Fix the harness and rerun. The candidate is not implicated.
+- `fixture_stale`: a fixture the gate depends on (auth-present cookies, seeds) is no longer healthy. The gate queues for after a fixture refresh; all other work proceeds.
+
+Rules:
+
+- `fixture_stale` queues the gate, it does not fail the candidate. It is not a pass either.
+- A release is never declared validated while a required gate is queued.
+- Do not blur the verdicts. A product bug discovered while a fixture is stale is still `product_fail`; a stale fixture discovered by a crashing harness is still `fixture_stale` once the harness is fixed.
 
 ## Hard Rules
 
+- Gates run from cloned snapshots, driven over SSH/CLI (`tart exec`) only.
 - No computer-use or coordinate clicking as the main harness.
 - UI clicking can only be a manual handoff or diagnostic action. It cannot make a phase pass.
 - No private Chrome Safe Storage password file. `v0.1.20` tried that and was rejected.
@@ -68,7 +85,11 @@ Pass means YouTube and X doctors return source-specific auth findings. Generic c
 
 Purpose: prove the installed product can use an already-authenticated Chrome profile without rebuilding auth inside a failed release attempt.
 
-Use a dedicated auth-present VM snapshot, not a dirty failed rehearsal VM. The snapshot should contain Chrome signed into Google My Activity and X, with no Nutshell app, config, data root, or agent. Start from that snapshot, install the public release path, then run:
+Use a dedicated auth-present VM snapshot, not a dirty failed rehearsal VM. The snapshot should contain Chrome signed into Google My Activity and X, with no Nutshell app, config, data root, or agent. Clone the newest `-keepalive-<YYYYMMDD>` promotion when one exists, otherwise the base snapshot.
+
+Fixture preflight: before any product assertion, the gate verifies the cloned snapshot's cookie fixture is healthy — Google auth cookies (`SAPISID` or `__Secure-1PSID`) and X `auth_token` present and decryptable through the keychain-backed cookie path. Preflight failure records verdict `fixture_stale`, queues the gate, and does not fail the candidate. Fix: run `scripts/snapshot-keepalive.sh`, or the manual re-login in `docs/rehearsal-browser-auth-seeds.md` if the keep-alive also reports stale. Product assertions never run against a stale fixture.
+
+Start from the preflighted clone, install the public release path, then run:
 
 ```bash
 bun run rehearse:verify-authenticated -- --report <report.json> --append
@@ -89,6 +110,11 @@ Current proven snapshot:
 
 Purpose: prove missing permissions are reported as permissions, and granted permissions belong to `Nutshell.app`.
 
+The post-permission snapshot is produced once by the staged ~20-minute human session in `docs/post-permission-snapshot-session.md` (naming: `nutshell-postperm-sequoia-<YYYYMMDD>`). That session is the only human clicking in this gate's lifecycle; it builds a frozen fixture, it is not pass evidence. The gate itself asserts both states mechanically, over SSH/CLI from clones:
+
+- pre-permission state (clone of the auth-present snapshot with the release candidate installed, no grants): doctor reports `needs_permission` with the correct fix text in `finding.guidance`.
+- post-permission state (clone of the post-permission snapshot): probes pass clean, with the grants owned by `Nutshell.app`.
+
 This gate covers:
 
 - Full Disk Access missing before setup
@@ -101,6 +127,8 @@ This gate covers:
 
 Purpose: prove auth-present live sync and the reader-facing dashboard, separate from archive imports.
 
+Runs headlessly from a clone of the post-permission snapshot (`docs/post-permission-snapshot-session.md`), with the same cookie fixture preflight as the signed-in gate: stale cookies record `fixture_stale` and queue the gate.
+
 Pass means:
 
 - foreground `nutshell sync all --json` emits live YouTube records
@@ -111,8 +139,22 @@ Pass means:
 - final health is `ok`
 - dashboard API/page show nonzero records for YouTube, Podcasts, Notes, and X
 
+## Session Keep-Alive
+
+`scripts/snapshot-keepalive.sh` keeps the auth-present snapshot's sessions alive instead of letting them rot. It clones the snapshot, boots it headless, opens Chrome on `myactivity.google.com` and `x.com` so both sessions refresh themselves, quits Chrome cleanly so cookies flush, verifies inside the VM that the cookies are present and decryptable (the same sweet-cookie/keychain path the gates use), and on a verified pass promotes the clone as `<snapshot>-keepalive-<YYYYMMDD>`, deleting the previous dated promotion. The base snapshot is never renamed or deleted.
+
+Exit codes: `0` refreshed and promoted, `70` `HARNESS FAIL` (tart/boot/exec plumbing), `75` `FIXTURE STALE` (prints the manual re-login steps from `docs/rehearsal-browser-auth-seeds.md`). A `75` means Andrew must re-login; until then, dependent gates record `fixture_stale` and queue.
+
+Run it weekly. Scheduling is an operator action, not something the repo configures. Sample cron line (a launchd agent with `StartCalendarInterval` is equivalent):
+
+```cron
+0 9 * * 1 /path/to/nutshell-repo/scripts/snapshot-keepalive.sh >> $HOME/Documents/NutshellRehearsalShare/keepalive/cron.log 2>&1
+```
+
+Failures must notify — at minimum cron mail or a monitored log. A keep-alive that fails silently defeats its purpose; the next gate run would discover the rot at the worst time.
+
 ## Final Fresh-Install Rehearsal
 
 Only after the gates above are stable should the team run the one-pass fresh-install rehearsal. The final pass condition remains one clean public install run with clean baseline, missing-auth proof, present-auth proof, official imports, permissions, foreground sync, scheduled app-owned sync, health, and dashboard.
 
-If any gate exposes a product bug, freeze the report, fix code separately, publish a new artifact, and restart the affected gate from a clean state. Do not patch the installed app in place.
+If any gate exposes a product bug (`product_fail`), freeze the report, fix code separately, publish a new artifact, and restart the affected gate from a clean state. Do not patch the installed app in place. Harness breakage (`harness_fail`) is fixed and rerun without implicating the candidate; stale fixtures (`fixture_stale`) queue the gate behind a fixture refresh and never fail the candidate by themselves.
