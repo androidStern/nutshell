@@ -28,10 +28,20 @@ import {
 type Command =
   | "help"
   | "audit-report"
+  | "background-sync"
+  | "complete-report"
+  | "foreground-sync"
+  | "import-provider-exports"
+  | "install-published"
+  | "local-release-checks"
   | "preflight-host"
+  | "setup-flow"
   | "record-auth-seed-restore"
   | "run"
   | "snapshot-podcasts"
+  | "stage-podcast-seed"
+  | "start-report"
+  | "verify-pre-permission"
   | "verify-clean"
   | "verify-installed"
   | "verify-unauthenticated"
@@ -61,6 +71,103 @@ try {
   if (command === "run") {
     const ok = await runFullRehearsal(args);
     process.exit(ok ? 0 : 1);
+  }
+
+  if (command === "start-report") {
+    const flags = parseFlags(args);
+    const reportPath = stringFlag(flags, "report") ? resolve(requiredStringFlag(flags, "report")) : resolve("dist/rehearsal/fresh-install-report.json");
+    const installCommand = stringFlag(flags, "install-command") ?? "brew install androidStern/nutshell/nutshell";
+    const report = phaseReport("start", true, {
+      installCommand,
+      installSource: stringFlag(flags, "install-source") ?? installCommand,
+      releaseId: stringFlag(flags, "release-id") ?? await detectedReleaseId(),
+      expectedVersion: stringFlag(flags, "expected-version") ?? null,
+      reportPath,
+      archivedPreviousReport: prepareFreshInstallReportPath(reportPath, Boolean(flags["force-new-report"])),
+      xArchive: stringFlag(flags, "x-archive") ? "[provided]" : null,
+      youtubeExport: stringFlag(flags, "youtube-export") ? "[provided]" : null,
+      podcastsSeed: stringFlag(flags, "podcasts-seed") ? "[provided]" : null,
+      browserAuthSeed: stringFlag(flags, "browser-auth-seed") ? "[provided]" : null,
+    });
+    appendReport(reportPath, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(0);
+  }
+
+  if (command === "local-release-checks") {
+    const report = await localReleaseChecks();
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "install-published") {
+    const flags = parseFlags(args);
+    const installCommand = stringFlag(flags, "install-command") ?? "brew install androidStern/nutshell/nutshell";
+    const report = await installPublishedProduct({
+      installCommand,
+      expectedVersion: stringFlag(flags, "expected-version"),
+      installSource: stringFlag(flags, "install-source") ?? installCommand,
+      releaseId: stringFlag(flags, "release-id") ?? await detectedReleaseId(),
+    });
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "verify-pre-permission") {
+    const report = await verifyAppDoesNotAlreadyHaveFullDiskAccess();
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "setup-flow") {
+    const report = await runSetupFlow();
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "stage-podcast-seed") {
+    const flags = parseFlags(args);
+    const report = await stagePodcastSeed(stringFlag(flags, "podcasts-seed"));
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "import-provider-exports") {
+    const flags = parseFlags(args);
+    const report = await importProviderExports(stringFlag(flags, "x-archive"), stringFlag(flags, "youtube-export"));
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "foreground-sync") {
+    const report = await foregroundSync();
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "background-sync") {
+    const flags = parseFlags(args);
+    const report = await waitForBackgroundSync(numberFlag(flags, "wait-background-ms", 20 * 60 * 1000));
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "complete-report") {
+    const flags = parseFlags(args);
+    const reportPath = resolve(requiredStringFlag(flags, "report"));
+    appendReport(reportPath, phaseReport("complete", true, { reportPath }));
+    const audit = auditRehearsalReportFile(reportPath);
+    appendReport(reportPath, audit);
+    process.stdout.write(`${JSON.stringify(audit, null, 2)}\n`);
+    process.exit(audit.status === "pass" ? 0 : 1);
   }
 
   if (command === "audit-report") {
@@ -731,14 +838,24 @@ function helpText(): string {
 Usage:
   bun run scripts/fresh-install-rehearsal.ts preflight-host --x-archive <zip> --youtube-export <zip> --podcasts-seed <sqlite>
   bun run scripts/fresh-install-rehearsal.ts run --x-archive <zip> --youtube-export <zip> --podcasts-seed <sqlite>
+  bun run scripts/fresh-install-rehearsal.ts start-report --report <path> --release-id <id>
+  bun run scripts/fresh-install-rehearsal.ts local-release-checks [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts install-published [--expected-version <version>] [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts audit-report --report <fresh-install-report.json>
   bun run scripts/fresh-install-rehearsal.ts snapshot-podcasts --out <MTLibrary.sqlite> [--source <path>] [--force]
   bun run scripts/fresh-install-rehearsal.ts verify-clean --reset-privacy [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-installed [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts verify-pre-permission [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts setup-flow [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-unauthenticated [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore --browser-auth-seed <name> [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-authenticated [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts stage-podcast-seed --podcasts-seed <sqlite> [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts import-provider-exports --x-archive <zip> --youtube-export <zip> [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts foreground-sync [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts background-sync [--wait-background-ms <ms>] [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-final [--report <path>] [--append] [--no-dashboard]
+  bun run scripts/fresh-install-rehearsal.ts complete-report --report <path>
 
 Common flags:
   --home <path>       Test user's home directory. Defaults to current HOME.
