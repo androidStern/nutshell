@@ -85,7 +85,7 @@ The product runtime must not shell out to Hermes, BirdClaw, `bird`, `yt-dlp`, `c
 
 7. Update the tapped Homebrew formula. The install command for a normal user must be the tapped formula path, not a local formula file. Homebrew rejects arbitrary formula paths that are not in a tap, so a local formula-path test is not a valid Homebrew release rehearsal.
 
-8. Run install rehearsals from the published artifacts, not from the development checkout. The three supported release paths are Homebrew, global Bun package install, and tarball install.
+8. Run install rehearsals from the published artifacts, not from the development checkout. The supported release paths are Homebrew and tarball install. The global Bun/npm package path is deferred (not published or validated) until npm publishing resumes as an explicit decision.
 
 9. Run setup from the installed command. During setup, verify that the permissions helper is `Nutshell.app`, that Full Disk Access is granted to `Nutshell.app`, and that background sync is enabled by the terminal setup flow after the helper window is closed.
 
@@ -109,7 +109,7 @@ An agent must not call a release deliverable until it has produced evidence for 
 
 5. A tarball install from the generated tarball was run on a clean local install state.
 
-6. A Bun global install was run from the packaged artifact or the published package path being released.
+6. (Deferred while the npm path is out of scope) A Bun global install from the published package path.
 
 7. `command -v nutshell` resolves to the installed release command, not the development checkout.
 
