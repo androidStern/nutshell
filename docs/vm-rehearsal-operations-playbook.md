@@ -2,6 +2,8 @@
 
 This file captures operational lessons from the strict Nutshell fresh-install rehearsal. Read it before operating the VirtualBuddy VM again.
 
+The current release-validation strategy is in `docs/release-validation-gates.md`. Do not use this VM playbook as permission to run another monolithic click-driven rehearsal. It is an operations reference only.
+
 ## Current Known VM Facts
 
 - VirtualBuddy VM names seen on the host:
@@ -20,6 +22,7 @@ This file captures operational lessons from the strict Nutshell fresh-install re
 3. If the VM is dirty and no snapshot restore exists, use the documented fallback cleanup, then run `verify-clean`. If `verify-clean` fails, freeze the attempt.
 4. If any product bug appears after a clean baseline, freeze the report, fix the product separately, publish a new artifact, and restart from clean.
 5. Do not enter the user's Google, X, Apple, or other personal credentials. Stop and get the user's attention for those handoffs.
+6. Do not use computer-use, Computer Use, or coordinate clicking as the main harness. UI actions can be manual handoffs or diagnostic recovery only. A pass must come from product commands and report checks after the state is stable.
 
 ## Tart Gates
 
@@ -32,19 +35,19 @@ Use Tart when VirtualBuddy GUI control is unreliable.
 - Use `tart exec -i -t ...` with a real host PTY for interactive setup. In Codex, set `tty: true` on the host `exec_command`. Non-PTY `tart exec` can let `nutshell setup` return without a real Full Disk Access handoff.
 - Do not reuse an attempt VM after a failed product or harness phase. Freeze its report, stop it, and clone a new attempt from the clean Tart base.
 - Chrome may request the VM login keychain for `Chrome Safe Storage`; enter `admin` and choose `Always Allow`. If this is not granted, authenticated browser checks can fail with keychain/Safe Storage warnings instead of proving source auth.
-- Do not make the user repeat Google/X login for every clean VM. After the run proves signed-out behavior, use `docs/rehearsal-browser-auth-seeds.md` and the Tart auth seed scripts to restore the private Chrome profile plus login keychain, then record `browser-auth-seed-restore` before authenticated checks.
+- Do not make the user repeat Google/X login for every clean VM. The preferred fix is a dedicated auth-present VM snapshot that is proven separately before the final rehearsal. Browser auth seeds are private fixture inputs only; they are not a product pass if the installed product still hits Keychain or Chrome Safe Storage prompts.
 - Do not make the product read a private `chrome-safe-storage-password.txt` fixture. `v0.1.20` tried that and it is rejected because it bypasses the real install behavior under test.
 - If `nutshell doctor`, `nutshell health`, or `nutshell sync` reads protected/browser state from a Tart exec or terminal-owned process instead of `Nutshell.app`, freeze the attempt. The public CLI is expected to hand these protected commands to the installed app wrapper on macOS.
 - macOS launchctl may report the app-owned agent through ServiceManagement as `program identifier = Contents/Library/LaunchServices/NutshellAgent` plus `parent bundle identifier = com.winterfell.nutshell`, not as a full `Nutshell.app/...` path. That is valid app-owned evidence; raw CLI/Bun/Homebrew Cellar targets are not.
 
-## Tart UI Control Lessons
+## Tart UI Diagnostics
 
-- Host `cliclick` is the reliable fallback for Tart UI when Computer Use or guest AppleScript cannot bind to the guest session.
+- Host `cliclick` is a diagnostic fallback for Tart UI when Computer Use or guest AppleScript cannot bind to the guest session. It is not a release-validation harness.
 - `screencapture` images are Retina pixels, while `cliclick` uses screen points. Divide screenshot coordinates by 2 before clicking.
 - Before clicking a permission dialog, activate Tart and capture the screen: `osascript -e 'tell application "Tart" to activate'` then `screencapture -x /tmp/nutshell-tart-screen.png`.
-- Use ImageMagick crops or pixel inspection to identify the actual button/control, then click once. Do not keep guessing coordinates.
+- Use ImageMagick crops or pixel inspection to identify the actual button/control, then click once during diagnosis. Do not keep guessing coordinates.
 - The Tart guest-agent/System Events prompt is a VM-control permission, not Nutshell product evidence. The user has approved it for rehearsal operations, but guest AppleScript can still fail with assistive-access errors. If that happens, dismiss the prompt and use host `cliclick` plus screenshots.
-- For the Full Disk Access file picker, the path-entry sequence has worked: focus Tart, press `cmd+shift+g`, type `/Users/admin/Applications/Nutshell.app`, press return, select `Nutshell`, and click Open.
+- For the Full Disk Access file picker, the path-entry sequence has worked: focus Tart, press `cmd+shift+g`, type `/Users/admin/Applications/Nutshell.app`, press return, select `Nutshell`, and click Open. Afterward, validation still requires the normal report check proving `Nutshell.app` owns the permission.
 
 ## VirtualBuddy Gates
 
@@ -137,7 +140,7 @@ Use chat first. If the user asked to be interrupted aggressively, also send a ma
 
 ## Current Strict Attempt State
 
-- Do not run another monolithic strict attempt until the validation plan is split into smaller gates and the `v0.1.20` bypass is reverted.
+- Do not run another monolithic strict attempt until the smaller gates in `docs/release-validation-gates.md` are stable. The `v0.1.20` bypass has been reverted in public `v0.1.21`; keep it reverted.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.17-20260610a` is frozen failed. It passed clean state, public install, installed product checks, pre-permission state, and signed-out YouTube/X auth behavior, then failed at `setup-flow` because the FDA handoff timed out. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.18-20260610a` is frozen failed. It passed host preflight, VM local checks, clean state, and public Homebrew install, then failed because the first installed app handoff did not write command JSON. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.18-tart-run-20260610a.failed-frozen.json`.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.19-20260610a` is frozen failed. It passed through setup/FDA/background agent, then failed authenticated browser proof because restored Chrome auth still hit a macOS Keychain prompt. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.19-tart-run-20260610a.failed-frozen.json`.

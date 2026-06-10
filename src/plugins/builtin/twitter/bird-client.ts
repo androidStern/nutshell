@@ -1,4 +1,5 @@
 import { TwitterClient, type TweetData, type TwitterCookies, type TwitterUser } from "@steipete/bird";
+import { chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
 import { cookieValue, readBrowserCookies } from "../../../browser/cookies";
 import { looksLikeAuthFailure, looksLikeRateLimit } from "./rate-limit";
 
@@ -106,7 +107,9 @@ export class BirdClient {
     const authToken = cookieValue(cookies.cookies, "auth_token");
     const ct0 = cookieValue(cookies.cookies, "ct0");
     if (!authToken || !ct0) {
-      throw new Error(`X auth cookies missing; warnings=${cookies.warnings.join("; ")}`);
+      const warnings = cookies.warnings.join("; ");
+      const message = isChromeSafeStorageAccessIssue(warnings) ? chromeSafeStorageAccessMessage("X") : "X auth cookies missing";
+      throw new Error(`${message}; warnings=${warnings}`);
     }
     const twitterCookies: TwitterCookies = {
       authToken,

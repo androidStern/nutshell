@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { createCipheriv, pbkdf2Sync } from "node:crypto";
 import { join } from "node:path";
 import { readBrowserCookies } from "../src/browser/cookies";
-import { readMacChromeCookiesWithPassword } from "../src/browser/chrome-macos";
+import { readMacChromeCookiesWithKeychain, readMacChromeCookiesWithPassword } from "../src/browser/chrome-macos";
 
 const CHROME_EPOCH_OFFSET_MICROS = 11_644_473_600_000_000n;
 
@@ -54,6 +54,52 @@ test.skipIf(process.platform !== "darwin")("browser cookie reader uses app-provi
   } finally {
     if (previous === undefined) delete process.env.NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD;
     else process.env.NUTSHELL_CHROME_SAFE_STORAGE_PASSWORD = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("macOS Chrome reader reports a bounded Keychain timeout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-chrome-keychain-timeout-"));
+  try {
+    const dbPath = join(root, "Cookies");
+    createChromeCookieDb(dbPath, {
+      host: ".google.com",
+      name: "SID",
+      value: "sid-value",
+      safeStoragePassword: "safe-storage-secret",
+    });
+
+    const result = await readMacChromeCookiesWithKeychain(
+      { url: "https://myactivity.google.com/myactivity", names: ["SID"], profile: dbPath, timeoutMs: 30_000 },
+      async () => ({ code: 124, stdout: "", stderr: "timed out", timedOut: true }),
+    );
+
+    expect(result.cookies).toEqual([]);
+    expect(result.warnings).toEqual(["Timed out after 10000ms reading Chrome Safe Storage from macOS Keychain."]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("macOS Chrome reader can use a bounded Keychain password result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-chrome-keychain-success-"));
+  try {
+    const dbPath = join(root, "Cookies");
+    createChromeCookieDb(dbPath, {
+      host: ".x.com",
+      name: "auth_token",
+      value: "x-value",
+      safeStoragePassword: "safe-storage-secret",
+    });
+
+    const result = await readMacChromeCookiesWithKeychain(
+      { url: "https://x.com/home", names: ["auth_token"], profile: dbPath },
+      async () => ({ code: 0, stdout: "safe-storage-secret\n", stderr: "", timedOut: false }),
+    );
+
+    expect(result.warnings).toEqual([]);
+    expect(result.cookies.map((cookie) => cookie.value)).toEqual(["x-value"]);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

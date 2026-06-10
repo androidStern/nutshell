@@ -1,4 +1,5 @@
 import { readBrowserCookieHeader } from "../../../browser/cookies";
+import { chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
 import type { JsonObject } from "../../../core/types";
 import type { YouTubeActivityItem } from "./identity";
 
@@ -29,7 +30,9 @@ export async function collectYouTubeFromMyActivityHttp(input: {
     timeoutMs: input.cookieTimeoutMs,
   });
   if (!/SAPISID|__Secure-|SID=|HSID=/.test(cookies.header)) {
-    throw new Error(`Google browser cookies were not usable for My Activity; warnings=${cookies.warnings.join("; ")}`);
+    const warnings = cookies.warnings.join("; ");
+    const message = isChromeSafeStorageAccessIssue(warnings) ? chromeSafeStorageAccessMessage("YouTube") : "Google browser cookies were not usable for My Activity";
+    throw new Error(`${message}; warnings=${warnings}`);
   }
   const cookieHeader = cookies.header;
   {

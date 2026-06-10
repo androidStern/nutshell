@@ -14,6 +14,7 @@ import { fingerprint } from "../../../core/ids";
 import { sleep } from "../../../core/time";
 import { CLI_NAME } from "../../../core/product";
 import { numberAt, stringArrayAt, stringAt } from "../../../config/config";
+import { CHROME_SAFE_STORAGE_REASON, chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
 import { finding, type TracePlugin } from "../../interface";
 import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
 import { BirdClient } from "./bird-client";
@@ -80,7 +81,13 @@ export class TwitterPlugin implements TracePlugin {
     const client = new BirdClient(cfg);
     const result = await client.check(ctx.signal);
     if (!result.ok || result.authFailed) {
-      findings.push(finding("critical", "twitter", "twitter_auth", "X browser session check failed", { text: result.text.slice(-1200) }));
+      const keychainBlocked = isChromeSafeStorageAccessIssue(result.text);
+      findings.push(
+        finding("critical", "twitter", "twitter_auth", keychainBlocked ? chromeSafeStorageAccessMessage("X") : "X browser session check failed", {
+          ...(keychainBlocked ? { reason: CHROME_SAFE_STORAGE_REASON } : {}),
+          text: result.text.slice(-1200),
+        }),
+      );
     }
     if (result.rateLimited) {
       findings.push(finding("critical", "twitter", "twitter_rate_limited", "X reported a rate limit", { text: result.text.slice(-1200) }));
@@ -250,12 +257,15 @@ export class TwitterPlugin implements TracePlugin {
       return {
         ok: false,
         level: "critical",
-        message: result.authFailed
-          ? "X browser session could not be authenticated."
-          : result.rateLimited
-            ? "X is currently rate limited."
-            : "X access could not be verified.",
+        message: isChromeSafeStorageAccessIssue(result.text)
+          ? chromeSafeStorageAccessMessage("X")
+          : result.authFailed
+            ? "X browser session could not be authenticated."
+            : result.rateLimited
+              ? "X is currently rate limited."
+              : "X access could not be verified.",
         detail: {
+          ...(isChromeSafeStorageAccessIssue(result.text) ? { reason: CHROME_SAFE_STORAGE_REASON } : {}),
           authFailed: result.authFailed,
           rateLimited: result.rateLimited,
           text: result.text.slice(-1200),

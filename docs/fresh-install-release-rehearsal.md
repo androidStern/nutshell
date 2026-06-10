@@ -2,6 +2,8 @@
 
 This rehearsal proves the released Nutshell artifact works for a real first-time user. It is not a source-tree smoke test. The supported isolation strategy is a disposable macOS VM restored from a known baseline snapshot. Tart or VirtualBuddy are acceptable VM managers. A separate macOS test account is a fallback only if the clean-state verifier passes before install.
 
+Current reset: do not start by running the one-pass VM rehearsal. First run the smaller gates in `docs/release-validation-gates.md`: local imports, signed-out browser behavior, stable signed-in browser behavior, permissions, live sync, and dashboard. The one-pass rehearsal is the final proof, not the debugging harness.
+
 Before operating the VM, read `docs/vm-rehearsal-operations-playbook.md`. It records the current VirtualBuddy gotchas: the named clean VM can be dirty, clipboard paste into the guest may not work, shifted shell symbols can be mangled, `/Volumes/Guest` may only be the VirtualBuddy guest tools image, and enabling SSH can require guest Terminal Full Disk Access.
 
 The rehearsal has two environments:
@@ -183,14 +185,26 @@ This verifier runs the installed public doctor commands. Passing evidence requir
 
 ## Official Archive Imports
 
-Run imports only from official provider exports. The orchestrated runner does this automatically when `--x-archive` and `--youtube-export` are provided. Manual phase runs can use:
+Run imports only from official provider exports. Before using VM time, prove the import paths locally in an isolated Nutshell root:
+
+```bash
+bun run rehearse:verify-imports-local -- \
+  --x-archive /path/to/twitter-archive.zip \
+  --youtube-export /path/to/google-or-youtube-export.zip \
+  --root ~/Documents/NutshellRehearsalShare/import-gates/local-provider-imports \
+  --report ~/Documents/NutshellRehearsalShare/reports/local-provider-imports.json
+```
+
+That command does not prove browser auth, permissions, live sync, or dashboard. It only proves the official provider export import paths.
+
+The orchestrated runner imports the same provider exports when `--x-archive` and `--youtube-export` are provided. Manual phase runs inside the final rehearsal can use:
 
 ```bash
 nutshell import twitter ~/Downloads/twitter-archive.zip --json
 nutshell import youtube ~/Downloads/google-or-youtube-export.zip --json
 ```
 
-Skip the YouTube import only if the release does not claim YouTube historical import support for this rehearsal. Do not use Hermes archives, BirdClaw databases, old daily JSON files, old Nutshell stores, or handmade fake archives.
+Do not skip the YouTube import while the release claims `nutshell import youtube <provider-export>`. Do not use Hermes archives, BirdClaw databases, old daily JSON files, old Nutshell stores, or handmade fake archives.
 
 ## Sync Proof
 

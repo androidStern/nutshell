@@ -108,6 +108,19 @@ test("youtube health probe reports collector auth exceptions instead of crashing
   expect(JSON.stringify(findings[0]?.detail)).toContain("signed-out shell");
 });
 
+test("youtube health probe reports Chrome Safe Storage as a permission block", async () => {
+  const plugin = new YouTubePlugin(async () => {
+    throw new Error("Timed out after 10000ms reading Chrome Safe Storage from macOS Keychain.");
+  });
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("youtube_auth_probe_failed");
+  expect(findings[0]?.message).toContain("macOS blocked access to Chrome Safe Storage");
+  expect((findings[0]?.detail as JsonObject).reason).toBe("chrome_safe_storage_keychain");
+});
+
 function request(mode: "recent" | "backfill", maxRequests: number | null): SyncRequest {
   return {
     source: "youtube",

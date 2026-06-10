@@ -13,6 +13,7 @@ import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 
 const originalPage = BirdClient.prototype.page;
 const originalFollowing = BirdClient.prototype.following;
+const originalCheck = BirdClient.prototype.check;
 const originalClient = (BirdClient.prototype as unknown as { client: unknown }).client;
 
 setDefaultTimeout(15_000);
@@ -20,6 +21,7 @@ setDefaultTimeout(15_000);
 afterEach(() => {
   BirdClient.prototype.page = originalPage;
   BirdClient.prototype.following = originalFollowing;
+  BirdClient.prototype.check = originalCheck;
   (BirdClient.prototype as unknown as { client: unknown }).client = originalClient;
 });
 
@@ -50,6 +52,23 @@ test("twitter auth check fails closed even when account identity is configured",
   expect(result.ok).toBe(false);
   expect(result.authFailed).toBe(true);
   expect(result.text).toContain("401");
+});
+
+test("twitter health probe reports Chrome Safe Storage as a permission block", async () => {
+  BirdClient.prototype.check = async () => ({
+    ok: false,
+    text: "Timed out after 10000ms reading Chrome Safe Storage from macOS Keychain.",
+    rateLimited: false,
+    authFailed: false,
+  });
+  const plugin = new TwitterPlugin();
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("twitter_auth");
+  expect(findings[0]?.message).toContain("macOS blocked access to Chrome Safe Storage");
+  expect((findings[0]?.detail as JsonObject).reason).toBe("chrome_safe_storage_keychain");
 });
 
 test("twitter internal timeout override fails closed when Bird library shape changes", () => {

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   auditRehearsalReport,
+  appendReport,
   classifySourceState,
   podcastSnapshotManifestPath,
   prepareFreshInstallReportPath,
@@ -14,6 +15,8 @@ import {
   verifyFinalReleaseState,
   verifyHostPreflight,
   verifyUnauthenticatedBrowserState,
+  verifyLocalProviderImports,
+  writeReport,
   type CommandResult,
   type RehearsalReport,
 } from "../src/release/fresh-install-rehearsal";
@@ -243,6 +246,7 @@ test("source-state classifier separates auth permission empty data and records",
   expect(classifySourceState({ health: null, source: "youtube" })).toBe("blocked_bug");
   expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth", "sign in required")]), source: "youtube" })).toBe("needs_auth");
   expect(classifySourceState({ health: healthReport("critical", [finding("apple_notes", "apple_notes_permission", "Not authorized to send Apple events")]), source: "apple_notes" })).toBe("needs_permission");
+  expect(classifySourceState({ health: healthReport("critical", [finding("system", "nutshell_app_full_disk_access_missing", "Full Disk Access is missing"), finding("youtube", "youtube_auth_probe_failed", "sign in required")]), source: "youtube" })).toBe("needs_auth");
   expect(classifySourceState({ health: healthReport("ok", []), source: "youtube" })).toBe("ready_empty");
   expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: ["SID"] })).toBe("blocked_bug");
   expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth_probe_failed", "Chrome Safe Storage keychain read timed out")]), source: "youtube", browserCookies: [] })).toBe("blocked_bug");
@@ -342,6 +346,69 @@ test("host preflight fails before a rehearsal when required host inputs are miss
     expect(report.checks.find((check) => check.name === "official Google/YouTube export is available")?.status).toBe("fail");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local provider import gate requires official inputs and canonical records without VM UI", async () => {
+  const home = mkdtempSync(join(tmpdir(), "nutshell-local-import-gate-"));
+  try {
+    const root = join(home, "Nutshell");
+    const xArchive = join(home, "twitter.zip");
+    const youtubeExport = join(home, "google-youtube.zip");
+    writeFileSync(xArchive, "x");
+    writeFileSync(youtubeExport, "youtube");
+    const commands: string[][] = [];
+
+    const report = await verifyLocalProviderImports({
+      root,
+      configPath: join(root, "nutconfig.jsonc"),
+      xArchive,
+      youtubeExport,
+      runner: async (command, options) => {
+        commands.push(command);
+        const dbPath = join(options?.env?.NUTSHELL_ROOT ?? root, "nutshell.sqlite");
+        const db = new Database(dbPath);
+        db.exec("create table if not exists records(source text not null, type text not null, happened_at text)");
+        if (command.includes("twitter")) {
+          db.query("insert into records(source, type, happened_at) values (?, ?, ?)").run("twitter", "twitter.authored", "2026-05-28T00:00:00.000Z");
+        }
+        if (command.includes("youtube")) {
+          db.query("insert into records(source, type, happened_at) values (?, ?, ?)").run("youtube", "youtube.watched", "2026-05-28T00:00:00.000Z");
+        }
+        db.close();
+        return commandResult(0, JSON.stringify({ status: "ok" }));
+      },
+    });
+
+    expect(report.status).toBe("pass");
+    expect(commands.map((command) => command.join(" "))).toEqual([
+      `bun run src/cli.ts --root ${root} import twitter ${xArchive} --json`,
+      `bun run src/cli.ts --root ${root} import youtube ${youtubeExport} --json`,
+    ]);
+    expect(report.checks.find((check) => check.name === "local twitter import produced records")?.status).toBe("pass");
+    expect(report.checks.find((check) => check.name === "local youtube import produced canonical record types")?.status).toBe("pass");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("local provider import gate rejects a missing YouTube export", async () => {
+  const home = mkdtempSync(join(tmpdir(), "nutshell-local-import-gate-missing-"));
+  try {
+    const xArchive = join(home, "twitter.zip");
+    writeFileSync(xArchive, "x");
+    const report = await verifyLocalProviderImports({
+      root: join(home, "Nutshell"),
+      xArchive,
+      youtubeExport: join(home, "missing-google-youtube.zip"),
+      runner: async () => commandResult(0),
+    });
+
+    expect(report.status).toBe("fail");
+    expect(report.checks.find((check) => check.name === "official Google/YouTube export is available for local import gate")?.status).toBe("fail");
+    expect(report.checks.find((check) => check.name === "local youtube import produced records")?.status).toBe("fail");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -609,6 +676,20 @@ test("full rehearsal runner refuses to mix a new attempt into an existing report
   }
 });
 
+test("append report preserves an existing single-phase report", () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-append-report-"));
+  try {
+    const reportPath = join(root, "fresh-install-report.json");
+    writeReport(reportPath, fakeReport("clean-state", ["clean-state"]));
+    appendReport(reportPath, fakeReport("installed-product", ["installed-product"]));
+
+    const parsed = JSON.parse(readFileSync(reportPath, "utf8")) as { runs: Array<{ phase: string }> };
+    expect(parsed.runs.map((run) => run.phase)).toEqual(["clean-state", "installed-product"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function cleanRunner(command: string[]): Promise<CommandResult> {
   const text = command.join(" ");
   if (text.includes("command -v nutshell")) return { code: 1, stdout: "", stderr: "", timedOut: false };
@@ -775,7 +856,7 @@ function healthReport(status: HealthReport["status"], findings: HealthFinding[])
   };
 }
 
-function finding(source: SourceId, code: string, message: string): HealthFinding {
+function finding(source: SourceId | "system", code: string, message: string): HealthFinding {
   return {
     level: "critical",
     source,

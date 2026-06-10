@@ -15,6 +15,7 @@ import {
   verifyFinalReleaseState,
   verifyHostPreflight,
   verifyInstalledProduct,
+  verifyLocalProviderImports,
   verifyUnauthenticatedBrowserState,
   writeReport,
   runCommand,
@@ -44,6 +45,7 @@ type Command =
   | "verify-pre-permission"
   | "verify-clean"
   | "verify-installed"
+  | "verify-imports-local"
   | "verify-unauthenticated"
   | "verify-authenticated"
   | "verify-final";
@@ -140,6 +142,19 @@ try {
   if (command === "import-provider-exports") {
     const flags = parseFlags(args);
     const report = await importProviderExports(stringFlag(flags, "x-archive"), stringFlag(flags, "youtube-export"));
+    persistReport(args, report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.status === "pass" ? 0 : 1);
+  }
+
+  if (command === "verify-imports-local") {
+    const flags = parseFlags(args);
+    const report = await verifyLocalProviderImports({
+      xArchive: stringFlag(flags, "x-archive"),
+      youtubeExport: stringFlag(flags, "youtube-export"),
+      root: stringFlag(flags, "root"),
+      configPath: stringFlag(flags, "config"),
+    });
     persistReport(args, report);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     process.exit(report.status === "pass" ? 0 : 1);
@@ -852,6 +867,7 @@ Usage:
   bun run scripts/fresh-install-rehearsal.ts verify-authenticated [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts stage-podcast-seed --podcasts-seed <sqlite> [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts import-provider-exports --x-archive <zip> --youtube-export <zip> [--report <path>] [--append]
+  bun run scripts/fresh-install-rehearsal.ts verify-imports-local --x-archive <zip> --youtube-export <zip> [--root <isolated-root>] [--report <path>]
   bun run scripts/fresh-install-rehearsal.ts foreground-sync [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts background-sync [--wait-background-ms <ms>] [--report <path>] [--append]
   bun run scripts/fresh-install-rehearsal.ts verify-final [--report <path>] [--append] [--no-dashboard]

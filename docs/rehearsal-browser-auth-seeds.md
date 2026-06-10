@@ -2,7 +2,9 @@
 
 Browser auth seeds exist to avoid repeatedly asking the user to complete Google and X login while testing downstream fresh-install phases. They are private test inputs, like provider exports and Podcasts snapshots.
 
-They can establish the auth-present browser state only after the same run has proven the clean signed-out state. They do not excuse product failures: if doctors or sync cannot use the restored cookies/keychain through the installed product, the run is blocked.
+The preferred auth-present path is now a dedicated VM snapshot with Chrome already signed into Google and X, proven separately from failed release attempts. Browser auth seeds are lower-level fixture plumbing. They can help build or repair that stable VM, but they are not release proof by themselves.
+
+They can establish the auth-present browser state only after the run has proven the clean signed-out state. They do not excuse product failures: if doctors or sync cannot use the restored cookies/keychain through the installed product, the run is blocked.
 
 ## What Must Be Saved
 
@@ -46,7 +48,7 @@ The script quits Chrome, writes `chrome-profile.tgz`, copies `login.keychain-db`
 
 ## Restore
 
-Use restored auth only after the release flow has already proven the signed-out state in the same clean VM attempt. Record it as `browser-auth-seed-restore`, not as `browser-login-handoff`.
+Use restored auth only after signed-out behavior has already been proven for the target environment. Record it as `browser-auth-seed-restore`, not as `browser-login-handoff`.
 
 Start the target Tart VM with the same host share, then run:
 
@@ -69,7 +71,7 @@ bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore \
   --append
 ```
 
-If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Fix the product's normal Keychain/browser behavior or the VM fixture restore path before continuing.
+If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Do not click through prompts and call the gate passed. Fix the product's normal Keychain/browser behavior or replace the VM fixture before continuing.
 
 ## Current Product Bug
 

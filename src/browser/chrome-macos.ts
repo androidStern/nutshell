@@ -5,9 +5,11 @@ import { createDecipheriv, pbkdf2Sync } from "node:crypto";
 import { Database } from "bun:sqlite";
 import type { Cookie } from "@steipete/sweet-cookie";
 import type { BrowserCookieRequest, BrowserCookieSet } from "./cookies";
+import { runProcess, type RunProcessResult } from "../runtime/process";
 
 const CHROME_EPOCH_OFFSET_MICROS = 11_644_473_600_000_000n;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const DEFAULT_KEYCHAIN_TIMEOUT_MS = 10_000;
 
 interface ChromeCookieRow {
   name?: unknown;
@@ -95,6 +97,27 @@ export async function readMacChromeCookiesWithPassword(request: BrowserCookieReq
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+export async function readMacChromeCookiesWithKeychain(
+  request: BrowserCookieRequest,
+  runner: (argv: string[], options: { timeoutMs: number }) => Promise<RunProcessResult> = runProcess,
+): Promise<BrowserCookieSet> {
+  const dbPath = resolveChromeCookiesDb(request.profile);
+  if (!dbPath) {
+    return { cookies: [], warnings: ["Chrome cookies database not found."] };
+  }
+  const timeoutMs = Math.min(Math.max(1, request.timeoutMs ?? DEFAULT_KEYCHAIN_TIMEOUT_MS), DEFAULT_KEYCHAIN_TIMEOUT_MS);
+  const result = await runner(["/usr/bin/security", "find-generic-password", "-a", "Chrome", "-s", "Chrome Safe Storage", "-w"], { timeoutMs });
+  if (result.timedOut) {
+    return { cookies: [], warnings: [`Timed out after ${timeoutMs}ms reading Chrome Safe Storage from macOS Keychain.`] };
+  }
+  const password = result.stdout.trim();
+  if (result.code !== 0 || !password) {
+    const detail = (result.stderr || result.stdout || `security exited ${result.code}`).trim();
+    return { cookies: [], warnings: [`Failed to read macOS Keychain (Chrome Safe Storage): ${detail}`] };
+  }
+  return readMacChromeCookiesWithPassword(request, password);
 }
 
 function resolveChromeCookiesDb(profile: string | undefined): string | null {

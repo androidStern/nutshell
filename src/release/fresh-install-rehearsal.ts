@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { readBrowserCookies } from "../browser/cookies";
@@ -111,6 +111,15 @@ export interface HostPreflightOptions {
   env?: Record<string, string>;
   runner?: CommandRunner;
   platform?: NodeJS.Platform;
+}
+
+export interface LocalProviderImportOptions {
+  xArchive?: string | null;
+  youtubeExport?: string | null;
+  root?: string | null;
+  configPath?: string | null;
+  env?: Record<string, string>;
+  runner?: CommandRunner;
 }
 
 export interface FinalVerificationOptions extends RehearsalOptions {
@@ -437,6 +446,43 @@ export async function verifyHostPreflight(options: HostPreflightOptions = {}): P
   });
 }
 
+export async function verifyLocalProviderImports(options: LocalProviderImportOptions = {}): Promise<RehearsalReport> {
+  const runner = options.runner ?? runCommand;
+  const root = resolve(options.root ?? join(tmpdir(), "nutshell-import-gates", new Date().toISOString().replace(/[:.]/g, "-")));
+  const configPath = resolve(options.configPath ?? resolveConfigPath(root));
+  mkdirSync(root, { recursive: true });
+  const env = {
+    ...normalizedEnv(options.env),
+    [ROOT_ENV]: root,
+    [CONFIG_ENV]: configPath,
+  };
+  const xArchive = options.xArchive ? resolve(options.xArchive) : null;
+  const youtubeExport = options.youtubeExport ? resolve(options.youtubeExport) : null;
+  const checks: RehearsalCheck[] = [
+    fileExistsCheck("official X archive is available for local import gate", xArchive),
+    fileExistsCheck("official Google/YouTube export is available for local import gate", youtubeExport),
+  ];
+
+  if (xArchive && existsSync(xArchive)) checks.push(await localProviderImportCommandCheck("twitter", xArchive, root, runner, env));
+  if (youtubeExport && existsSync(youtubeExport)) checks.push(await localProviderImportCommandCheck("youtube", youtubeExport, root, runner, env));
+
+  const recordStats = readInstalledRecordStats(env);
+  checks.push(localProviderRecordCountCheck("twitter", recordStats.bySource));
+  checks.push(localProviderRecordCountCheck("youtube", recordStats.bySource));
+  for (const requirement of REQUIRED_RECORD_TYPES.filter((item) => item.source === "twitter" || item.source === "youtube")) {
+    checks.push(localProviderRecordTypeCheck(requirement, recordStats.byType));
+  }
+
+  return reportFor("local-provider-imports", checks, {
+    root,
+    configPath,
+    storePath: recordStats.storePath,
+    recordStats: recordStats as unknown as JsonObject,
+    xArchive,
+    youtubeExport,
+  });
+}
+
 export function writeReport(path: string, report: RehearsalReport): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -445,7 +491,11 @@ export function writeReport(path: string, report: RehearsalReport): void {
 export function appendReport(path: string, report: RehearsalReport): void {
   mkdirSync(dirname(path), { recursive: true });
   const existing = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as JsonObject : { runs: [] };
-  const runs = Array.isArray(existing.runs) ? existing.runs : [];
+  const runs = Array.isArray(existing.runs)
+    ? existing.runs
+    : isRehearsalReport(existing)
+      ? [existing as unknown as JsonObject]
+      : [];
   runs.push(report as unknown as JsonObject);
   writeFileSync(path, `${JSON.stringify({ updatedAt: new Date().toISOString(), runs }, null, 2)}\n`, "utf8");
 }
@@ -1039,14 +1089,19 @@ export function classifySourceState(input: {
 }): RehearsalSourceState {
   if ((input.recordCount ?? 0) > 0) return "ready_with_data";
   if (!input.health) return "blocked_bug";
-  const relevant = input.health.findings.filter((finding) => input.source === "system" || finding.source === input.source || finding.source === "system");
+  const sourceFindings = input.health.findings.filter((finding) => input.source === "system" ? finding.source === "system" : finding.source === input.source);
+  const systemFindings = input.health.findings.filter((finding) => finding.source === "system");
+  const relevant = input.source === "system" ? systemFindings : [...sourceFindings, ...systemFindings];
   const text = findingTexts({ ...input.health, findings: relevant });
   if (keychainOrSafeStorageWarnings(text).length) return "blocked_bug";
-  if (relevant.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
+  if (sourceFindings.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
     return "needs_permission";
   }
-  if (relevant.some((finding) => /auth|cookie|signed.?out|login/i.test(`${finding.code} ${finding.message}`))) {
+  if (sourceFindings.some((finding) => /auth|cookie|signed.?out|login/i.test(`${finding.code} ${finding.message}`))) {
     return input.browserCookies?.length ? "blocked_bug" : "needs_auth";
+  }
+  if (systemFindings.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
+    return "needs_permission";
   }
   if (input.health.status === "ok") return "ready_empty";
   return "blocked_bug";
@@ -1096,6 +1151,52 @@ function sourceTypeRecordCheck(requirement: { source: SourceId; label: string; t
   return matched.length
     ? pass(`${requirement.label} produced the expected record type`, { source: requirement.source, matched })
     : fail(`${requirement.label} produced the expected record type`, {
+      source: requirement.source,
+      acceptedTypes: requirement.types,
+      availableTypes: Object.fromEntries(Object.entries(stats).filter(([key]) => key.startsWith(`${requirement.source}:`))) as unknown as JsonObject,
+    });
+}
+
+async function localProviderImportCommandCheck(
+  source: "twitter" | "youtube",
+  archivePath: string,
+  root: string,
+  runner: CommandRunner,
+  env: Record<string, string>,
+): Promise<RehearsalCheck> {
+  const result = await runner(["bun", "run", "src/cli.ts", "--root", root, "import", source, archivePath, "--json"], {
+    env,
+    timeoutMs: 30 * 60_000,
+    cwd: process.cwd(),
+  });
+  return result.code === 0
+    ? pass(`local ${source} import command succeeds`, commandResultDetail(result))
+    : fail(`local ${source} import command succeeds`, commandResultDetail(result));
+}
+
+function commandResultDetail(result: CommandResult): JsonObject {
+  return {
+    code: result.code,
+    timedOut: result.timedOut,
+    stdout: result.stdout.length > 4000 ? result.stdout.slice(result.stdout.length - 4000) : result.stdout,
+    stderr: result.stderr.length > 4000 ? result.stderr.slice(result.stderr.length - 4000) : result.stderr,
+  };
+}
+
+function localProviderRecordCountCheck(source: "twitter" | "youtube", stats: Record<string, RecordStats>): RehearsalCheck {
+  const item = stats[source] ?? { count: 0, first: null, last: null };
+  return item.count > 0
+    ? pass(`local ${source} import produced records`, { source, ...item })
+    : fail(`local ${source} import produced records`, { source, ...item });
+}
+
+function localProviderRecordTypeCheck(requirement: { source: SourceId; label: string; types: string[] }, stats: Record<string, RecordStats>): RehearsalCheck {
+  const matched = requirement.types
+    .map((type) => ({ type, ...(stats[`${requirement.source}:${type}`] ?? { count: 0, first: null, last: null }) }))
+    .filter((item) => item.count > 0);
+  return matched.length
+    ? pass(`local ${requirement.source} import produced canonical record types`, { source: requirement.source, matched })
+    : fail(`local ${requirement.source} import produced canonical record types`, {
       source: requirement.source,
       acceptedTypes: requirement.types,
       availableTypes: Object.fromEntries(Object.entries(stats).filter(([key]) => key.startsWith(`${requirement.source}:`))) as unknown as JsonObject,
@@ -1362,6 +1463,8 @@ function expectedContractForPhase(phase: string): Omit<RehearsalContract, "obser
       return { userStory: "Setup grants permissions to Nutshell.app and enables app-owned background sync.", expectedState: "ready_empty", source: "system" };
     case "provider-archive-imports":
       return { userStory: "Official provider archives import through public import commands.", expectedState: "ready_with_data", source: "all" };
+    case "local-provider-imports":
+      return { userStory: "Official provider archives import in an isolated local root without VM UI.", expectedState: "ready_with_data", source: "all" };
     case "apple-notes-handoff":
       return { userStory: "User allows Notes automation for the installed app path.", expectedState: "handoff", source: "apple_notes" };
     case "foreground-sync":

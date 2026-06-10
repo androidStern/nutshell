@@ -13,6 +13,7 @@ import type {
 import { overlapWindow } from "../../../core/time";
 import { CLI_NAME } from "../../../core/product";
 import { numberAt, stringAt } from "../../../config/config";
+import { CHROME_SAFE_STORAGE_REASON, chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
 import { finding, type TracePlugin } from "../../interface";
 import type { PluginSetupContext, SetupCheck } from "../../../setup/types";
 import { googleTakeoutYoutubePluginResult } from "../../../imports/google-takeout-youtube";
@@ -179,11 +180,20 @@ export class YouTubePlugin implements TracePlugin {
 }
 
 function youtubeProbeException(error: unknown): SetupCheck {
+  const text = String(error);
+  if (isChromeSafeStorageAccessIssue(text)) {
+    return {
+      ok: false,
+      message: chromeSafeStorageAccessMessage("YouTube"),
+      level: "critical",
+      detail: { reason: CHROME_SAFE_STORAGE_REASON, error: text },
+    };
+  }
   return {
     ok: false,
     message: "YouTube browser session could not be verified. Sign into Google My Activity in the configured Chrome profile and try again.",
     level: "critical",
-    detail: { error: String(error) },
+    detail: { error: text },
   };
 }
 
