@@ -242,6 +242,38 @@ test("authenticated verifier classifies unreadable cookies plus keychain timeout
   expect(report.evidence.twitterState).toBe("blocked_bug");
 });
 
+test("authenticated verifier ignores unrelated system permission findings", async () => {
+  const report = await verifyAuthenticatedBrowserState({
+    cookieProbe: {
+      google: async () => ({ cookies: ["SAPISID", "SID"], warnings: [] }),
+      x: async () => ({ cookies: ["auth_token", "ct0"], warnings: [] }),
+    },
+    runner: async (command) => {
+      const source = command.includes("youtube") ? "youtube" : "twitter";
+      return commandResult(
+        2,
+        JSON.stringify({
+          status: "critical",
+          checkedAt: "2026-05-28T00:00:00.000Z",
+          findings: [
+            healthFinding("critical", "system", "nutshell_app_full_disk_access_missing", "Nutshell.app does not have Full Disk Access"),
+            healthFinding("warning", "system", "nutshell_agent_not_enabled", "Nutshell background agent is not enabled"),
+            healthFinding("warning", source as SourceId, "backfill_incomplete", `${source} coverage is incomplete`),
+          ],
+        }),
+      );
+    },
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("pass");
+  expect(report.contract.observedState).toBe("ready_empty");
+  expect(report.evidence.youtubeState).toBe("ready_empty");
+  expect(report.evidence.twitterState).toBe("ready_empty");
+  expect(report.checks.find((check) => check.name === "youtube auth state is usable")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "twitter auth state is usable")?.status).toBe("pass");
+});
+
 test("source-state classifier separates auth permission empty data and records", () => {
   expect(classifySourceState({ health: null, source: "youtube" })).toBe("blocked_bug");
   expect(classifySourceState({ health: healthReport("critical", [finding("youtube", "youtube_auth", "sign in required")]), source: "youtube" })).toBe("needs_auth");
@@ -857,8 +889,12 @@ function healthReport(status: HealthReport["status"], findings: HealthFinding[])
 }
 
 function finding(source: SourceId | "system", code: string, message: string): HealthFinding {
+  return healthFinding("critical", source, code, message);
+}
+
+function healthFinding(level: HealthFinding["level"], source: SourceId | "system", code: string, message: string): HealthFinding {
   return {
-    level: "critical",
+    level,
     source,
     code,
     message,

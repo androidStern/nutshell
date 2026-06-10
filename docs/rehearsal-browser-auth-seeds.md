@@ -4,6 +4,18 @@ Browser auth seeds exist to avoid repeatedly asking the user to complete Google 
 
 The preferred auth-present path is now a dedicated VM snapshot with Chrome already signed into Google and X, proven separately from failed release attempts. Browser auth seeds are lower-level fixture plumbing. They can help build or repair that stable VM, but they are not release proof by themselves.
 
+Current stable auth-present snapshot:
+
+```text
+nutshell-authpresent-sequoia-google-x-20260610
+```
+
+It was proven with public `v0.1.22` in:
+
+```text
+~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610c.json
+```
+
 They can establish the auth-present browser state only after the run has proven the clean signed-out state. They do not excuse product failures: if doctors or sync cannot use the restored cookies/keychain through the installed product, the run is blocked.
 
 ## What Must Be Saved
@@ -26,6 +38,8 @@ The v0.1.16 run captured:
 ```text
 ~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039
 ```
+
+That seed alone was not enough for a stable gate. After restore, `security find-generic-password ... "Chrome Safe Storage" -w` still timed out until the VM was booted, Chrome Safe Storage was allowed through the normal Keychain prompt for both `/usr/bin/security` and Google Chrome, and Google My Activity visibly loaded signed-in data. Prefer cloning the stable auth-present VM snapshot over restoring this seed again.
 
 ## Capture
 
@@ -71,7 +85,7 @@ bun run scripts/fresh-install-rehearsal.ts record-auth-seed-restore \
   --append
 ```
 
-If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Do not click through prompts and call the gate passed. Fix the product's normal Keychain/browser behavior or replace the VM fixture before continuing.
+If `nutshell doctor youtube --json` or `nutshell doctor twitter --json` still reports Chrome Safe Storage or keychain timeout, the restored profile is not valid product evidence. Do not click through prompts during a release gate and call it passed. Repair or replace the auth-present VM fixture first, then clone a fresh gate VM from the repaired snapshot.
 
 ## Current Product Bug
 

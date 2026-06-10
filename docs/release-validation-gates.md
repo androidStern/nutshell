@@ -78,6 +78,13 @@ Pass means both cookie probes and `nutshell doctor youtube --json` / `nutshell d
 
 If a macOS prompt appears during this gate, stop and record it. Do not click through prompts as the harness and call that a pass.
 
+Current proven snapshot:
+
+- VM snapshot: `nutshell-authpresent-sequoia-google-x-20260610`
+- Public release tested: `v0.1.22`
+- Passing report: `~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610c.json`
+- Baseline proof before install: no Nutshell command/app/config/data/agent/tap, Chrome Safe Storage readable, Google auth cookies present, X auth cookies present.
+
 ### 4. Permissions Gate
 
 Purpose: prove missing permissions are reported as permissions, and granted permissions belong to `Nutshell.app`.

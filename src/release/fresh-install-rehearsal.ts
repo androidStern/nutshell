@@ -384,8 +384,8 @@ export async function verifyAuthenticatedBrowserState(options: RehearsalOptions 
   return reportFor("authenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
     twitterExitCode: twitter.result.code,
-    youtubeState: classifySourceState({ health: youtube.value, source: "youtube", browserCookies: googleCookies.cookies }),
-    twitterState: classifySourceState({ health: twitter.value, source: "twitter", browserCookies: xCookies.cookies }),
+    youtubeState: classifyBrowserAuthState(youtube.value, "youtube", googleCookies.cookies),
+    twitterState: classifyBrowserAuthState(twitter.value, "twitter", xCookies.cookies),
     browserWarnings: {
       google: googleCookies.warnings,
       x: xCookies.warnings,
@@ -1054,7 +1054,7 @@ function browserCookiesPresentCheck(name: string, probe: BrowserProbeResult): Re
     return fail(name, { cookies: probe.cookies, warnings: probe.warnings, keychainWarnings, observedState: "blocked_bug" });
   }
   return probe.cookies.length
-    ? pass(name, { cookies: probe.cookies, warnings: probe.warnings, observedState: "ready_with_data" })
+    ? pass(name, { cookies: probe.cookies, warnings: probe.warnings, observedState: "ready_empty" })
     : fail(name, { cookies: [], warnings: probe.warnings, warningText, observedState: "needs_auth" });
 }
 
@@ -1066,19 +1066,45 @@ function authenticatedSourceUsableCheck(
   authCodes: string[],
 ): RehearsalCheck {
   if (!health) return fail(name, { reason: "missing_health_json", observedState: "blocked_bug" });
-  const codes = health.findings.map((finding) => finding.code);
-  const authMatches = codes.filter((code) => authCodes.includes(code));
-  const keychainWarnings = keychainOrSafeStorageWarnings(probe.warnings.concat(findingTexts(health)));
-  const observedState = classifySourceState({ health, source, browserCookies: probe.cookies });
+  const sourceFindings = health.findings.filter((finding) => finding.source === source);
+  const sourceCodes = sourceFindings.map((finding) => finding.code);
+  const systemCodes = health.findings.filter((finding) => finding.source === "system").map((finding) => finding.code);
+  const authMatches = sourceCodes.filter((code) => authCodes.includes(code));
+  const keychainWarnings = keychainOrSafeStorageWarnings(probe.warnings.concat(findingTexts({ ...health, findings: sourceFindings })));
+  const observedState = classifyBrowserAuthState(health, source, probe.cookies);
   if (keychainWarnings.length) {
-    return fail(name, { codes, keychainWarnings, observedState: "blocked_bug" });
+    return fail(name, { sourceCodes, systemCodes, keychainWarnings, observedState: "blocked_bug" });
   }
   if (authMatches.length) {
-    return fail(name, { authCodes: authMatches, codes, observedState });
+    return fail(name, { authCodes: authMatches, sourceCodes, systemCodes, observedState });
   }
-  return health.status === "ok"
-    ? pass(name, { codes, observedState })
-    : fail(name, { codes, status: health.status, findings: health.findings as unknown as JsonObject[], observedState });
+  const criticalSourceFindings = sourceFindings.filter((finding) => finding.level === "critical");
+  if (criticalSourceFindings.length) {
+    return fail(name, {
+      sourceCodes,
+      systemCodes,
+      findings: criticalSourceFindings as unknown as JsonObject[],
+      observedState,
+    });
+  }
+  return probe.cookies.length
+    ? pass(name, { sourceCodes, systemCodes, observedState })
+    : fail(name, { sourceCodes, systemCodes, observedState: "needs_auth" });
+}
+
+function classifyBrowserAuthState(health: HealthReport | null, source: SourceId, browserCookies: string[]): RehearsalSourceState {
+  if (!health) return "blocked_bug";
+  const sourceFindings = health.findings.filter((finding) => finding.source === source);
+  const text = findingTexts({ ...health, findings: sourceFindings });
+  if (keychainOrSafeStorageWarnings(text).length) return "blocked_bug";
+  if (sourceFindings.some((finding) => /auth|cookie|signed.?out|login/i.test(`${finding.code} ${finding.message}`))) {
+    return browserCookies.length ? "blocked_bug" : "needs_auth";
+  }
+  if (sourceFindings.some((finding) => /permission|Full Disk Access|automation|not authorized|access/i.test(`${finding.code} ${finding.message}`))) {
+    return "needs_permission";
+  }
+  if (sourceFindings.some((finding) => finding.level === "critical")) return "blocked_bug";
+  return browserCookies.length ? "ready_empty" : "needs_auth";
 }
 
 export function classifySourceState(input: {

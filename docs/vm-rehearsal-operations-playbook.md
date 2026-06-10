@@ -12,7 +12,7 @@ The current release-validation strategy is in `docs/release-validation-gates.md`
 - Test user: `nutshelltest`
 - Test user password and keychain password: `nutshelltest`
 - Host input folder: `~/Documents/NutshellRehearsalShare`
-- Public product under test for the next strict attempt: `v0.1.21` or later, after the `v0.1.20` private Chrome password-file bypass is reverted.
+- Public product under test for split gates: `v0.1.22` or later. `v0.1.20` private Chrome password-file bypass is rejected and must stay out.
 - Do not trust a VM name that says "Clean Baseline". Verify clean state from inside the VM before claiming clean evidence.
 
 ## Hard Rules
@@ -36,6 +36,7 @@ Use Tart when VirtualBuddy GUI control is unreliable.
 - Do not reuse an attempt VM after a failed product or harness phase. Freeze its report, stop it, and clone a new attempt from the clean Tart base.
 - Chrome may request the VM login keychain for `Chrome Safe Storage`; enter `admin` and choose `Always Allow`. If this is not granted, authenticated browser checks can fail with keychain/Safe Storage warnings instead of proving source auth.
 - Do not make the user repeat Google/X login for every clean VM. The preferred fix is a dedicated auth-present VM snapshot that is proven separately before the final rehearsal. Browser auth seeds are private fixture inputs only; they are not a product pass if the installed product still hits Keychain or Chrome Safe Storage prompts.
+- Current stable auth-present snapshot: `nutshell-authpresent-sequoia-google-x-20260610`. It has no Nutshell app/config/data/agent/tap, Chrome Safe Storage reads without prompts, Google My Activity is signed in, and X cookies are present. Clone from this VM for signed-in browser and live-sync gates instead of restoring the old auth seed.
 - Do not make the product read a private `chrome-safe-storage-password.txt` fixture. `v0.1.20` tried that and it is rejected because it bypasses the real install behavior under test.
 - If `nutshell doctor`, `nutshell health`, or `nutshell sync` reads protected/browser state from a Tart exec or terminal-owned process instead of `Nutshell.app`, freeze the attempt. The public CLI is expected to hand these protected commands to the installed app wrapper on macOS.
 - macOS launchctl may report the app-owned agent through ServiceManagement as `program identifier = Contents/Library/LaunchServices/NutshellAgent` plus `parent bundle identifier = com.winterfell.nutshell`, not as a full `Nutshell.app/...` path. That is valid app-owned evidence; raw CLI/Bun/Homebrew Cellar targets are not.
@@ -141,10 +142,11 @@ Use chat first. If the user asked to be interrupted aggressively, also send a ma
 ## Current Strict Attempt State
 
 - Do not run another monolithic strict attempt until the smaller gates in `docs/release-validation-gates.md` are stable. The `v0.1.20` bypass has been reverted in public `v0.1.21`; keep it reverted.
+- Split-gate status as of 2026-06-10: local imports passed, signed-out browser behavior passed, and signed-in browser behavior passed from `nutshell-authpresent-sequoia-google-x-20260610` using public Homebrew `0.1.22`. Signed-in pass report: `~/Documents/NutshellRehearsalShare/reports/signedin-gate-v0.1.22-20260610c.json`.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.17-20260610a` is frozen failed. It passed clean state, public install, installed product checks, pre-permission state, and signed-out YouTube/X auth behavior, then failed at `setup-flow` because the FDA handoff timed out. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.18-20260610a` is frozen failed. It passed host preflight, VM local checks, clean state, and public Homebrew install, then failed because the first installed app handoff did not write command JSON. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.18-tart-run-20260610a.failed-frozen.json`.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.19-20260610a` is frozen failed. It passed through setup/FDA/background agent, then failed authenticated browser proof because restored Chrome auth still hit a macOS Keychain prompt. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.19-tart-run-20260610a.failed-frozen.json`.
-- Reusable auth-present seed is available at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`, but it is not proven usable for product validation. Use it only after the same run proves signed-out behavior, then record `browser-auth-seed-restore`.
+- Reusable auth-present seed is available at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`, but the raw seed alone was not stable. It timed out reading Chrome Safe Storage until the VM Keychain prompts were approved and Google My Activity visibly loaded signed-in data. Prefer the stable auth-present VM snapshot over restoring this seed again.
 
 ## Historical VirtualBuddy State
 
