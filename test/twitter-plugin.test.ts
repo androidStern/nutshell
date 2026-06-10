@@ -9,6 +9,7 @@ import {
   type TweetEnrichmentTarget,
   type TwitterEnrichmentState,
 } from "../src/plugins/builtin/twitter/enrichment";
+import { looksLikeAuthFailure } from "../src/plugins/builtin/twitter/rate-limit";
 import { TwitterPlugin } from "../src/plugins/builtin/twitter/plugin";
 
 const originalPage = BirdClient.prototype.page;
@@ -80,6 +81,24 @@ test("twitter health probe reports Chrome Safe Storage as a permission block", a
   expect(findings[0]?.guidance?.state).toBe("needs_permission");
   expect(findings[0]?.guidance?.fix).toContain("Chrome Safe Storage");
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
+});
+
+test("missing X auth cookies classify as signed out, not a transient failure", async () => {
+  // Regression: the v0.1.23 signed-out VM gate caught buildClient's own
+  // "X auth cookies missing" message routing to twitter_session_check_failed
+  // (blocked_bug, "retry shortly") instead of telling the user to sign in.
+  expect(looksLikeAuthFailure("X auth cookies missing; warnings=[]")).toBe(true);
+  BirdClient.prototype.check = async () => {
+    const text = "Error: X auth cookies missing; warnings=[]";
+    return { ok: false, text, rateLimited: false, authFailed: looksLikeAuthFailure(text) };
+  };
+  const plugin = new TwitterPlugin();
+
+  const findings = await plugin.check(context());
+
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.code).toBe("twitter_signed_out");
+  expect(findings[0]?.guidance?.state).toBe("needs_auth");
 });
 
 test("twitter health probe reports signed-out sessions as needs_auth", async () => {

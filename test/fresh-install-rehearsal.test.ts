@@ -173,6 +173,58 @@ test("unauthenticated verifier requires source-specific auth failures", async ()
   expect(report.checks.find((check) => check.name === "twitter signed-out state is explicit")?.status).toBe("fail");
 });
 
+test("unauthenticated verifier passes on explicit signed-out findings with needs_auth guidance", async () => {
+  const report = await verifyUnauthenticatedBrowserState({
+    runner: signedOutDoctorRunner(
+      [guidedDoctorFinding("youtube", "youtube_signed_out", "needs_auth")],
+      [guidedDoctorFinding("twitter", "twitter_signed_out", "needs_auth")],
+    ),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("pass");
+  expect(report.verdict).toBe("pass");
+  expect(report.checks.find((check) => check.name === "youtube signed-out state is explicit")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "twitter signed-out state is explicit")?.status).toBe("pass");
+});
+
+// v0.1.23 regression: the signed-out gate accepted twitter_session_check_failed
+// (a blocked_bug probe failure) as signed-out proof. Blocked probes and
+// keychain blocks are not "the product told a signed-out user to sign in".
+test("unauthenticated verifier no longer accepts twitter_session_check_failed or other blocked-probe codes as signed-out proof", async () => {
+  const report = await verifyUnauthenticatedBrowserState({
+    runner: signedOutDoctorRunner(
+      [guidedDoctorFinding("youtube", "youtube_activity_unreadable", "blocked_bug")],
+      [
+        guidedDoctorFinding("twitter", "twitter_keychain_blocked", "needs_permission"),
+        guidedDoctorFinding("twitter", "twitter_session_check_failed", "blocked_bug"),
+      ],
+    ),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  expect(report.verdict).toBe("product_fail");
+  expect(report.checks.find((check) => check.name === "youtube signed-out state is explicit")?.status).toBe("fail");
+  expect(report.checks.find((check) => check.name === "twitter signed-out state is explicit")?.status).toBe("fail");
+});
+
+test("unauthenticated verifier fails a signed-out code whose guidance state is not needs_auth", async () => {
+  const report = await verifyUnauthenticatedBrowserState({
+    runner: signedOutDoctorRunner(
+      [guidedDoctorFinding("youtube", "youtube_signed_out", "blocked_bug")],
+      [guidedDoctorFinding("twitter", "twitter_signed_out", "needs_auth")],
+    ),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("fail");
+  const youtube = report.checks.find((check) => check.name === "youtube signed-out state is explicit");
+  expect(youtube?.status).toBe("fail");
+  expect(youtube?.detail.reason).toBe("matched_guidance_not_needs_auth");
+  expect(report.checks.find((check) => check.name === "twitter signed-out state is explicit")?.status).toBe("pass");
+});
+
 test("authenticated verifier classifies cookies plus keychain timeout as product bug", async () => {
   const report = await verifyAuthenticatedBrowserState({
     cookieProbe: {
@@ -335,7 +387,7 @@ test("gate verdicts classify a harness throw as harness_fail and a failed produc
   expect(product.verdict).toBe("product_fail");
 });
 
-test("permissions gate pre mode passes when every protected source reports needs_permission with fix text", async () => {
+test("permissions gate pre mode passes when notes gate on permission, podcasts report no library, and browser findings are guided", async () => {
   const commands: string[][] = [];
   const report = await verifyPermissionsState({
     mode: "pre",
@@ -351,23 +403,84 @@ test("permissions gate pre mode passes when every protected source reports needs
   expect(report.status).toBe("pass");
   expect(report.verdict).toBe("pass");
   expect(report.checks.find((check) => check.name === "app permission root cause is reported")?.status).toBe("pass");
-  for (const source of ["youtube", "podcasts", "apple_notes", "twitter"]) {
-    expect(report.checks.find((check) => check.name === `${source} reports needs_permission before grants`)?.status).toBe("pass");
-  }
+  expect(report.checks.find((check) => check.name === "apple_notes reports needs_permission before grants")?.status).toBe("pass");
+  const podcasts = report.checks.find((check) => check.name === "podcasts reports needs_permission or an honest empty library before grants");
+  expect(podcasts?.status).toBe("pass");
+  expect(podcasts?.detail.observedState).toBe("ready_empty");
+  expect(report.checks.find((check) => check.name === "youtube pre-grant findings are honestly classified")?.status).toBe("pass");
+  expect(report.checks.find((check) => check.name === "twitter pre-grant findings are honestly classified")?.status).toBe("pass");
 });
 
-test("permissions gate pre mode fails a protected source that reports fake-ready", async () => {
+test("permissions gate pre mode accepts podcasts needs_permission when a protected library exists", async () => {
   const report = await verifyPermissionsState({
     mode: "pre",
-    runner: async () => commandResult(2, prePermissionDoctorJson({ omitSource: "twitter" })),
+    runner: async () => commandResult(2, prePermissionDoctorJson({ podcastsNeedsPermission: true })),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("pass");
+  const check = report.checks.find((item) => item.name === "podcasts reports needs_permission or an honest empty library before grants");
+  expect(check?.status).toBe("pass");
+  expect(check?.detail.observedState).toBe("needs_permission");
+});
+
+test("permissions gate pre mode fails apple_notes or podcasts reporting fake-ready", async () => {
+  const notesFakeReady = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => commandResult(2, prePermissionDoctorJson({ omitSources: ["apple_notes"] })),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+  expect(notesFakeReady.status).toBe("fail");
+  expect(notesFakeReady.verdict).toBe("product_fail");
+  const notesCheck = notesFakeReady.checks.find((item) => item.name === "apple_notes reports needs_permission before grants");
+  expect(notesCheck?.status).toBe("fail");
+  expect(notesCheck?.detail.reason).toBe("fake_ready");
+
+  const podcastsFakeReady = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => commandResult(2, prePermissionDoctorJson({ omitSources: ["podcasts"] })),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+  expect(podcastsFakeReady.status).toBe("fail");
+  expect(podcastsFakeReady.verdict).toBe("product_fail");
+  const podcastsCheck = podcastsFakeReady.checks.find((item) => item.name === "podcasts reports needs_permission or an honest empty library before grants");
+  expect(podcastsCheck?.status).toBe("fail");
+  expect(podcastsCheck?.detail.reason).toBe("fake_ready");
+});
+
+// Chrome's cookie store is not Full-Disk-Access-protected: a youtube/twitter
+// probe that genuinely passes pre-grant in an auth-present VM is honest, not
+// fake-ready, and must not fail the gate.
+test("permissions gate pre mode does not fail youtube or twitter passing cleanly before grants", async () => {
+  const report = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => commandResult(2, prePermissionDoctorJson({ omitSources: ["youtube", "twitter"] })),
+    env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+  });
+
+  expect(report.status).toBe("pass");
+  expect(report.verdict).toBe("pass");
+  const youtube = report.checks.find((check) => check.name === "youtube pre-grant findings are honestly classified");
+  expect(youtube?.status).toBe("pass");
+  expect(youtube?.detail.codes).toEqual([]);
+  const twitter = report.checks.find((check) => check.name === "twitter pre-grant findings are honestly classified");
+  expect(twitter?.status).toBe("pass");
+  expect(twitter?.detail.codes).toEqual([]);
+});
+
+test("permissions gate pre mode fails a browser source finding that carries no guidance", async () => {
+  const report = await verifyPermissionsState({
+    mode: "pre",
+    runner: async () => commandResult(2, prePermissionDoctorJson({ dropGuidanceFor: "youtube" })),
     env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
   });
 
   expect(report.status).toBe("fail");
   expect(report.verdict).toBe("product_fail");
-  const check = report.checks.find((item) => item.name === "twitter reports needs_permission before grants");
+  const check = report.checks.find((item) => item.name === "youtube pre-grant findings are honestly classified");
   expect(check?.status).toBe("fail");
-  expect(check?.detail.reason).toBe("fake_ready");
+  expect(check?.detail.reason).toBe("unguided_findings");
+  expect(check?.detail.codes).toEqual(["backfill_incomplete"]);
 });
 
 test("permissions gate post mode passes when grants are app-owned and seeded notes are visible", async () => {
@@ -939,27 +1052,60 @@ function commandResult(code: number, stdout = "", stderr = ""): CommandResult {
   return { code, stdout, stderr, timedOut: false };
 }
 
-function prePermissionDoctorJson(options: { omitSource?: string } = {}): string {
-  const guided = (source: string, code: string) => ({
+function guidedDoctorFinding(source: string, code: string, state: string) {
+  return {
     level: "critical",
     source,
     code,
-    message: `${source} is blocked until Nutshell.app has its permissions`,
+    message: `${source} ${code}`,
+    detail: {},
+    observedAt: "2026-06-10T00:00:00.000Z",
+    guidance: { state, fix: "Open the provider in Chrome and sign in, then retry.", confirm: `nutshell doctor ${source}` },
+  };
+}
+
+function signedOutDoctorRunner(
+  youtubeFindings: ReturnType<typeof guidedDoctorFinding>[],
+  twitterFindings: ReturnType<typeof guidedDoctorFinding>[],
+): (command: string[]) => Promise<CommandResult> {
+  return async (command) => {
+    const findings = command.includes("youtube") ? youtubeFindings : twitterFindings;
+    return commandResult(2, JSON.stringify({ status: "critical", checkedAt: "2026-06-10T00:00:00.000Z", findings }));
+  };
+}
+
+// Mirrors the v0.1.23 permissions-pre VM evidence: Chrome's cookie store is
+// not Full-Disk-Access-protected, so the browser sources surface only guided
+// non-permission findings pre-grant, and the fresh VM has no Apple Podcasts
+// library, so podcasts honestly reports podcasts_db_missing (ready_empty).
+function prePermissionDoctorJson(options: { omitSources?: string[]; dropGuidanceFor?: string; podcastsNeedsPermission?: boolean } = {}): string {
+  const guided = (level: string, source: string, code: string, state: string) => ({
+    level,
+    source,
+    code,
+    message: `${source} pre-grant state: ${code}`,
     detail: {},
     observedAt: "2026-06-10T00:00:00.000Z",
     guidance: {
-      state: "needs_permission",
-      fix: "Rerun nutshell setup to open the permission window, or grant Full Disk Access to Nutshell.app in System Settings → Privacy & Security.",
+      state,
+      fix:
+        state === "needs_permission"
+          ? "Rerun nutshell setup to open the permission window, or grant Full Disk Access to Nutshell.app in System Settings → Privacy & Security."
+          : "Open the provider app and produce data, then retry.",
       confirm: "nutshell doctor",
     },
   });
   const findings = [
-    guided("system", "nutshell_app_full_disk_access_missing"),
-    guided("youtube", "youtube_keychain_blocked"),
-    guided("podcasts", "podcasts_db_missing"),
-    guided("apple_notes", "apple_notes_permission"),
-    guided("twitter", "twitter_keychain_blocked"),
-  ].filter((finding) => finding.source !== options.omitSource);
+    guided("critical", "system", "nutshell_app_full_disk_access_missing", "needs_permission"),
+    guided("critical", "apple_notes", "apple_notes_automation_permission_required", "needs_permission"),
+    options.podcastsNeedsPermission
+      ? guided("critical", "podcasts", "podcasts_full_disk_access_required", "needs_permission")
+      : guided("critical", "podcasts", "podcasts_db_missing", "ready_empty"),
+    guided("warning", "youtube", "backfill_incomplete", "ready_empty"),
+    guided("warning", "twitter", "backfill_incomplete", "ready_empty"),
+  ]
+    .filter((finding) => !(options.omitSources ?? []).includes(finding.source))
+    .map((finding) => (finding.source === options.dropGuidanceFor ? { ...finding, guidance: undefined } : finding));
   return JSON.stringify({
     status: "critical",
     checkedAt: "2026-06-10T00:00:00.000Z",

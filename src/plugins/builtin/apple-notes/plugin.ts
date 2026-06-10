@@ -615,7 +615,11 @@ function stepTimeoutMs(deadlineAt: number, configuredTimeoutMs: number, reserveM
 
 function isAppleNotesPermissionError(error: unknown): boolean {
   const text = String(error);
-  return /not authorized|not authorised|not allowed|not permitted|permission|automation|accessibility|privacy/i.test(text);
+  // AppleEvent -1712 (timed out) is how an unanswered automation-consent
+  // prompt presents: the event waits on consent that never arrives. Guiding
+  // the user to approve automation is right for that dominant case; a genuine
+  // Notes hang retries through the same fix text harmlessly.
+  return /not authorized|not authorised|not allowed|not permitted|permission|automation|accessibility|privacy|AppleEvent timed out|-1712/i.test(text);
 }
 
 function eventRecord(note: NoteMetadata, type: string, happenedAt: string, observedAt: Date): TraceRecord {

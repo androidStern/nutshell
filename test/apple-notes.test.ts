@@ -101,6 +101,41 @@ test("apple notes automation denial returns an explicit permission finding", asy
   }
 });
 
+test("AppleEvent consent timeout classifies as automation permission, not a bug", async () => {
+  // Regression: the v0.1.23 permissions-pre VM gate caught -1712 (an
+  // unanswered automation-consent prompt times out) classifying as
+  // apple_notes_access_failed/blocked_bug instead of needs_permission.
+  const root = mkdtempSync(join(tmpdir(), "nutshell-notes-consent-timeout-"));
+  try {
+    const timedOutSource: NotesSource = {
+      async scanMetadata() {
+        throw new Error("AppleEvent timed out. (-1712)");
+      },
+      async fetchBodies() {
+        return new Map();
+      },
+    };
+    const plugin = new AppleNotesPlugin(() => timedOutSource);
+    const findings = await plugin.check({
+      root,
+      config: {},
+      logger: new JsonlLogger(join(root, "logs", "nutshell.jsonl")),
+      signal: new AbortController().signal,
+      now: () => new Date("2026-05-21T12:00:00Z"),
+      records: emptyRecordReader(),
+      writeArtifact: async () => {
+        throw new Error("health test should not write artifacts");
+      },
+    });
+
+    expect(findings.some((item) => item.code === "apple_notes_automation_permission_required")).toBe(true);
+    expect(findings[0]?.guidance?.state).toBe("needs_permission");
+    expect(findings[0]?.guidance?.fix).toContain("Automation");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("apple notes health probe fails closed on automation denial", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-notes-health-permission-"));
   try {

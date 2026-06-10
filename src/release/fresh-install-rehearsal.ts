@@ -158,10 +158,21 @@ const REQUIRED_RECORD_TYPES: Array<{ source: SourceId; label: string; types: str
   { source: "twitter", label: "Twitter/X activity", types: ["twitter.authored", "twitter.bookmarked", "twitter.liked", "twitter.following"] },
 ];
 // The old catch-all auth-probe codes (youtube_auth_probe_failed, twitter_auth)
-// were split into one code per user state; the rehearsal accepts any of the
-// split codes wherever it used to match the catch-all.
-const YOUTUBE_AUTH_PROBE_CODES = ["youtube_signed_out", "youtube_keychain_blocked", "youtube_activity_unreadable"];
-const TWITTER_AUTH_PROBE_CODES = ["twitter_signed_out", "twitter_keychain_blocked", "twitter_session_check_failed"];
+// were split into one code per user state. These lists are the auth-probe
+// failure codes the signed-in gate must NOT see after login; the blocked-probe
+// codes (youtube_activity_unreadable, twitter_session_check_failed) were
+// dropped from them after v0.1.23 — those are blocked_bug states, and the
+// signed-in gate already fails them as critical source findings.
+const YOUTUBE_AUTH_PROBE_CODES = ["youtube_signed_out", "youtube_keychain_blocked"];
+const TWITTER_AUTH_PROBE_CODES = ["twitter_signed_out", "twitter_keychain_blocked"];
+// Signed-out gate acceptance (gates doc "Signed-Out Browser Gate"): only the
+// explicit signed-out classification proves the product told a signed-out
+// user to sign in. Keychain-blocked codes are deliberately excluded — a
+// keychain block in the signed-out gate is a blocked probe, not a pass — and
+// the blocked-probe codes the v0.1.23 gate wrongly accepted
+// (twitter_session_check_failed, youtube_activity_unreadable) are out too.
+const YOUTUBE_SIGNED_OUT_ACCEPTED_CODES = ["youtube_signed_out"];
+const TWITTER_SIGNED_OUT_ACCEPTED_CODES = ["twitter_signed_out"];
 const AGENT_LABEL = "com.winterfell.nutshell.agent";
 const BUNDLE_ID = "com.winterfell.nutshell";
 const REQUIRED_FULL_REHEARSAL_PHASES = [
@@ -407,9 +418,9 @@ async function verifyUnauthenticatedBrowserStateChecks(options: RehearsalOptions
   const twitter = await runJsonCommand<HealthReport>(["nutshell", "doctor", "twitter", "--json"], runner, env, 60_000);
   const checks = [
     jsonCommandCheck("youtube doctor returns JSON while signed out", youtube),
-    authFailureCheck("youtube signed-out state is explicit", youtube.value, YOUTUBE_AUTH_PROBE_CODES),
+    signedOutStateCheck("youtube signed-out state is explicit", youtube.value, YOUTUBE_SIGNED_OUT_ACCEPTED_CODES),
     jsonCommandCheck("twitter doctor returns JSON while signed out", twitter),
-    authFailureCheck("twitter signed-out state is explicit", twitter.value, TWITTER_AUTH_PROBE_CODES),
+    signedOutStateCheck("twitter signed-out state is explicit", twitter.value, TWITTER_SIGNED_OUT_ACCEPTED_CODES),
   ];
   return reportFor("unauthenticated-browser-state", checks, {
     youtubeExitCode: youtube.result.code,
@@ -558,9 +569,19 @@ async function verifyLocalProviderImportsChecks(options: LocalProviderImportOpti
 
 // Permissions gate (honest-setup criterion 25; gates doc "Permissions Gate").
 // pre: runs inside a clone of the auth-present snapshot with the release
-// installed and Full Disk Access never granted — doctor must report
-// needs_permission for every protected source, each finding carrying its own
-// fix and confirm text, with the Nutshell.app root cause leading. post: runs
+// installed and Full Disk Access never granted. macOS reality (encoded from
+// the v0.1.23 VM evidence): Chrome's cookie store is NOT
+// Full-Disk-Access-protected, so the youtube/twitter probes legitimately pass
+// pre-grant in an auth-present VM, and a fresh VM has no Apple Podcasts
+// library, so podcasts honestly reports its no-library state instead of an
+// FDA finding. The pre contract is therefore per source: the Nutshell.app
+// root cause leads with needs_permission; apple_notes must report a
+// source-level needs_permission finding (AppleEvent -1712 consent timeouts
+// classify as apple_notes_automation_permission_required) with non-empty fix
+// and confirm text; podcasts must report needs_permission OR the honest
+// no-library state (podcasts_db_missing / guidance.state ready_empty); and
+// youtube/twitter must only be classified honestly — every finding they emit
+// carries guidance, with no needs_permission requirement. post: runs
 // inside a clone of the staged post-permission snapshot
 // (docs/post-permission-snapshot-session.md) — doctor must be clean of
 // needs_permission findings, the app status block must show Full Disk Access
@@ -579,13 +600,21 @@ async function verifyPermissionsStateChecks(phase: string, options: PermissionsV
     const checks: RehearsalCheck[] = [
       jsonCommandCheck("doctor returns JSON before permission grants", doctor),
       appPermissionRootCauseCheck(doctor.value),
-      ...REQUIRED_SOURCES.map((source) => needsPermissionBeforeGrantCheck(source, doctor.value)),
+      needsPermissionBeforeGrantCheck("apple_notes", doctor.value),
+      podcastsPreGrantStateCheck(doctor.value),
+      browserSourceHonestClassificationCheck("youtube", doctor.value),
+      browserSourceHonestClassificationCheck("twitter", doctor.value),
     ];
     return reportFor(phase, checks, {
       mode: options.mode,
       doctorExitCode: doctor.result.code,
       findingCodes,
-      protectedSources: [...REQUIRED_SOURCES],
+      preGrantContract: {
+        apple_notes: "needs_permission",
+        podcasts: "needs_permission_or_no_library",
+        youtube: "honest_classification_only",
+        twitter: "honest_classification_only",
+      },
     });
   }
   const notesSync = await runJsonCommand<JsonObject>(["nutshell", "sync", "apple_notes", "--json"], runner, env, 10 * 60_000);
@@ -1235,11 +1264,24 @@ function appInstalledCheck(health: HealthReport): RehearsalCheck {
     : fail("installed app is visible to health", { app: (health.app ?? {}) as unknown as JsonObject });
 }
 
-function authFailureCheck(name: string, health: HealthReport | null, acceptedCodes: string[]): RehearsalCheck {
+// Signed-out gate contract: an accepted signed-out code must be present, and
+// every matched finding that carries guidance must classify the state as
+// needs_auth. A signed-out-coded finding with blocked_bug or needs_permission
+// guidance is a blocked probe wearing an auth label, not signed-out proof.
+function signedOutStateCheck(name: string, health: HealthReport | null, acceptedCodes: string[]): RehearsalCheck {
   if (!health) return fail(name, { reason: "missing_health_json" });
   const codes = health.findings.map((finding) => finding.code);
-  const matched = codes.filter((code) => acceptedCodes.includes(code));
-  return matched.length ? pass(name, { matched, codes, observedState: "needs_auth" }) : fail(name, { acceptedCodes, codes, observedState: classifySourceState({ health, source: "system" }) });
+  const matchedFindings = health.findings.filter((finding) => acceptedCodes.includes(finding.code));
+  if (!matchedFindings.length) {
+    return fail(name, { acceptedCodes, codes, observedState: classifySourceState({ health, source: "system" }) });
+  }
+  const misguided = matchedFindings.flatMap((finding) =>
+    finding.guidance && finding.guidance.state !== "needs_auth" ? [{ code: finding.code, guidanceState: finding.guidance.state }] : [],
+  );
+  if (misguided.length) {
+    return fail(name, { reason: "matched_guidance_not_needs_auth", misguided, codes, acceptedCodes });
+  }
+  return pass(name, { matched: matchedFindings.map((finding) => finding.code), codes, observedState: "needs_auth" });
 }
 
 function noAuthFailureCheck(name: string, health: HealthReport | null, authCodes: string[]): RehearsalCheck {
@@ -1385,8 +1427,11 @@ function needsPermissionBeforeGrantCheck(source: SourceId, health: HealthReport 
   const sourceFindings = health.findings.filter((finding) => finding.source === source);
   const needsPermission = sourceFindings.filter((finding) => finding.guidance?.state === "needs_permission");
   if (!needsPermission.length) {
-    // A protected source with no problem finding before any grant is
+    // A permission-gated source with no problem finding before any grant is
     // fake-ready: the product claims usability it cannot have (criterion 25).
+    // This applies to apple_notes and podcasts only — browser sources go
+    // through browserSourceHonestClassificationCheck instead, because their
+    // probes can genuinely pass pre-grant.
     return fail(name, {
       source,
       reason: sourceFindings.length ? "no_needs_permission_finding" : "fake_ready",
@@ -1397,6 +1442,52 @@ function needsPermissionBeforeGrantCheck(source: SourceId, health: HealthReport 
   return missingGuidance.length
     ? fail(name, { source, reason: "missing_fix_or_confirm", codes: missingGuidance.map((finding) => finding.code) })
     : pass(name, { source, codes: needsPermission.map((finding) => finding.code) });
+}
+
+// Podcasts pre-grant contract: EITHER blocked by permission (FDA-related
+// podcasts findings only appear when a protected library exists) OR honestly
+// empty — a fresh VM has no Apple Podcasts library, so podcasts_db_missing
+// with guidance.state ready_empty is the truthful pre-grant answer there. A
+// pre-grant podcasts pass with zero findings is still fake-ready: on a fresh
+// VM the probe cannot genuinely succeed, so one of the two states must show.
+function podcastsPreGrantStateCheck(health: HealthReport | null): RehearsalCheck {
+  const name = "podcasts reports needs_permission or an honest empty library before grants";
+  if (!health) return fail(name, { source: "podcasts", reason: "missing_health_json" });
+  const sourceFindings = health.findings.filter((finding) => finding.source === "podcasts");
+  const needsPermission = sourceFindings.filter((finding) => finding.guidance?.state === "needs_permission");
+  if (needsPermission.length) {
+    const missingGuidance = needsPermission.filter((finding) => !finding.guidance?.fix?.trim() || !finding.guidance?.confirm?.trim());
+    return missingGuidance.length
+      ? fail(name, { source: "podcasts", reason: "missing_fix_or_confirm", codes: missingGuidance.map((finding) => finding.code) })
+      : pass(name, { source: "podcasts", observedState: "needs_permission", codes: needsPermission.map((finding) => finding.code) });
+  }
+  const noLibrary = sourceFindings.filter((finding) => finding.code === "podcasts_db_missing" || finding.guidance?.state === "ready_empty");
+  if (noLibrary.length) {
+    return pass(name, { source: "podcasts", observedState: "ready_empty", codes: noLibrary.map((finding) => finding.code) });
+  }
+  return fail(name, {
+    source: "podcasts",
+    reason: sourceFindings.length ? "no_needs_permission_or_no_library_finding" : "fake_ready",
+    codes: sourceFindings.map((finding) => finding.code),
+  });
+}
+
+// Browser-backed sources read Chrome's cookie store, which is NOT
+// Full-Disk-Access-protected on macOS — their probes legitimately pass
+// pre-grant in an auth-present VM (v0.1.23 evidence), so the gate requires no
+// needs_permission finding from them. What it does require is honesty: every
+// finding they emit must carry guidance with non-empty fix and confirm text.
+// A source-level finding with no or empty guidance is fake and fails.
+function browserSourceHonestClassificationCheck(source: SourceId, health: HealthReport | null): RehearsalCheck {
+  const name = `${source} pre-grant findings are honestly classified`;
+  if (!health) return fail(name, { source, reason: "missing_health_json" });
+  const sourceFindings = health.findings.filter((finding) => finding.source === source);
+  const unguided = sourceFindings
+    .filter((finding) => !finding.guidance || !finding.guidance.fix.trim() || !finding.guidance.confirm.trim())
+    .map((finding) => finding.code);
+  return unguided.length
+    ? fail(name, { source, reason: "unguided_findings", codes: unguided })
+    : pass(name, { source, codes: sourceFindings.map((finding) => finding.code) });
 }
 
 function zeroNeedsPermissionCheck(health: HealthReport | null): RehearsalCheck {
@@ -1954,7 +2045,7 @@ function expectedContractForPhase(phase: string): Omit<RehearsalContract, "obser
     case "foreground-sync":
       return { userStory: "Foreground sync produces live records for every enabled source.", expectedState: "ready_with_data", source: "all" };
     case PERMISSIONS_PRE_PHASE:
-      return { userStory: "Before any grant, protected sources report needs_permission with the Nutshell.app root cause and exact fix text.", expectedState: "needs_permission", source: "all" };
+      return { userStory: "Before any grant, the Nutshell.app root cause and Notes report needs_permission with exact fix text, Podcasts reports needs_permission or an honest empty library, and browser sources are classified honestly.", expectedState: "needs_permission", source: "all" };
     case PERMISSIONS_POST_PHASE:
       return { userStory: "After the staged permission session, Nutshell.app owns the grants, probes pass, and the seeded notes are visible.", expectedState: "ready_with_data", source: "all" };
     case LIVE_SYNC_DASHBOARD_PHASE:

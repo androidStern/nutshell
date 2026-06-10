@@ -3,6 +3,8 @@ export function looksLikeRateLimit(text: string): boolean {
 }
 
 export function looksLikeAuthFailure(text: string): boolean {
-  return /unauthorized|forbidden|login required|invalid.*cookie|auth.*failed/i.test(text);
+  // "auth cookies missing" is the product's own no-session message from
+  // BirdClient.buildClient — a signed-out browser, not a transient failure.
+  return /unauthorized|forbidden|login required|invalid.*cookie|auth.*failed|auth cookies missing/i.test(text);
 }
 

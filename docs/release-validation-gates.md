@@ -112,8 +112,10 @@ Purpose: prove missing permissions are reported as permissions, and granted perm
 
 The post-permission snapshot is produced once by the staged ~20-minute human session in `docs/post-permission-snapshot-session.md` (naming: `nutshell-postperm-sequoia-<YYYYMMDD>`). That session is the only human clicking in this gate's lifecycle; it builds a frozen fixture, it is not pass evidence. The gate itself asserts both states mechanically, over SSH/CLI from clones:
 
-- pre-permission state (clone of the auth-present snapshot with the release candidate installed, no grants): doctor reports `needs_permission` with the correct fix text in `finding.guidance`.
+- pre-permission state (clone of the auth-present snapshot with the release candidate installed, no grants): doctor reports the per-source pre-state contract below.
 - post-permission state (clone of the post-permission snapshot): probes pass clean, with the grants owned by `Nutshell.app`.
+
+Pre-state contract per source (encoded from the v0.1.23 frozen evidence): the system-level Full Disk Access root cause (`nutshell_app_full_disk_access_missing` or `nutshell_app_missing`) must be present with `needs_permission` guidance; `apple_notes` must report a source-level `needs_permission` finding with non-empty fix/confirm (AppleEvent -1712 consent timeouts classify as `apple_notes_automation_permission_required`); `podcasts` must report either `needs_permission` or its honest no-library state (`podcasts_db_missing`, `guidance.state: ready_empty`) — FDA-related podcasts findings only appear when a protected library exists, and a fresh VM has none; `youtube` and `twitter` are not FDA-gated, because Chrome's cookie store is not Full-Disk-Access-protected — they may genuinely pass pre-grant, and the gate only requires that any finding they emit carries guidance.
 
 This gate covers:
 
