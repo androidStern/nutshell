@@ -10,7 +10,7 @@ This file captures operational lessons from the strict Nutshell fresh-install re
 - Test user: `nutshelltest`
 - Test user password and keychain password: `nutshelltest`
 - Host input folder: `~/Documents/NutshellRehearsalShare`
-- Public product under test for the next strict attempt: `v0.1.18`
+- Public product under test for the next strict attempt: `v0.1.19`
 - Do not trust a VM name that says "Clean Baseline". Verify clean state from inside the VM before claiming clean evidence.
 
 ## Hard Rules
@@ -117,6 +117,7 @@ Use this sequence before running product checks:
 - Attempt `nutshell-strict-attempt-v0.1.15-20260609a` failed at `published-install`: Homebrew installed formula `0.1.15`, but the installed command printed `nutshell 0.1.14` because `PRODUCT_VERSION` was still hardcoded. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.15-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Release certification now checks source, compiled, and package-installed CLI versions against `package.json`.
 - Attempt `nutshell-strict-attempt-v0.1.16-20260609a` failed at `authenticated-browser-state`: Google and X were visibly signed in, but both browser cookie probes and doctors timed out reading Chrome Safe Storage through the macOS keychain. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.16-tart-run-20260609a.failed-frozen.json` as a failed published-artifact attempt. Private auth seed captured at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`.
 - Attempt `nutshell-strict-attempt-v0.1.17-20260610a` failed at `setup-flow`: clean baseline, public Homebrew install, installed version/app visibility, pre-permission state, and signed-out YouTube/X behavior passed, but the CLI setup's Full Disk Access handoff timed out before the user/agent finished granting FDA. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`. The fix is a longer permission handoff timeout in `v0.1.18`; do not reuse this VM as pass evidence.
+- Attempt `nutshell-strict-attempt-v0.1.18-20260610a` failed at `installed-product`: clean baseline and public Homebrew install passed, but the first installed `nutshell health --json` app handoff returned without a result file. Preserve `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.18-tart-run-20260610a.failed-frozen.json`. The fix is app-owned status inspection without recursive Launch Services app opens plus a short result-file grace wait in `v0.1.19`.
 
 ## Attention Triggers
 
@@ -133,8 +134,9 @@ Use chat first. If the user asked to be interrupted aggressively, also send a ma
 
 ## Current Strict Attempt State
 
-- The next strict attempt must use public `v0.1.18` after the setup permission handoff timeout fix is published.
+- The next strict attempt must use public `v0.1.19` after the app handoff result-file fix is published.
 - Fresh Tart attempt `nutshell-strict-attempt-v0.1.17-20260610a` is frozen failed. It passed clean state, public install, installed product checks, pre-permission state, and signed-out YouTube/X auth behavior, then failed at `setup-flow` because the FDA handoff timed out. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.17-tart-run-20260610a.failed-frozen.json`.
+- Fresh Tart attempt `nutshell-strict-attempt-v0.1.18-20260610a` is frozen failed. It passed host preflight, VM local checks, clean state, and public Homebrew install, then failed because the first installed app handoff did not write command JSON. Frozen report: `~/Documents/NutshellRehearsalShare/reports/fresh-install-report-strict-v0.1.18-tart-run-20260610a.failed-frozen.json`.
 - Reusable auth-present seed is available at `~/Documents/NutshellRehearsalShare/auth-profiles/chrome-google-x-20260610-0039`. Use it only after the same run proves signed-out behavior, then record `browser-auth-seed-restore`.
 
 ## Historical VirtualBuddy State

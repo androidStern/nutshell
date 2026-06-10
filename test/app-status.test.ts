@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredAppPath, ensureStableAppPath, parseNutshellAppStatus } from "../src/macos/app-status";
+import { configuredAppPath, ensureStableAppPath, parseNutshellAppStatus, shouldRunAppCommandDirect } from "../src/macos/app-status";
+
+test("app-owned core commands do not recursively open another app instance", () => {
+  expect(shouldRunAppCommandDirect({ NUTSHELL_APP_BUNDLE_ID: "com.winterfell.nutshell" }, "darwin")).toBe(true);
+  expect(shouldRunAppCommandDirect({}, "darwin")).toBe(false);
+  expect(shouldRunAppCommandDirect({}, "linux")).toBe(true);
+});
 
 test("app status parser preserves app-owned permission and agent states", () => {
   const missing = parseNutshellAppStatus(

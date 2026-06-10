@@ -69,7 +69,7 @@ export async function inspectNutshellApp(config: TraceConfig, explicit?: string)
 
 export async function runNutshellAppCommand(appPath: string, args: string[], timeoutMs = 30_000): Promise<RunProcessResult> {
   const executable = appExecutable(appPath);
-  if (process.platform !== "darwin" || !existsSync(join(appPath, "Contents", "Info.plist"))) {
+  if (shouldRunAppCommandDirect(process.env, process.platform) || !existsSync(join(appPath, "Contents", "Info.plist"))) {
     return runProcess([executable, ...args], { timeoutMs });
   }
 
@@ -87,7 +87,7 @@ export async function runNutshellAppCommand(appPath: string, args: string[], tim
       resultPath,
     ], { timeoutMs });
     if (launched.code !== 0 || launched.timedOut) return launched;
-    if (!existsSync(resultPath)) {
+    if (!await waitForPath(resultPath, 5_000)) {
       return {
         code: 70,
         stdout: launched.stdout,
@@ -105,6 +105,20 @@ export async function runNutshellAppCommand(appPath: string, args: string[], tim
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+export function shouldRunAppCommandDirect(env: Record<string, string | undefined> = process.env, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "darwin") return true;
+  return env.NUTSHELL_APP_BUNDLE_ID === "com.winterfell.nutshell";
+}
+
+async function waitForPath(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  return existsSync(path);
 }
 
 export function parseNutshellAppStatus(raw: string, path: string, executable = appExecutable(path)): AppBackgroundStatus {
