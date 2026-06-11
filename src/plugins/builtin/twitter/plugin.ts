@@ -5,6 +5,7 @@ import type {
   JsonObject,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   ProviderExportImportRequest,
   RawObservation,
@@ -43,6 +44,9 @@ interface TwitterState {
   enrichment?: TwitterEnrichmentState;
 }
 
+const SMOKE_COOKIE_TIMEOUT_MS = 2_000;
+const SMOKE_REQUEST_TIMEOUT_MS = 8_000;
+
 export class TwitterPlugin implements TracePlugin {
   constructor(private readonly enrichmentFetcher: TweetEnrichmentFetcher = new SyndicationTweetFetcher()) {}
 
@@ -73,9 +77,30 @@ export class TwitterPlugin implements TracePlugin {
 
   async check(ctx: PluginContext) {
     const cfg = config(ctx);
+    return this.checkWithConfig(cfg, ctx.signal);
+  }
+
+  async smoke(ctx: PluginContext): Promise<PluginSmokeResult> {
+    const cfg = config(ctx);
+    const findings = await this.checkWithConfig(
+      {
+        ...cfg,
+        cookieTimeoutMs: Math.min(cfg.cookieTimeoutMs, SMOKE_COOKIE_TIMEOUT_MS),
+        timeoutMs: Math.min(cfg.timeoutMs, SMOKE_REQUEST_TIMEOUT_MS),
+      },
+      ctx.signal,
+    );
+    return {
+      message: findings[0]?.message ?? "X browser session is readable.",
+      findings,
+      metrics: { timeoutMs: Math.min(cfg.timeoutMs, SMOKE_REQUEST_TIMEOUT_MS) },
+    };
+  }
+
+  private async checkWithConfig(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<HealthFinding[]> {
     const findings: HealthFinding[] = [];
     const client = new BirdClient(cfg);
-    const result = await client.check(ctx.signal);
+    const result = await client.check(signal);
     if (!result.ok || result.authFailed) {
       const text = result.text.slice(-1200);
       if (isChromeSafeStorageAccessIssue(result.text)) {

@@ -1,4 +1,5 @@
-import { readBrowserCookieHeader } from "../../../browser/cookies";
+import { readBrowserCookies } from "../../../browser/cookies";
+import { toCookieHeader, type Cookie } from "@steipete/sweet-cookie";
 import { chromeSafeStorageAccessMessage, isChromeSafeStorageAccessIssue } from "../../../browser/access-errors";
 import type { JsonObject } from "../../../core/types";
 import type { YouTubeActivityItem } from "./identity";
@@ -12,7 +13,17 @@ interface MyActivitySession {
   at: string;
   fsid: string;
   bl: string;
+  authUser: number;
 }
+
+interface MyActivityDeps {
+  readBrowserCookies: typeof readBrowserCookies;
+  fetch: FetchLike;
+}
+
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+type JarCookie = Cookie & { hostOnly?: boolean };
 
 export async function collectYouTubeFromMyActivityHttp(input: {
   cutoffYmd: string;
@@ -26,23 +37,16 @@ export async function collectYouTubeFromMyActivityHttp(input: {
   // without this, My Activity bounces every request to the account chooser.
   authUser: number;
   signal: AbortSignal;
-}): Promise<MyActivityHttpResult> {
-  const cookies = await readBrowserCookieHeader({
-    url: "https://myactivity.google.com/myactivity?product=26",
-    browser: input.cookieBrowser,
-    profile: input.cookieProfile || undefined,
-    timeoutMs: input.cookieTimeoutMs,
-  });
-  if (!/SAPISID|__Secure-|SID=|HSID=/.test(cookies.header)) {
-    const warnings = cookies.warnings.join("; ");
+}, deps: MyActivityDeps = DEFAULT_DEPS): Promise<MyActivityHttpResult> {
+  const cookieJar = await MyActivityCookieJar.fromBrowser(input, deps);
+  const myActivityCookieHeader = cookieJar.headerFor(MYACTIVITY_URL);
+  if (!/SAPISID|__Secure-|SID=|HSID=/.test(myActivityCookieHeader)) {
+    const warnings = cookieJar.warnings.join("; ");
     const message = isChromeSafeStorageAccessIssue(warnings) ? chromeSafeStorageAccessMessage("YouTube") : "Google browser cookies were not usable for My Activity";
     throw new Error(`${message}; warnings=${warnings}`);
   }
-  const cookieHeader = cookies.header;
-  const authUser = Math.max(0, Math.trunc(input.authUser));
+  const session = await establishSession(cookieJar, Math.max(0, Math.trunc(input.authUser)), input.signal, deps);
   {
-    const page = await fetchText(cookieHeader, withAuthUser("https://myactivity.google.com/myactivity?product=26", authUser), null, authUser, input.signal);
-    const session = parseSession(page);
     const allItems: YouTubeActivityItem[] = [];
     let cursor: string | null = input.cursor ?? null;
     let nextCursor: string | null = cursor;
@@ -55,7 +59,7 @@ export async function collectYouTubeFromMyActivityHttp(input: {
 
     while (pages < input.maxPages) {
       const request = cursor ? [youtubeProductFilter(), cursor] : [youtubeProductFilter()];
-      const response = await callDisplayItems(cookieHeader, session, request, pages, authUser, input.signal);
+      const response = await callDisplayItems(cookieJar, session, request, pages, input.signal, deps);
       pages += 1;
       const parsed = parseDisplayItemsResponse(response);
       const items = parsed.rows.map(rowToItem).filter((item): item is YouTubeActivityItem => Boolean(item));
@@ -95,40 +99,94 @@ export async function collectYouTubeFromMyActivityHttp(input: {
         newestLoadedDateKey,
         loadedCardCount: allItems.length,
         nextCursor: reachedCutoff ? null : nextCursor,
+        authUser: session.authUser,
       },
     };
   }
+}
+
+async function establishSession(cookieJar: MyActivityCookieJar, preferredAuthUser: number, signal: AbortSignal, deps: MyActivityDeps): Promise<MyActivitySession> {
+  let lastError: unknown = null;
+  for (const authUser of authUserCandidates(preferredAuthUser)) {
+    try {
+      const page = await fetchText(cookieJar, withAuthUser(MYACTIVITY_URL, authUser), null, authUser, signal, deps);
+      return parseSession(page, authUser);
+    } catch (error) {
+      lastError = error;
+      if (!isAccountSessionError(error)) throw error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function authUserCandidates(preferred: number): number[] {
+  const candidates = [preferred, 0, 1, 2, 3, 4].filter((value) => Number.isFinite(value) && value >= 0);
+  return Array.from(new Set(candidates.map((value) => Math.trunc(value))));
+}
+
+function isAccountSessionError(error: unknown): boolean {
+  return String(error).includes(MYACTIVITY_SESSION_UNVERIFIABLE);
 }
 
 function withAuthUser(url: string, authUser: number): string {
   return `${url}${url.includes("?") ? "&" : "?"}authuser=${authUser}`;
 }
 
-async function fetchText(cookieHeader: string, url: string, formBody: string | null, authUser: number, signal: AbortSignal): Promise<string> {
-  const headers = new Headers({
-    "user-agent": userAgent,
-    cookie: cookieHeader,
-    origin: "https://myactivity.google.com",
-    referer: "https://myactivity.google.com/myactivity?product=26",
-    // Disambiguates which account in a multi-account cookie jar; the URL
-    // authuser param and this header must agree.
-    "x-goog-authuser": String(authUser),
-  });
-  const init: RequestInit = {
-    method: formBody === null ? "GET" : "POST",
-    headers,
-    body: formBody ?? undefined,
-    redirect: "follow",
-    signal,
-  };
-  if (formBody !== null) {
-    headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
-    headers.set("x-same-domain", "1");
+async function fetchText(
+  cookieJar: MyActivityCookieJar,
+  url: string,
+  formBody: string | null,
+  authUser: number,
+  signal: AbortSignal,
+  deps: MyActivityDeps,
+): Promise<string> {
+  let currentUrl = url;
+  let body = formBody;
+  let method = formBody === null ? "GET" : "POST";
+  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+    const headers = new Headers({
+      "user-agent": userAgent,
+      cookie: cookieJar.headerFor(currentUrl),
+      referer: MYACTIVITY_REFERER,
+      "x-goog-authuser": String(authUser),
+    });
+    if (body === null) {
+      headers.set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+      headers.set("accept-language", "en-US,en;q=0.9");
+      headers.set("sec-fetch-dest", "document");
+      headers.set("sec-fetch-mode", "navigate");
+      headers.set("upgrade-insecure-requests", "1");
+    } else {
+      headers.set("origin", MYACTIVITY_ORIGIN);
+      headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+      headers.set("x-same-domain", "1");
+    }
+    const response = await deps.fetch(currentUrl, {
+      method,
+      headers,
+      body: body ?? undefined,
+      redirect: "manual",
+      signal,
+    });
+    cookieJar.storeFromResponse(response, currentUrl);
+    const location = response.headers.get("location");
+    if (isRedirect(response.status) && location) {
+      currentUrl = new URL(location, currentUrl).toString();
+      if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST")) {
+        method = "GET";
+        body = null;
+      }
+      continue;
+    }
+    const text = await response.text();
+    if (!response.ok) throw new Error(`My Activity HTTP ${response.status} at ${new URL(currentUrl).hostname}`);
+    return text;
   }
-  const response = await fetch(url, init);
-  const text = await response.text();
-  if (!response.ok) throw new Error(`My Activity HTTP ${response.status}: ${text.slice(0, 300)}`);
-  return text;
+  throw new Error(`Google ${MYACTIVITY_SESSION_UNVERIFIABLE}: redirect loop while opening My Activity`);
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
 }
 
 // Sentinel substring carried by parseSession errors that mean "Google
@@ -136,7 +194,7 @@ async function fetchText(cookieHeader: string, url: string, formBody: string | n
 // finding so the product names the real cause instead of guessing.
 export const MYACTIVITY_SESSION_UNVERIFIABLE = "could not establish a My Activity session";
 
-function parseSession(html: string): MyActivitySession {
+function parseSession(html: string, authUser: number): MyActivitySession {
   // The authoritative signal that we reached the real My Activity app is its
   // own build label. A page can carry the generic SNlM0e token yet still be
   // Google's identity/auth shell (multi-account or device-binding checks), so
@@ -145,7 +203,7 @@ function parseSession(html: string): MyActivitySession {
   if (footprintsBuild && /"SNlM0e":"[^"]+"/.test(html)) {
     const at = matchRequired(html, /"SNlM0e":"([^"]+)"/, "SNlM0e");
     const fsid = matchRequired(html, /"FdrFJe":"([^"]+)"/, "FdrFJe");
-    return { at, fsid, bl: footprintsBuild[0] };
+    return { at, fsid, bl: footprintsBuild[0], authUser };
   }
   if (/FootprintsMyactivitySignedoutUi/i.test(html.slice(0, 500_000))) {
     throw new Error("Google My Activity returned the signed-out shell for the configured browser profile");
@@ -159,24 +217,24 @@ function parseSession(html: string): MyActivitySession {
   const at = matchRequired(html, /"SNlM0e":"([^"]+)"/, "SNlM0e");
   const fsid = matchRequired(html, /"FdrFJe":"([^"]+)"/, "FdrFJe");
   const bl = matchRequired(html, /boq_footprintsmyactivityuiserver_[^"&/]+/, "boq build label");
-  return { at, fsid, bl };
+  return { at, fsid, bl, authUser };
 }
 
 async function callDisplayItems(
-  cookieHeader: string,
+  cookieJar: MyActivityCookieJar,
   session: MyActivitySession,
   request: unknown[],
   page: number,
-  authUser: number,
   signal: AbortSignal,
+  deps: MyActivityDeps,
 ): Promise<string> {
   const fReq = JSON.stringify([[["y3VFHd", JSON.stringify(request), null, "generic"]]]);
   const body = new URLSearchParams({ "f.req": fReq, at: session.at }).toString();
   const url =
     `https://myactivity.google.com/_/FootprintsMyactivityUi/data/batchexecute?rpcids=y3VFHd` +
     `&source-path=%2Fmyactivity&f.sid=${encodeURIComponent(session.fsid)}&bl=${encodeURIComponent(session.bl)}` +
-    `&hl=en&authuser=${authUser}&soc-app=712&soc-platform=1&soc-device=1&_reqid=${7000 + page}&rt=c`;
-  return fetchText(cookieHeader, url, body, authUser, signal);
+    `&hl=en&authuser=${session.authUser}&soc-app=712&soc-platform=1&soc-device=1&_reqid=${7000 + page}&rt=c`;
+  return fetchText(cookieJar, url, body, session.authUser, signal, deps);
 }
 
 function parseDisplayItemsResponse(text: string): { rows: unknown[]; cursor: string | null } {
@@ -251,6 +309,172 @@ function maxDateKey(left: string | null, right: string | null): string | null {
 function ymd(date: Date): string {
   return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
 }
+
+class MyActivityCookieJar {
+  private constructor(
+    private readonly cookies: JarCookie[],
+    readonly warnings: string[],
+  ) {}
+
+  static async fromBrowser(
+    input: { cookieBrowser: string; cookieProfile: string; cookieTimeoutMs: number },
+    deps: MyActivityDeps,
+  ): Promise<MyActivityCookieJar> {
+    const result = await deps.readBrowserCookies({
+      url: "https://myactivity.google.com/",
+      origins: GOOGLE_COOKIE_ORIGINS,
+      browser: input.cookieBrowser,
+      profile: input.cookieProfile || undefined,
+      timeoutMs: input.cookieTimeoutMs,
+    });
+    return new MyActivityCookieJar(
+      result.cookies.filter((cookie) => cookie.value).map((cookie) => normalizeCookie(cookie)),
+      result.warnings,
+    );
+  }
+
+  headerFor(url: string): string {
+    return toCookieHeader(this.cookies.filter((cookie) => cookieApplies(cookie, url)), { dedupeByName: true, sort: "name" });
+  }
+
+  storeFromResponse(response: Response, responseUrl: string): void {
+    for (const value of setCookieHeaders(response.headers)) {
+      for (const cookie of parseSetCookieHeader(value, responseUrl)) this.set(cookie);
+    }
+  }
+
+  private set(cookie: JarCookie): void {
+    const index = this.cookies.findIndex((existing) => cookieKey(existing) === cookieKey(cookie));
+    if (cookie.expires !== undefined && cookie.expires <= Math.floor(Date.now() / 1000)) {
+      if (index >= 0) this.cookies.splice(index, 1);
+      return;
+    }
+    if (index >= 0) this.cookies[index] = cookie;
+    else this.cookies.push(cookie);
+  }
+}
+
+function normalizeCookie(cookie: Cookie): JarCookie {
+  return {
+    ...cookie,
+    domain: cookie.domain?.replace(/^\./, "") ?? "",
+    path: cookie.path || "/",
+  };
+}
+
+function cookieApplies(cookie: JarCookie, urlString: string): boolean {
+  const url = new URL(urlString);
+  if (cookie.secure && url.protocol !== "https:") return false;
+  if (cookie.expires !== undefined && cookie.expires <= Math.floor(Date.now() / 1000)) return false;
+  const domain = (cookie.domain ?? "").replace(/^\./, "").toLowerCase();
+  if (!domain) return false;
+  const host = url.hostname.toLowerCase();
+  const domainMatches = cookie.hostOnly ? host === domain : host === domain || host.endsWith(`.${domain}`);
+  return domainMatches && url.pathname.startsWith(cookie.path || "/");
+}
+
+function setCookieHeaders(headers: Headers): string[] {
+  const withGetSetCookie = headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof withGetSetCookie.getSetCookie === "function") return withGetSetCookie.getSetCookie();
+  const combined = headers.get("set-cookie");
+  return combined ? splitCombinedSetCookieHeader(combined) : [];
+}
+
+function splitCombinedSetCookieHeader(value: string): string[] {
+  return value.split(/,(?=\s*[^;,=\s]+=[^;,]+)/g).map((part) => part.trim()).filter(Boolean);
+}
+
+function parseSetCookieHeader(header: string, responseUrl: string): JarCookie[] {
+  return splitCombinedSetCookieHeader(header).map((value) => parseSetCookie(value, responseUrl)).filter((cookie): cookie is JarCookie => Boolean(cookie));
+}
+
+function parseSetCookie(value: string, responseUrl: string): JarCookie | null {
+  const parts = value.split(";").map((part) => part.trim()).filter(Boolean);
+  const [nameValue, ...attributes] = parts;
+  if (!nameValue) return null;
+  const equals = nameValue.indexOf("=");
+  if (equals <= 0) return null;
+  const url = new URL(responseUrl);
+  const name = nameValue.slice(0, equals);
+  const cookieValue = nameValue.slice(equals + 1);
+  let domain = url.hostname.toLowerCase();
+  let hostOnly = true;
+  let path = defaultCookiePath(url.pathname);
+  let secure = false;
+  let httpOnly = false;
+  let expires: number | undefined;
+  let sameSite: Cookie["sameSite"] | undefined;
+  for (const attribute of attributes) {
+    const equalsIndex = attribute.indexOf("=");
+    const key = (equalsIndex >= 0 ? attribute.slice(0, equalsIndex) : attribute).trim().toLowerCase();
+    const attrValue = equalsIndex >= 0 ? attribute.slice(equalsIndex + 1).trim() : "";
+    if (key === "domain" && attrValue) {
+      domain = attrValue.replace(/^\./, "").toLowerCase();
+      hostOnly = false;
+    } else if (key === "path" && attrValue) {
+      path = attrValue;
+    } else if (key === "secure") {
+      secure = true;
+    } else if (key === "httponly") {
+      httpOnly = true;
+    } else if (key === "max-age") {
+      const seconds = Number.parseInt(attrValue, 10);
+      if (Number.isFinite(seconds)) expires = Math.floor(Date.now() / 1000) + seconds;
+    } else if (key === "expires") {
+      const time = Date.parse(attrValue);
+      if (Number.isFinite(time)) expires = Math.floor(time / 1000);
+    } else if (key === "samesite") {
+      sameSite = normalizeSameSite(attrValue);
+    }
+  }
+  const cookie: JarCookie = {
+    name,
+    value: cookieValue,
+    domain,
+    path,
+    secure,
+    httpOnly,
+    hostOnly,
+    source: { browser: "chrome" },
+  };
+  if (expires !== undefined) cookie.expires = expires;
+  if (sameSite) cookie.sameSite = sameSite;
+  return cookie;
+}
+
+function defaultCookiePath(pathname: string): string {
+  if (!pathname || !pathname.startsWith("/")) return "/";
+  const lastSlash = pathname.lastIndexOf("/");
+  return lastSlash <= 0 ? "/" : pathname.slice(0, lastSlash);
+}
+
+function normalizeSameSite(value: string): Cookie["sameSite"] | undefined {
+  if (/^strict$/i.test(value)) return "Strict";
+  if (/^lax$/i.test(value)) return "Lax";
+  if (/^none$/i.test(value)) return "None";
+  return undefined;
+}
+
+function cookieKey(cookie: JarCookie): string {
+  return `${cookie.name}|${cookie.domain ?? ""}|${cookie.path ?? "/"}|${cookie.hostOnly ? "host" : "domain"}`;
+}
+
+const DEFAULT_DEPS: MyActivityDeps = {
+  readBrowserCookies,
+  fetch,
+};
+
+const MYACTIVITY_URL = "https://myactivity.google.com/myactivity?product=26";
+const MYACTIVITY_ORIGIN = "https://myactivity.google.com";
+const MYACTIVITY_REFERER = "https://myactivity.google.com/myactivity?product=26";
+const MAX_REDIRECTS = 12;
+const GOOGLE_COOKIE_ORIGINS = [
+  "https://myactivity.google.com/",
+  "https://accounts.google.com/",
+  "https://google.com/",
+  "https://youtube.com/",
+  "https://www.youtube.com/",
+];
 
 const userAgent =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";

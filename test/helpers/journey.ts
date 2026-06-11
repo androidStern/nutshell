@@ -13,7 +13,7 @@ import type { SetupReport } from "../../src/setup/types";
 // The fake app bundle deliberately has NO Contents/Info.plist:
 // runNutshellAppCommand() direct-execs Contents/MacOS/Nutshell when the plist
 // is missing, so every app-identity call (status, __probe, enable-sync,
-// register-agent, the smoke sync) lands in a scripted shell stub instead of
+// register-agent, the connection check) lands in a scripted shell stub instead of
 // LaunchServices. Probe responses are sequenced files under
 // <tmp>/probe-state/<source>.<n>.json consumed via a per-source call counter,
 // which lets a journey script "fails on call 1, passes on call 2" without
@@ -51,17 +51,17 @@ interface FakeAppStatus {
   backgroundSync: "enabled" | "disabled";
 }
 
-// One sync report the fake app prints for `sync all --json` (the smoke sync):
-// 2 + 1 records across two sources, overall ok.
-const FAKE_SYNC_REPORT = {
+// One smoke report the fake app prints for `sync all --smoke --json`.
+const FAKE_SMOKE_REPORT = {
   status: "ok",
+  store: { status: "ok", message: "Nutshell can write to its data store." },
   sources: [
-    { source: "youtube", status: "ok", commit: { insertedRecords: 2 } },
-    { source: "podcasts", status: "ok", commit: { insertedRecords: 1 } },
+    { source: "youtube", status: "ok", message: "YouTube browser session works." },
+    { source: "podcasts", status: "ok", message: "Apple Podcasts database is readable." },
   ],
 };
 
-export const SMOKE_SYNC_OK_MESSAGE = "smoke sync ok: 3 records across 2 sources";
+export const CONNECTION_CHECK_OK_MESSAGE = "connection check passed; automatic sync is running (2 sources checked)";
 
 const SEND_KEYS: Record<NonNullable<JourneyStep["send"]>, string> = {
   enter: "\\r",
@@ -90,7 +90,7 @@ export class GoldenJourney {
     mkdirSync(this.stateDir, { recursive: true });
     this.writeFakeApp();
     this.writeAppStatus({ fullDiskAccess: "granted", agent: "enabled", backgroundSync: "enabled" });
-    writeFileSync(join(this.stateDir, "sync-report.json"), `${JSON.stringify(FAKE_SYNC_REPORT)}\n`);
+    writeFileSync(join(this.stateDir, "sync-report.json"), `${JSON.stringify(FAKE_SMOKE_REPORT)}\n`);
   }
 
   cleanup(): void {

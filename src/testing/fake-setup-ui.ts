@@ -5,6 +5,7 @@ export class FakeSetupUI implements SetupUI {
   confirms: boolean[] = [];
   multiselectValues: unknown[][] = [];
   selectedValues: unknown[] = [];
+  selectTitles: string[] = [];
   textValues: string[] = [];
 
   async intro(input: { title: string; body?: string }): Promise<void> {
@@ -20,6 +21,7 @@ export class FakeSetupUI implements SetupUI {
   }
 
   async select<T>(input: { title: string; options: Array<SetupSelectOption<T>> }): Promise<T> {
+    this.selectTitles.push(input.title);
     // Unscripted selects take the LAST option — by convention the escape
     // hatch (skip/exit) — so retry loops terminate instead of spinning.
     return (this.selectedValues.shift() as T | undefined) ?? input.options[input.options.length - 1]!.value;

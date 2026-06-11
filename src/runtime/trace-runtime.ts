@@ -14,6 +14,9 @@ import type {
   ProjectionRequest,
   ProviderExportImportRequest,
   SourceId,
+  SmokeReport,
+  SmokeSourceReport,
+  SmokeStoreReport,
   SyncReport,
   SyncRequest,
   SyncSourceReport,
@@ -45,6 +48,8 @@ export interface TraceRuntimeOptions {
   store?: TraceStore;
   registry?: PluginRegistry;
 }
+
+const DEFAULT_SMOKE_TIMEOUT_MS = 8_000;
 
 export class TraceRuntime {
   readonly config: TraceConfig;
@@ -216,6 +221,29 @@ export class TraceRuntime {
     }
   }
 
+  async smoke(source: SourceId | null = null): Promise<SmokeReport> {
+    const command = `${this.configCommandName()} sync ${source ?? "all"} --smoke`;
+    return this.withRuntimeLock(command, async () => {
+      const startedAt = new Date();
+      const runtimeCfg = objectAt(this.config.data, "runtime");
+      const pluginTimeoutMs = numberAt(runtimeCfg, "smokeTimeoutMs", DEFAULT_SMOKE_TIMEOUT_MS);
+      this.logger.event("runtime: smoke started", { source: source ?? "all", timeoutMs: pluginTimeoutMs });
+      const plugins = source && source !== "all" ? [this.registry.get(source)] : this.registry.enabled(this.config);
+      const store = await this.runStoreSmoke(command);
+      const sources = await Promise.all(plugins.map((plugin) => this.runPluginSmoke(plugin, pluginTimeoutMs)));
+      const finishedAt = new Date();
+      const report: SmokeReport = {
+        status: smokeReportStatus(store, sources),
+        startedAt,
+        finishedAt,
+        store,
+        sources,
+      };
+      this.logger.event("runtime: smoke finished", { status: report.status, sourceCount: sources.length });
+      return report;
+    });
+  }
+
   // One bounded probe for a degraded source during a scheduled run. Healed →
   // status flips back to ready and the caller proceeds with the full sync.
   // Still failing → skipped report carrying the CURRENT probe findings (not
@@ -384,6 +412,79 @@ export class TraceRuntime {
 
   private configCommandName(): string {
     return "nutshell";
+  }
+
+  private async runStoreSmoke(command: string): Promise<SmokeStoreReport> {
+    const startedAt = new Date();
+    try {
+      const result = await this.store.commitHealthcheck(command, startedAt);
+      return {
+        status: "ok",
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt,
+        durationMs: result.durationMs,
+        message: "Nutshell can write to its data store.",
+        detail: { runId: result.runId, metrics: result.metrics },
+      };
+    } catch (error) {
+      const finishedAt = new Date();
+      return {
+        status: "critical",
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        message: "Nutshell could not write to its data store.",
+        detail: { error: String(error) },
+      };
+    }
+  }
+
+  private async runPluginSmoke(plugin: TracePlugin, timeoutMs: number): Promise<SmokeSourceReport> {
+    const sourceStarted = new Date();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("smoke timeout")), timeoutMs);
+    try {
+      const ctx = this.pluginContext(plugin.manifest.id, controller.signal, true);
+      const result = plugin.smoke
+        ? await plugin.smoke(ctx)
+        : {
+            message: `${plugin.manifest.displayName} health check completed.`,
+            findings: await plugin.check(ctx),
+            metrics: { fallback: "check" },
+          };
+      const finishedAt = new Date();
+      return {
+        source: plugin.manifest.id,
+        status: smokeSourceStatus(result.findings),
+        startedAt: sourceStarted,
+        finishedAt,
+        durationMs: finishedAt.getTime() - sourceStarted.getTime(),
+        message: result.message,
+        findings: result.findings,
+        metrics: result.metrics,
+      };
+    } catch (error) {
+      const finishedAt = new Date();
+      const finding = systemFinding(
+        "plugin_smoke_runtime_error",
+        plugin.manifest.id,
+        `${plugin.manifest.displayName} connection check failed`,
+        { error: String(error) },
+        finishedAt,
+      );
+      return {
+        source: plugin.manifest.id,
+        status: "critical",
+        startedAt: sourceStarted,
+        finishedAt,
+        durationMs: finishedAt.getTime() - sourceStarted.getTime(),
+        message: finding.message,
+        findings: [finding],
+        metrics: {},
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async runAutomaticEnrichment(
@@ -583,6 +684,18 @@ function reportStatus(sources: SyncSourceReport[]): SyncReport["status"] {
   const statuses = sources.flatMap((item) => [item.status, item.enrichment?.status].filter(Boolean));
   if (statuses.some((status) => status === "critical")) return "critical";
   if (sources.some((item) => item.status === "warning" || item.status === "partial" || item.status === "skipped" || item.enrichment?.status === "warning" || item.enrichment?.status === "partial" || item.enrichment?.status === "skipped" || item.findings.some((finding) => finding.level !== "ok") || item.enrichment?.findings.some((finding) => finding.level !== "ok"))) return "warning";
+  return "ok";
+}
+
+function smokeSourceStatus(findings: HealthFinding[]): SmokeSourceReport["status"] {
+  if (findings.some((item) => item.level === "critical")) return "critical";
+  if (findings.some((item) => item.level === "warning")) return "warning";
+  return "ok";
+}
+
+function smokeReportStatus(store: SmokeStoreReport, sources: SmokeSourceReport[]): SmokeReport["status"] {
+  if (store.status === "critical" || sources.some((item) => item.status === "critical")) return "critical";
+  if (sources.some((item) => item.status === "warning")) return "warning";
   return "ok";
 }
 

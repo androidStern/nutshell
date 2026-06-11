@@ -18,7 +18,8 @@ import { runPodcastsSqliteWorkerFromStdin } from "./plugins/builtin/podcasts/sql
 import { serveDashboard } from "./dashboard/server";
 import { SetupRuntime, exitCodeForSetup } from "./setup/setup-runtime";
 import { SetupCancelledError } from "./setup/ui-clack";
-import type { SourceId, SyncMode, SyncRequest } from "./core/types";
+import { formatResetText, ResetRuntime, type ResetMode } from "./reset/reset-runtime";
+import type { HealthReport, JsonObject, SmokeReport, SourceId, SyncMode, SyncRequest } from "./core/types";
 
 async function main(argv: string[]): Promise<number> {
   const global = parseGlobal(argv);
@@ -48,11 +49,11 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (!command || command === "help" || command === "--help" || command === "-h") {
-    process.stdout.write(helpText());
+    process.stdout.write(helpText(args[0]));
     return 0;
   }
   if (hasFlag(args, "--help") || hasFlag(args, "-h")) {
-    process.stdout.write(helpText());
+    process.stdout.write(helpText(command));
     return 0;
   }
 
@@ -83,8 +84,31 @@ async function main(argv: string[]): Promise<number> {
     return runtime;
   };
   try {
+    if (command === "status") {
+      const appExit = await runProtectedCommandViaApp("health", args, root, configFile, 120_000);
+      if (appExit !== null) return appExit;
+      const report = await getRuntime().health();
+      if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      else process.stdout.write(formatHealthText(report));
+      return exitCodeForHealth(report);
+    }
+    if (command === "pause" || command === "resume") {
+      return runSyncControl(command, args, root, configFile);
+    }
     if (command === "sync") {
       const originalArgs = [...args];
+      const syncControl = args[0] && !args[0].startsWith("--") && ["status", "pause", "resume"].includes(args[0]) ? args.shift()! : null;
+      if (syncControl) return runSyncControl(syncControl, args, root, configFile);
+      if (hasFlag(args, "--smoke")) {
+        const sourceArg = positionalArgs(args)[0] ?? "all";
+        const source = sourceArg === "all" ? null : resolveSource(sourceArg, builtinSourceIds());
+        const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, 20_000);
+        if (appExit !== null) return appExit;
+        const report = await getRuntime().smoke(source);
+        if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        else process.stdout.write(formatSmokeText(report));
+        return report.status === "critical" ? 2 : report.status === "warning" ? 1 : 0;
+      }
       const parsed = parseSync(args);
       const request: SyncRequest = parsed.source === null ? parsed : { ...parsed, source: resolveSource(parsed.source, builtinSourceIds()) };
       const appExit = await runProtectedCommandViaApp(command, originalArgs, root, configFile, request.budget.maxRuntimeMs + 180_000);
@@ -136,6 +160,14 @@ async function main(argv: string[]): Promise<number> {
     if (command === "app") {
       return await runAppCommand(args, root, configFile);
     }
+    if (command === "reset") {
+      const request = parseReset(args);
+      const reset = new ResetRuntime({ root, configPath: configFile });
+      const report = await reset.run(request);
+      if (hasFlag(args, "--json")) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      else process.stdout.write(formatResetText(report));
+      return report.status === "ok" ? 0 : 1;
+    }
     if (command === "import") {
       const parsed = parseImport(args);
       const dryRun = hasFlag(args, "--dry-run");
@@ -176,6 +208,85 @@ function parseImport(args: string[]): { source: SourceId; path: string } {
   const path = positional[0];
   if (!path) throw new UsageError(`${CLI_NAME} import requires an archive path`);
   return { source, path };
+}
+
+function parseReset(args: string[]): { mode: ResetMode; sources: SourceId[]; yes: boolean; json: boolean } {
+  const modeArg = args[0] && !args[0].startsWith("--") ? args.shift()! : "guided";
+  const modeAliases: Record<string, ResetMode> = {
+    guided: "guided",
+    data: "data",
+    source: "source",
+    sources: "source",
+    logs: "logs",
+    log: "logs",
+    all: "all",
+  };
+  const mode = modeAliases[modeArg];
+  if (!mode) throw new UsageError(`${CLI_NAME} reset needs data, source, logs, or all`);
+  const sources =
+    mode === "source"
+      ? positionalArgs(args).map((source) => resolveSource(source, builtinSourceIds()))
+      : [];
+  return {
+    mode,
+    sources,
+    yes: hasFlag(args, "--yes"),
+    json: hasFlag(args, "--json"),
+  };
+}
+
+async function runSyncControl(action: string, args: string[], root: string, configPath: string): Promise<number> {
+  const json = hasFlag(args, "--json");
+  if (action === "status") {
+    const runtime = new TraceRuntime({ root, configPath });
+    try {
+      const report = await runtime.health();
+      const status = syncStatusJson(report);
+      if (json) process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+      else process.stdout.write(formatSyncStatusText(report));
+      return report.app.backgroundSync === "unknown" ? 2 : 0;
+    } finally {
+      await runtime.close();
+    }
+  }
+  if (action !== "pause" && action !== "resume") throw new UsageError(`${CLI_NAME} sync needs status, pause, or resume`);
+  const config = loadConfig(root, configPath);
+  const appPath = ensureStableAppPath(config);
+  if (!existsSync(appExecutable(appPath))) {
+    throw new TraceError(
+      "nutshell_app_not_installed",
+      `Nutshell.app is not installed at ${appExecutable(appPath)}. Run ${CLI_NAME} setup after installing Nutshell.`,
+      69,
+    );
+  }
+  if (action === "pause") {
+    const result = await runNutshellAppCommand(appPath, ["disable-sync"], 30_000);
+    if (json) process.stdout.write(`${JSON.stringify({ status: result.code === 0 ? "ok" : "error", action, code: result.code }, null, 2)}\n`);
+    else process.stdout.write(result.code === 0 ? "Automatic sync paused.\n\nRun `nutshell sync resume` to turn it back on.\n" : result.stderr || result.stdout);
+    return result.code;
+  }
+  const enable = await runNutshellAppCommand(appPath, ["enable-sync"], 30_000);
+  const register = enable.code === 0 ? await runNutshellAppCommand(appPath, ["register-agent"], 30_000) : null;
+  const ok = enable.code === 0 && register?.code === 0;
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          status: ok ? "ok" : "error",
+          action,
+          enable: { code: enable.code, stdout: enable.stdout, stderr: enable.stderr },
+          register: register ? { code: register.code, stdout: register.stdout, stderr: register.stderr } : null,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else if (ok) {
+    process.stdout.write("Automatic sync resumed.\n\nRun `nutshell sync` if you want to sync now.\n");
+  } else {
+    process.stderr.write([enable.stderr || enable.stdout, register?.stderr || register?.stdout].filter(Boolean).join("\n"));
+  }
+  return ok ? 0 : enable.code || register?.code || 1;
 }
 
 function positionalArgs(args: string[]): string[] {
@@ -333,22 +444,156 @@ function appBundlePath(rawPath: string | undefined, root: string, configPath: st
   return ensureStableAppPath(loadConfig(root, configPath));
 }
 
-// One line per public command. Static text only — printing help must never
-// touch config, disk state, or the network.
-const COMMAND_HELP: Record<string, string> = {
-  [`${CLI_NAME} setup`]: "first-run and fix-it flow — safe to re-run anytime",
-  [`${CLI_NAME} sync [all|source] [--json]`]: "sync now instead of waiting for background sync",
-  [`${CLI_NAME} health [--json]`]: "is everything OK right now",
-  [`${CLI_NAME} doctor [source] [--json]`]: "what is wrong and how to fix it",
-  [`${CLI_NAME} dashboard [--no-open]`]: "open the local dashboard",
-  [`${CLI_NAME} import <source> <archive>`]: `load an official provider export, e.g. ${CLI_NAME} import twitter ~/Downloads/x-archive.zip`,
-};
+// Static help only: printing help must never touch config, disk state, or the network.
+function helpText(topic?: string): string {
+  const normalized = topic === "health" ? "status" : topic;
+  if (normalized === "pause" || normalized === "resume") return syncHelpText();
+  if (normalized === "sync") return syncHelpText();
+  if (normalized === "reset") return resetHelpText();
+  if (normalized === "setup") return setupHelpText();
+  if (normalized === "status") return statusHelpText();
+  if (normalized === "doctor") return doctorHelpText();
+  if (normalized === "dashboard") return dashboardHelpText();
+  if (normalized === "import") return importHelpText();
+  return [
+    "Nutshell",
+    "Sync configured sources into a local digital trace for LLM agents.",
+    "",
+    "Common tasks:",
+    `  ${CLI_NAME} setup              Set up Nutshell or fix a broken source`,
+    `  ${CLI_NAME} status             See what is working and what needs attention`,
+    `  ${CLI_NAME} sync               Sync everything now`,
+    `  ${CLI_NAME} sync pause         Pause automatic sync`,
+    `  ${CLI_NAME} sync resume        Resume automatic sync`,
+    `  ${CLI_NAME} reset              Clear local data for a fresh sync test`,
+    `  ${CLI_NAME} dashboard          Open the local dashboard`,
+    `  ${CLI_NAME} import             Import provider history exports`,
+    "",
+    "Troubleshooting:",
+    `  ${CLI_NAME} doctor             Explain the current problem and how to fix it`,
+    `  ${CLI_NAME} doctor youtube     Diagnose one source`,
+    "",
+    "More help:",
+    `  ${CLI_NAME} help sync`,
+    `  ${CLI_NAME} help reset`,
+    `  ${CLI_NAME} help setup`,
+    "",
+  ].join("\n");
+}
 
-function helpText(): string {
-  const width = Math.max(...Object.keys(COMMAND_HELP).map((usage) => usage.length)) + 2;
-  return Object.entries(COMMAND_HELP)
-    .map(([usage, description]) => `${usage.padEnd(width)}${description}\n`)
-    .join("");
+function formatSmokeText(report: SmokeReport): string {
+  const lines = [`Connection check: ${report.status}`, `Store: ${report.store.status} — ${report.store.message}`];
+  for (const source of report.sources) {
+    lines.push(`${source.source}: ${source.status} — ${source.message}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function syncHelpText(): string {
+  return [
+    "Sync",
+    "",
+    `  ${CLI_NAME} sync              Sync all enabled sources now`,
+    `  ${CLI_NAME} sync youtube      Sync one source now`,
+    `  ${CLI_NAME} sync status       Show automatic sync status, last run, and next run`,
+    `  ${CLI_NAME} sync pause        Pause automatic sync`,
+    `  ${CLI_NAME} sync resume       Resume automatic sync`,
+    `  ${CLI_NAME} sync --json       Print machine-readable output`,
+    "",
+    "Fresh test:",
+    `  ${CLI_NAME} reset data        Clear records and checkpoints first`,
+    "",
+  ].join("\n");
+}
+
+function resetHelpText(): string {
+  return [
+    "Reset",
+    "",
+    "Clear local Nutshell-owned data.",
+    "",
+    `  ${CLI_NAME} reset                     Guided reset`,
+    `  ${CLI_NAME} reset data                Clear records, checkpoints, artifacts, and dashboard data`,
+    `  ${CLI_NAME} reset source youtube      Clear one source`,
+    `  ${CLI_NAME} reset source youtube x    Clear multiple sources`,
+    `  ${CLI_NAME} reset logs                Clear logs`,
+    `  ${CLI_NAME} reset all                 Clear all Nutshell-owned local state`,
+    "",
+    "Reset does not delete Chrome login, Keychain items, macOS permissions, or browser profiles.",
+    "",
+  ].join("\n");
+}
+
+function setupHelpText(): string {
+  return [
+    "Setup",
+    "",
+    `  ${CLI_NAME} setup`,
+    "",
+    "Use setup for first run and for repairs. It checks permissions, verifies selected sources,",
+    "offers provider export imports when a source supports them, and can enable automatic sync.",
+    "",
+  ].join("\n");
+}
+
+function statusHelpText(): string {
+  return [
+    "Status",
+    "",
+    `  ${CLI_NAME} status          See what is working and what needs attention`,
+    `  ${CLI_NAME} doctor          Get the fix for the current problem`,
+    `  ${CLI_NAME} doctor x        Diagnose one source`,
+    "",
+  ].join("\n");
+}
+
+function doctorHelpText(): string {
+  return [
+    "Doctor",
+    "",
+    `  ${CLI_NAME} doctor          Explain the current problem and how to fix it`,
+    `  ${CLI_NAME} doctor youtube  Diagnose YouTube`,
+    `  ${CLI_NAME} doctor x        Diagnose X`,
+    "",
+  ].join("\n");
+}
+
+function dashboardHelpText(): string {
+  return ["Dashboard", "", `  ${CLI_NAME} dashboard          Open the local dashboard`, `  ${CLI_NAME} dashboard --no-open  Print the dashboard URL without opening a browser`, ""].join("\n");
+}
+
+function importHelpText(): string {
+  return [
+    "Import",
+    "",
+    "Load official provider exports for history/backfill.",
+    "",
+    `  ${CLI_NAME} import youtube ~/Downloads/google-export.zip`,
+    `  ${CLI_NAME} import twitter ~/Downloads/x-archive.zip`,
+    "",
+  ].join("\n");
+}
+
+function syncStatusJson(report: HealthReport): JsonObject {
+  return {
+    automaticSync: report.app.backgroundSync === "enabled" ? "enabled" : report.app.backgroundSync === "disabled" ? "paused" : "unknown",
+    app: { ...report.app },
+    scheduler: { ...report.scheduler },
+  };
+}
+
+function formatSyncStatusText(report: HealthReport): string {
+  const automatic = report.app.backgroundSync === "enabled" ? "enabled" : report.app.backgroundSync === "disabled" ? "paused" : "unknown";
+  return [
+    "Sync status",
+    "",
+    `Automatic sync: ${automatic}`,
+    `Last sync: ${report.scheduler.lastRunAt ?? "not yet"}`,
+    `Next sync: ${report.scheduler.nextRunAt ?? "unknown"}`,
+    "",
+    automatic === "paused" ? `Run \`${CLI_NAME} sync resume\` to turn automatic sync back on.` : `Run \`${CLI_NAME} sync pause\` to pause automatic sync.`,
+    "",
+  ].join("\n");
 }
 
 // Documented source aliases. Canonical ids come from the loaded plugin

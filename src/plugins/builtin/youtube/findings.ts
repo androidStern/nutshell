@@ -10,21 +10,18 @@ export const YOUTUBE_FINDINGS = new FindingCatalog("youtube", {
   youtube_signed_out: {
     level: "critical",
     state: "needs_auth",
-    fix: "Sign into your Google account at youtube.com in Chrome, then retry.",
+    fix: "Open Google My Activity in Chrome, sign into Google, wait for My Activity to load, then retry.",
     confirm: DOCTOR_YOUTUBE,
-    url: "https://www.youtube.com",
+    url: "https://myactivity.google.com/myactivity?product=26",
     sample: "You're not signed into Google in Chrome.",
   },
   youtube_session_unverifiable: {
     level: "critical",
-    state: "blocked_bug",
-    // Google interposes an identity-verification page on programmatic access
-    // to some established/multi-account sessions; cookies are valid but a
-    // server-side request can't satisfy the device/session binding. The
-    // reliable route for YouTube history is the official export.
-    fix: `Recent YouTube sync can't establish a session for this Google account — Google served an identity-verification page. Import your history from Google Takeout instead: \`${CLI_NAME} import youtube <google-export.zip> --json\`. If you use multiple Google accounts in this browser, set plugins.youtube.authUser in ~/${CONFIG_FILENAME} to the right account index (0 = first).`,
+    state: "needs_auth",
+    fix: `Open Google My Activity in Chrome, finish any Google sign-in or verification page, wait for My Activity to load, then retry. If you use multiple Google accounts in this browser, set plugins.youtube.authUser in ~/${CONFIG_FILENAME} to the right account index (0 = first).`,
     confirm: DOCTOR_YOUTUBE,
-    sample: "Google served an identity-verification page instead of My Activity for this account; recent YouTube sync cannot establish a session.",
+    url: "https://myactivity.google.com/myactivity?product=26",
+    sample: "Google needs one more verification step in Chrome before My Activity can be read.",
   },
   youtube_keychain_blocked: {
     level: "critical",
@@ -37,7 +34,7 @@ export const YOUTUBE_FINDINGS = new FindingCatalog("youtube", {
   youtube_activity_unreadable: {
     level: "critical",
     state: "blocked_bug",
-    fix: `Run \`${DOCTOR_YOUTUBE}\` to retry. If it keeps failing, Google My Activity changed its page format and Nutshell needs an update — report this issue.`,
+    fix: `Please file a bug and include the output of \`${DOCTOR_YOUTUBE} --json\`. Nutshell reached Google My Activity, but could not read the activity format.`,
     confirm: DOCTOR_YOUTUBE,
     sample: "YouTube browser session loaded activity cards but parsed no usable items.",
   },
@@ -58,21 +55,21 @@ export const YOUTUBE_FINDINGS = new FindingCatalog("youtube", {
   youtube_sync_failed: {
     level: "critical",
     state: "blocked_bug",
-    fix: `Run \`${CLI_NAME} sync youtube\` to retry. If it keeps failing, report the error in the finding detail — Nutshell hit an unexpected failure.`,
+    fix: `Run \`${DOCTOR_YOUTUBE} --json\` and file a bug with the output. Nutshell hit an unexpected YouTube sync failure.`,
     confirm: DOCTOR_YOUTUBE,
     sample: "YouTube sync failed",
   },
   youtube_cursor_loop: {
     level: "critical",
     state: "blocked_bug",
-    fix: `Run \`${CLI_NAME} sync youtube\` to retry. If the cursor loops again, Google My Activity paging changed and Nutshell needs an update — report this issue.`,
+    fix: `Please file a bug and include the output of \`${DOCTOR_YOUTUBE} --json\`. Google My Activity paging did not complete.`,
     confirm: DOCTOR_YOUTUBE,
     sample: "YouTube collector cursor looped before cutoff",
   },
   youtube_cutoff_not_reached: {
     level: "critical",
     state: "blocked_bug",
-    fix: `Run \`${CLI_NAME} sync youtube\` to retry; the collector resumes and continues toward the cutoff. If it never reaches the cutoff, report this issue.`,
+    fix: `Run \`${CLI_NAME} sync youtube\` to retry. If it keeps failing, file a bug with the output of \`${DOCTOR_YOUTUBE} --json\`.`,
     confirm: DOCTOR_YOUTUBE,
     sample: "YouTube collector did not reach cutoff",
   },
@@ -86,7 +83,7 @@ export const YOUTUBE_FINDINGS = new FindingCatalog("youtube", {
   youtube_unexpected_empty: {
     level: "critical",
     state: "blocked_bug",
-    fix: `Run \`${CLI_NAME} sync youtube\` to retry. If activity still parses empty, Google My Activity changed its item format and Nutshell needs an update — report this issue.`,
+    fix: `Please file a bug and include the output of \`${DOCTOR_YOUTUBE} --json\`. Nutshell reached Google My Activity, but could not read any activity items.`,
     confirm: DOCTOR_YOUTUBE,
     sample: "YouTube parsed no items despite loaded cards",
   },

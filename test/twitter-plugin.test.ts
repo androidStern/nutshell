@@ -120,6 +120,22 @@ test("twitter health probe reports signed-out sessions as needs_auth", async () 
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor twitter");
 });
 
+test("twitter smoke uses the plugin's lightweight browser-session check", async () => {
+  const configs: BirdClientConfig[] = [];
+  BirdClient.prototype.check = async function () {
+    configs.push((this as unknown as { cfg: BirdClientConfig }).cfg);
+    return { ok: true, text: "authenticated as winterfell", rateLimited: false, authFailed: false };
+  };
+  const plugin = new TwitterPlugin();
+
+  const result = await plugin.smoke(context({ cookieTimeoutMs: 30_000, timeoutMs: 120_000 }));
+
+  expect(result.findings).toEqual([]);
+  expect(result.message).toBe("X browser session is readable.");
+  expect(configs[0]?.cookieTimeoutMs).toBe(2_000);
+  expect(configs[0]?.timeoutMs).toBe(8_000);
+});
+
 test("twitter health probe reports non-auth session check failures as blocked bug", async () => {
   BirdClient.prototype.check = async () => ({
     ok: false,

@@ -20,12 +20,12 @@ export function configuredAppPath(config: TraceConfig, explicit?: string): strin
   const configured = stringValue(objectAt(config.data, "app"), "path");
   const configuredPath = configured ? resolve(expandHome(configured)) : "";
   if (configuredPath && existsSync(appExecutable(configuredPath)) && !isHomebrewCellarApp(configuredPath)) return configuredPath;
-  for (const candidate of stableAppPathCandidates()) {
-    if (existsSync(join(candidate, "Contents", "MacOS", "Nutshell"))) return candidate;
-  }
+  const userApp = userApplicationsAppPath();
+  if (userApp && existsSync(appExecutable(userApp))) return userApp;
   for (const candidate of packageManagedAppPathCandidates()) {
-    if (existsSync(join(candidate, "Contents", "MacOS", "Nutshell"))) return candidate;
+    if (existsSync(appExecutable(candidate))) return candidate;
   }
+  if (existsSync(appExecutable(DEFAULT_APP_PATH))) return DEFAULT_APP_PATH;
   return configuredPath || DEFAULT_APP_PATH;
 }
 
@@ -163,8 +163,8 @@ export function appStatusJson(status: AppBackgroundStatus): JsonObject {
 function stableAppPathCandidates(): string[] {
   const home = process.env.HOME || "";
   return [
-    DEFAULT_APP_PATH,
     home ? join(home, "Applications", "Nutshell.app") : "",
+    DEFAULT_APP_PATH,
   ].filter(Boolean);
 }
 

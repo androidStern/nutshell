@@ -5,6 +5,7 @@ import type {
   HealthFinding,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   ProviderExportImportRequest,
   SyncRequest,
@@ -19,6 +20,7 @@ export type {
   HealthFinding,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   ProviderExportImportRequest,
   SyncRequest,
@@ -32,6 +34,7 @@ export interface TracePlugin {
   // code is missing here fails CI.
   readonly findings?: FindingCatalog;
   check(ctx: PluginContext): Promise<HealthFinding[]>;
+  smoke?(ctx: PluginContext): Promise<PluginSmokeResult>;
   sync(ctx: PluginContext, request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult>;
   setup?: TracePluginSetup;
   importProviderExport?(ctx: PluginContext, request: ProviderExportImportRequest, checkpoint: Checkpoint): Promise<PluginSyncResult>;

@@ -9,11 +9,14 @@ import type {
   Json,
   PluginSyncResult,
   RecordPage,
+  SourceId,
+  SourceResetReport,
+  StoreHealthcheckReport,
   TraceQuery,
   TraceRecord,
 } from "../core/types";
 import { CheckpointConflictError } from "../core/errors";
-import { recordKey, sha256, stableJson } from "../core/ids";
+import { recordKey, runId, sha256, stableJson } from "../core/ids";
 import { parseDate, toIso } from "../core/time";
 import { migrate } from "./migrations";
 import type { TraceStore } from "./interface";
@@ -38,6 +41,61 @@ export class SQLiteTraceStore implements TraceStore {
 
   async commitSync(input: CommitSyncInput): Promise<CommitReport> {
     return this.db.transaction(() => this.commitSyncTx(input))();
+  }
+
+  async commitHealthcheck(command: string, startedAt: Date): Promise<StoreHealthcheckReport> {
+    return this.db.transaction(() => {
+      const finishedAt = new Date();
+      const id = runId("healthcheck");
+      const metrics = { kind: "setup_smoke" };
+      this.db
+        .query(
+          `insert into sync_runs (
+            id, source, command, mode, started_at, finished_at, status, partial, completed,
+            expected_checkpoint_version, next_checkpoint_version, metrics_json, error_json
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, "system", command, "healthcheck", toIso(startedAt), toIso(finishedAt), "ok", 0, 1, 0, 0, stableJson(metrics), "{}");
+      return {
+        runId: id,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        metrics,
+      };
+    })();
+  }
+
+  async resetSources(sources: string[]): Promise<SourceResetReport> {
+    const unique = [...new Set(sources.filter(Boolean))] as SourceId[];
+    if (!unique.length) {
+      return {
+        sources: [],
+        deletedRecords: 0,
+        deletedObservations: 0,
+        deletedRuns: 0,
+        deletedFindings: 0,
+        deletedCheckpoints: 0,
+        deletedArtifactRows: 0,
+        artifactPaths: [],
+      };
+    }
+    return this.db.transaction(() => {
+      const placeholders = unique.map(() => "?").join(", ");
+      const params = unique as unknown as never[];
+      const artifactRows = this.db.query(`select path from artifacts where source in (${placeholders})`).all(...params) as Array<{ path: string }>;
+      const artifactPaths = [...new Set(artifactRows.map((row) => row.path).filter(Boolean))];
+      return {
+        sources: unique,
+        deletedRecords: deleteWhereSource(this.db, "records", placeholders, params),
+        deletedObservations: deleteWhereSource(this.db, "observations", placeholders, params),
+        deletedRuns: deleteWhereSource(this.db, "sync_runs", placeholders, params),
+        deletedFindings: deleteWhereSource(this.db, "health_findings", placeholders, params),
+        deletedCheckpoints: deleteWhereSource(this.db, "source_state", placeholders, params),
+        deletedArtifactRows: deleteWhereSource(this.db, "artifacts", placeholders, params),
+        artifactPaths,
+      };
+    })();
   }
 
   private commitSyncTx(input: CommitSyncInput): CommitReport {
@@ -340,6 +398,11 @@ export class SQLiteTraceStore implements TraceStore {
 
 export function openStore(path: string): SQLiteTraceStore {
   return new SQLiteTraceStore(path);
+}
+
+function deleteWhereSource(db: Database, table: string, placeholders: string, params: never[]): number {
+  const result = db.query(`delete from ${table} where source in (${placeholders})`).run(...params) as { changes?: number };
+  return typeof result.changes === "number" ? result.changes : 0;
 }
 
 function statusForResult(result: PluginSyncResult): string {

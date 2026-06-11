@@ -202,9 +202,9 @@ export async function backfillStatusFromStore(config: TraceConfig, store: TraceS
 
 function localOsAppOwnedHealthFinding(manifest: PluginManifest, latestRun: JsonObject | undefined): HealthFinding | null {
   if (latestRun) return null;
-  return systemFinding("app_owned_sync_not_verified", manifest.id, `${manifest.displayName} has not been verified by an app-owned sync yet`, {
+  return systemFinding("app_owned_sync_not_verified", manifest.id, `${manifest.displayName} has not been verified by automatic sync yet`, {
     reason: "This source depends on macOS app permissions, so terminal health avoids probing it directly.",
-    nextAction: `${CLI_NAME} sync ${manifest.id} --mode recent --json, or wait for the app-owned background sync to run.`,
+    nextAction: `${CLI_NAME} sync ${manifest.id} --mode recent --json, or wait for automatic sync to run.`,
   });
 }
 
@@ -310,12 +310,12 @@ function appFindings(app: AppBackgroundStatus): HealthFinding[] {
     findings.push(SYSTEM_FINDINGS.make("nutshell_app_full_disk_access_unknown", `${PRODUCT_NAME}.app Full Disk Access could not be determined`, detail));
   }
   if (app.agent === "requiresApproval") {
-    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_requires_approval", `${PRODUCT_NAME} background agent requires approval`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_requires_approval", `${PRODUCT_NAME} automatic sync requires approval`, detail));
   } else if (app.agent === "notRegistered" || app.agent === "notFound") {
-    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_not_enabled", `${PRODUCT_NAME} background agent is not enabled`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_agent_not_enabled", `${PRODUCT_NAME} automatic sync is not enabled`, detail));
   }
   if (app.backgroundSync === "disabled") {
-    findings.push(SYSTEM_FINDINGS.make("nutshell_background_sync_disabled", `${PRODUCT_NAME} background sync is disabled`, detail));
+    findings.push(SYSTEM_FINDINGS.make("nutshell_background_sync_disabled", `${PRODUCT_NAME} automatic sync is paused`, detail));
   }
   return findings;
 }

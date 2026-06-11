@@ -9,7 +9,16 @@ import { FakePlugin, fakeOkResult } from "../src/testing/fake-plugin";
 import { finding } from "../src/plugins/interface";
 import { pluginSetupFindings, pluginSetupStatus } from "../src/setup/config-draft";
 import { DEFAULT_SYNC_BUDGET } from "../src/config/defaults";
-import type { Checkpoint, EnrichmentRequest, JsonObject, PluginContext, PluginSyncResult, ProviderExportImportRequest, SyncRequest } from "../src/core/types";
+import type {
+  Checkpoint,
+  EnrichmentRequest,
+  JsonObject,
+  PluginContext,
+  PluginSmokeResult,
+  PluginSyncResult,
+  ProviderExportImportRequest,
+  SyncRequest,
+} from "../src/core/types";
 
 test("runtime runs fake plugin through lock, store, and projection", async () => {
   const root = mkdtempSync(join(tmpdir(), "trace-runtime-"));
@@ -30,6 +39,52 @@ test("runtime runs fake plugin through lock, store, and projection", async () =>
     expect(report.status).toBe("ok");
     const page = await runtime.query({ source: "fake" });
     expect(page.total).toBe(1);
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime smoke runs plugin-owned smoke checks without foreground ingestion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-runtime-smoke-"));
+  try {
+    let smokeCalls = 0;
+    let syncCalls = 0;
+    class SmokePlugin extends FakePlugin {
+      constructor() {
+        super("fake", () => {
+          syncCalls += 1;
+          return fakeOkResult("fake");
+        });
+      }
+
+      async smoke(): Promise<PluginSmokeResult> {
+        smokeCalls += 1;
+        return { message: "plugin-owned proof passed", findings: [], metrics: { pluginOwned: true } };
+      }
+    }
+
+    const runtime = new TraceRuntime({
+      root,
+      config: loadConfig(root),
+      registry: new PluginRegistry([new SmokePlugin()]),
+    });
+
+    const report = await runtime.smoke(null);
+
+    expect(report.status).toBe("ok");
+    expect(report.store.status).toBe("ok");
+    expect(report.sources[0]).toMatchObject({
+      source: "fake",
+      status: "ok",
+      message: "plugin-owned proof passed",
+      metrics: { pluginOwned: true },
+    });
+    expect(smokeCalls).toBe(1);
+    expect(syncCalls).toBe(0);
+    expect((await runtime.query({ source: "fake" })).total).toBe(0);
+    const snapshot = await runtime.store.healthSnapshot();
+    expect(snapshot.lastRuns).toEqual([]);
     await runtime.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

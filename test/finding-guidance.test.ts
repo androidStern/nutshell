@@ -105,7 +105,10 @@ describe("finding catalogs", () => {
         expect(spec.fix.toLowerCase(), where).not.toContain("refer to the documentation");
         expect(spec.confirm.startsWith(CLI_NAME), `${where} confirm must be a runnable ${CLI_NAME} command, got: ${spec.confirm}`).toBe(true);
         expect(spec.sample.trim().length, `${where} sample message required`).toBeGreaterThan(0);
-        if (spec.url) expect(spec.url.startsWith("https://"), `${where} url must be https`).toBe(true);
+        if (spec.url) {
+          const allowed = spec.url.startsWith("https://") || spec.url.startsWith("x-apple.systempreferences:");
+          expect(allowed, `${where} url must be https or a macOS System Settings deep link`).toBe(true);
+        }
       }
     }
   });

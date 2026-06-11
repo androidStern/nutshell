@@ -51,10 +51,8 @@ export interface SetupRuntimeOptions {
 
 export const DEFAULT_PERMISSION_HANDOFF_TIMEOUT_MS = 60 * 60_000;
 
-// The smoke sync is bounded twice: the sync itself runs in recent mode with a
-// 60s per-source budget, and the app command as a whole is killed after this.
-const SMOKE_SYNC_ARGS = ["sync", "all", "--mode", "recent", "--timeout", "60", "--json"];
-const SMOKE_SYNC_TIMEOUT_MS = 180_000;
+const SMOKE_CHECK_ARGS = ["sync", "all", "--smoke", "--json"];
+const SMOKE_CHECK_TIMEOUT_MS = 10_000;
 
 // Humans never hit this; it exists so a misbehaving scripted UI (tests,
 // automation) fails loudly instead of spinning forever.
@@ -225,8 +223,8 @@ export class SetupRuntime {
 
     const backgroundAgent = request.backgroundAgent
       ? await this.enableBackgroundAgent(request, appPermission)
-      : skippedAction("background agent disabled by request");
-    const syncHandoff = request.syncHandoff ? await this.handOffInitialSync(backgroundAgent) : skippedAction("background sync handoff disabled by request");
+      : skippedAction("automatic sync disabled by request");
+    const syncHandoff = request.syncHandoff ? await this.handOffInitialSync(backgroundAgent) : skippedAction("connection check disabled by request");
     const finishedAt = new Date();
     const status =
       reports.some((item) => item.status === "degraded" || item.archiveImport === "failed") || !backgroundAgent.ok || !syncHandoff.ok
@@ -348,6 +346,10 @@ export class SetupRuntime {
   private async selectPlugins(draft: ConfigDraft): Promise<TracePlugin[]> {
     const plugins = this.registry.list();
     const initialValues = plugins.filter((plugin) => draft.pluginConfig(plugin.manifest.id).enabled !== false).map((plugin) => plugin.manifest.id);
+    await this.ui.note({
+      title: "Source selection",
+      body: "Use Space to turn sources on or off. Press Enter to continue.",
+    });
     const selectedIds = await this.ui.multiselect<SourceId>({
       title: `Choose which sources ${PRODUCT_NAME} should sync`,
       options: plugins.map((plugin) => ({
@@ -437,7 +439,7 @@ export class SetupRuntime {
       type Choice = "open" | "retry" | "skip";
       const url = lead.guidance?.url;
       const options: Array<{ label: string; value: Choice; hint?: string }> = [
-        ...(url ? [{ label: `Open ${displayUrl(url)} and retry`, value: "open" as Choice }] : []),
+        ...(url ? [{ label: `Open ${displayUrl(url)}`, value: "open" as Choice }] : []),
         { label: "Retry", value: "retry" as Choice },
         { label: "Skip for now", value: "skip" as Choice, hint: `finish later with: ${CLI_NAME} setup` },
       ];
@@ -446,7 +448,13 @@ export class SetupRuntime {
         this.logger.event("setup: plugin skipped by user", { source: plugin.manifest.id, code: lead.code });
         return findings;
       }
-      if (choice === "open" && url) await this.host.openUrl(url);
+      if (choice === "open" && url) {
+        await this.host.openUrl(url);
+        await this.ui.select<"continue">({
+          title: "Finish in the opened window, then continue.",
+          options: [{ label: "Continue", value: "continue", hint: "press Enter when ready" }],
+        });
+      }
       probeFindings = await this.runProbe(plugin, ctx.signal, ctx);
     }
   }
@@ -675,7 +683,7 @@ export class SetupRuntime {
       return {
         attempted: true,
         ok: true,
-        message: "background agent enabled",
+        message: "automatic sync enabled",
         detail: { status: macStatusJson(status) },
       };
     }
@@ -683,14 +691,14 @@ export class SetupRuntime {
       return {
         attempted: true,
         ok: false,
-        message: "Full Disk Access is required before background sync can be enabled",
+        message: "Full Disk Access is required before automatic sync can be enabled",
         detail: { status: status ? macStatusJson(status) : null },
       };
     }
     const confirmed = request.assumeYes
       ? true
       : await this.ui.confirm({
-          title: "Do you want to enable the background service now?",
+          title: "Do you want to enable automatic sync now?",
           body: `${PRODUCT_NAME} can keep syncing in the background using the permissions you just granted.`,
           initialValue: true,
         });
@@ -698,7 +706,7 @@ export class SetupRuntime {
       return {
         attempted: true,
         ok: true,
-        message: "background service left disabled by user choice",
+        message: "left paused by user choice",
         detail: { status: status ? macStatusJson(status) : null },
       };
     }
@@ -709,56 +717,56 @@ export class SetupRuntime {
     return {
       attempted: true,
       ok,
-      message: ok ? "background agent enabled" : "background agent enablement failed",
+      message: ok ? "automatic sync enabled" : "automatic sync could not be enabled",
       detail: { register: jsonRunResult(register), enable: jsonRunResult(enable), status: finalStatus ? macStatusJson(finalStatus) : null },
     };
   }
 
-  // The smoke sync only runs once the background agent is proven enabled;
+  // The connection check only runs once automatic sync is proven enabled;
   // everything else gets an honest non-attempt message.
   private async handOffInitialSync(backgroundAgent: SetupReport["backgroundAgent"]): Promise<SetupReport["syncHandoff"]> {
     if (!backgroundAgent.ok) {
       return {
         attempted: false,
         ok: false,
-        message: "initial sync not handed off; background agent is not enabled",
+        message: "connection check not run; automatic sync is not enabled",
         detail: { reason: backgroundAgent.message, backgroundAgent: backgroundAgent.detail },
       };
     }
-    if (backgroundAgent.message !== "background agent enabled") {
+    if (backgroundAgent.message !== "automatic sync enabled") {
       return {
         attempted: false,
         ok: true,
-        message: "initial sync not scheduled; background service was not enabled",
+        message: "initial sync not scheduled; automatic sync was not enabled",
         detail: { reason: backgroundAgent.message },
       };
     }
-    return this.runSmokeSync();
+    return this.runConnectionCheck();
   }
 
-  // One bounded smoke sync through the app identity. It proves the enabled
-  // agent can actually ingest; it never grows into full ingestion (recent
-  // mode, per-source budget, hard app-command timeout).
-  private async runSmokeSync(): Promise<SetupReport["syncHandoff"]> {
+  // One bounded connection check through the app identity. Automatic sync
+  // has already been enabled; this proves the store and plugin access
+  // paths without doing foreground ingestion.
+  private async runConnectionCheck(): Promise<SetupReport["syncHandoff"]> {
     const appPath = ensureStableAppPath(this.config);
-    this.logger.event("setup: smoke sync started", { appPath });
+    this.logger.event("setup: connection check started", { appPath });
     let result: { code: number; stdout: string; stderr: string; timedOut: boolean };
     try {
       result = await this.ui.spinner({
-        title: "Running a quick first sync",
-        run: () => this.appCommandRunner(appPath, [...SMOKE_SYNC_ARGS], SMOKE_SYNC_TIMEOUT_MS),
+        title: "Checking connections",
+        run: () => this.appCommandRunner(appPath, [...SMOKE_CHECK_ARGS], SMOKE_CHECK_TIMEOUT_MS),
       });
     } catch (error) {
-      this.logger.error("setup: smoke sync failed to run", { error: String(error) });
-      return { attempted: true, ok: false, message: "smoke sync failed to run", detail: { error: redactText(String(error)) } };
+      this.logger.error("setup: connection check failed to run", { error: String(error) });
+      return { attempted: true, ok: false, message: "connection check failed to run", detail: { error: redactText(String(error)) } };
     }
-    const parsed = result.timedOut ? null : parseSmokeSyncReport(result.stdout);
+    const parsed = result.timedOut ? null : parseSmokeCheckReport(result.stdout);
     if (!parsed) {
-      this.logger.error("setup: smoke sync failed to run", { code: result.code, timedOut: result.timedOut });
+      this.logger.error("setup: connection check failed to run", { code: result.code, timedOut: result.timedOut });
       return {
         attempted: true,
         ok: false,
-        message: "smoke sync failed to run",
+        message: "connection check failed to run",
         detail: {
           code: result.code,
           timedOut: result.timedOut,
@@ -768,19 +776,19 @@ export class SetupRuntime {
       };
     }
     const ok = parsed.status !== "critical";
-    const records = parsed.sources.reduce((sum, source) => sum + source.insertedRecords, 0);
     const firstCritical = parsed.sources.find((source) => source.status === "critical")?.source;
     const message = ok
-      ? `smoke sync ok: ${records} ${records === 1 ? "record" : "records"} across ${parsed.sources.length} ${parsed.sources.length === 1 ? "source" : "sources"}`
-      : `smoke sync critical: ${firstCritical ?? "no source completed"}`;
-    this.logger.event("setup: smoke sync finished", { status: parsed.status, records });
+      ? `connection check passed; automatic sync is running (${parsed.sources.length} ${parsed.sources.length === 1 ? "source" : "sources"} checked)`
+      : `connection check failed: ${firstCritical ?? "data store"}`;
+    this.logger.event("setup: connection check finished", { status: parsed.status, sourceCount: parsed.sources.length });
     return {
       attempted: true,
       ok,
       message,
       detail: {
         status: parsed.status,
-        sources: parsed.sources.map((source) => ({ source: source.source, status: source.status, insertedRecords: source.insertedRecords })),
+        store: parsed.store,
+        sources: parsed.sources.map((source) => ({ source: source.source, status: source.status, message: source.message })),
       },
     };
   }
@@ -797,39 +805,50 @@ function skippedAction(message: string): SetupReport["backgroundAgent"] {
   return { attempted: false, ok: true, message, detail: {} };
 }
 
-interface SmokeSyncSource {
+interface SmokeCheckSource {
   source: string;
   status: string;
-  insertedRecords: number;
+  message: string;
 }
 
-interface SmokeSyncReport {
+interface SmokeCheckReport {
   status: string;
-  sources: SmokeSyncSource[];
+  store: { status: string; message: string } | null;
+  sources: SmokeCheckSource[];
 }
 
-// Parses the `sync all --json` report the app prints. Returns null for
-// anything that is not a recognizable sync report, so the caller reports an
+// Parses the `sync all --smoke --json` report the app prints. Returns null for
+// anything that is not a recognizable smoke report, so the caller reports an
 // honest failure instead of inventing a result.
-export function parseSmokeSyncReport(stdout: string): SmokeSyncReport | null {
+export function parseSmokeCheckReport(stdout: string): SmokeCheckReport | null {
   const start = stdout.indexOf("{");
   if (start < 0) return null;
   try {
-    const parsed = JSON.parse(stdout.slice(start)) as { status?: unknown; sources?: unknown };
+    const parsed = JSON.parse(stdout.slice(start)) as { status?: unknown; store?: unknown; sources?: unknown };
     if (typeof parsed.status !== "string" || !Array.isArray(parsed.sources)) return null;
-    const sources: SmokeSyncSource[] = [];
+    const store =
+      parsed.store && typeof parsed.store === "object" && !Array.isArray(parsed.store)
+        ? (parsed.store as { status?: unknown; message?: unknown })
+        : null;
+    const sources: SmokeCheckSource[] = [];
     for (const raw of parsed.sources) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-      const record = raw as { source?: unknown; status?: unknown; commit?: unknown };
+      const record = raw as { source?: unknown; status?: unknown; message?: unknown };
       if (typeof record.source !== "string" || typeof record.status !== "string") return null;
-      const commit = record.commit && typeof record.commit === "object" && !Array.isArray(record.commit) ? (record.commit as { insertedRecords?: unknown }) : null;
       sources.push({
         source: record.source,
         status: record.status,
-        insertedRecords: typeof commit?.insertedRecords === "number" ? commit.insertedRecords : 0,
+        message: typeof record.message === "string" ? record.message : "",
       });
     }
-    return { status: parsed.status, sources };
+    return {
+      status: parsed.status,
+      store:
+        store && typeof store.status === "string"
+          ? { status: store.status, message: typeof store.message === "string" ? store.message : "" }
+          : null,
+      sources,
+    };
   } catch {
     return null;
   }
@@ -882,6 +901,7 @@ export function stateWord(findings: HealthFinding[]): string {
 }
 
 function displayUrl(url: string): string {
+  if (/^x-apple\.systempreferences:/i.test(url) && /Privacy_Automation/i.test(url)) return "System Settings > Privacy & Security > Automation";
   return url.replace(/^https:\/\/(www\.)?/, "").replace(/\/$/, "");
 }
 
@@ -915,7 +935,7 @@ export function formatSetupSummaryText(report: SetupReport): string {
       }
     }
   }
-  lines.push(`Background: ${report.backgroundAgent.message}`);
+  lines.push(`Automatic sync: ${report.backgroundAgent.message}`);
   lines.push(`Sync: ${report.syncHandoff.message}`);
   const degraded = report.plugins.some((plugin) => plugin.status === "degraded");
   lines.push(degraded ? `Finish anytime: rerun ${CLI_NAME} setup` : "All selected sources are verified.");

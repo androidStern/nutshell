@@ -66,7 +66,9 @@ Out of scope (created concurrently, audited by their own layer): `test/state-mat
 
 | Test | Traces to | Verdict |
 | --- | --- | --- |
-| help exposes only the minimal product CLI | truthful-baseline #1; drift-fix #1; honest-setup #17 | anchored |
+| help teaches common user workflows without exposing app plumbing | truthful-baseline #1; drift-fix #1; honest-setup #17 | anchored |
+| layered help explains sync and reset without creating state | truthful-baseline #2; honest-setup #17 | anchored |
+| sync pause and resume use the automatic-sync user path | onboarding §Automatic Sync Handoff; truthful-baseline #15 | anchored |
 | old machine-specific commands are not accepted | truthful-baseline #2; drift-fix #2 | anchored |
 | version command uses the public nutshell name | duplicate-weaker of "version command matches package version" (exact match subsumes name prefix) | removed |
 | version command matches package version | drift-fix §1 outcome 4 (public surface incl. `version`); regression: binary/package version drift | anchored |
@@ -80,6 +82,17 @@ Out of scope (created concurrently, audited by their own layer): `test/state-mat
 | --- | --- | --- |
 | default config is JSONC and points storage at the Nutshell data root | onboarding §Config Draft (`nutconfig.jsonc`, data root) | anchored |
 | root can be resolved from nutconfig.jsonc without a command-line root | onboarding §Config Draft; truthful-baseline §4 blast-radius 10 (no machine-specific defaults) | anchored |
+
+## test/reset-runtime.test.ts
+
+| Test | Traces to | Verdict |
+| --- | --- | --- |
+| reset data clears fresh-sync state and keeps config, secrets, logs, and permissions state | reset UX contract (fresh sync data); no external auth deletion invariant | anchored |
+| reset source clears only selected source rows and generated projections | reset UX contract (`nutshell reset source youtube`); store source isolation invariant | anchored |
+| reset source can clear multiple selected sources | reset UX contract (`nutshell reset source youtube twitter`) | anchored |
+| reset logs clears logs only | reset UX contract (`nutshell reset logs`) | anchored |
+| reset all clears Nutshell-owned state but keeps browser profiles | reset UX contract (`nutshell reset all` means Nutshell state, not external auth/browser profiles) | anchored |
+| guided reset explains deletion and requires RESET confirmation | reset UX contract (guided choices, clear deletion/kept explanation, confirmation) | anchored |
 
 ## test/dashboard.test.ts
 
@@ -257,12 +270,12 @@ Out of scope (created concurrently, audited by their own layer): `test/state-mat
 | setup does not mark plugins ready when secret commit fails | truthful-baseline #7; drift-fix #13 | anchored |
 | setup asks a plugin for its summary exactly once | truthful-baseline #8; drift-fix #14 | anchored |
 | setup records protected sources as degraded instead of probing them in-process when the app is missing | honest-setup #2 (app missing is the honest root cause; no terminal-identity probing) | anchored |
-| setup enables background sync through the installed app helper | onboarding §Background Agent Handoff; truthful-baseline #15 | anchored |
-| setup opens the app permission window before any plugin probe and before enabling background sync | honest-setup #2 (ordering) | anchored |
-| setup refuses to claim handoff when app-owned status stays disabled | onboarding §Background Agent Handoff (failure explicit); truthful-baseline §1 | anchored |
-| setup runs one bounded smoke sync through the app identity and reports its real result | honest-setup #8 | anchored |
-| a smoke sync that fails to run is reported honestly and degrades the setup report | honest-setup #8 (failure appears; exit 1) | anchored |
-| declining the background service skips the smoke sync with an honest message | honest-setup §4.5–6 (smoke sync only when agent enabled) | anchored |
+| setup enables automatic sync through the installed app helper | onboarding §Automatic Sync Handoff; truthful-baseline #15 | anchored |
+| setup opens the app permission window before any plugin probe and before enabling automatic sync | honest-setup #2 (ordering) | anchored |
+| setup refuses to claim handoff when app-owned status stays disabled | onboarding §Automatic Sync Handoff (failure explicit); truthful-baseline §1 | anchored |
+| setup runs one bounded connection check through the app identity and reports its real result | honest-setup #8 | anchored |
+| a connection check that fails to run is reported honestly and degrades the setup report | honest-setup #8 (failure appears; exit 1) | anchored |
+| declining automatic sync skips the connection check with an honest message | honest-setup §4.5–6 (connection check only when automatic sync enabled) | anchored |
 | an already-imported archive renders imported and is not re-offered | honest-setup #7 | anchored |
 | setup retries a failing probe and records ready only after it passes | honest-setup #3, #4 | anchored |
 | skipping a failing probe records degraded with the probe finding and exits 1 | honest-setup #5 | anchored |
@@ -385,11 +398,11 @@ audited here) and the `fixture_stale`, post-permission gate, and gate-label rows
 
 | Test | Traces to | Verdict |
 | --- | --- | --- |
-| journey 1: first run, every source verifies, background agent + smoke sync succeed | honest-setup #20 (journey: first-run all-pass); #8 | anchored |
+| journey 1: first run, every source verifies, automatic sync + connection check succeed | honest-setup #20 (journey: first-run all-pass); #8 | anchored |
 | journey 2: not logged in, retry after signing in, source verifies | honest-setup #20 (journey: not-logged-in → retry → pass); #3 | anchored |
 | journey 3: skip a failing source, re-run resumes on that source only | honest-setup #20 (journey: skip X → re-run resumes on X only); #1, #5 | anchored |
 | journey 4: import-later — decline the archive offer, keep the comeback command, skip the import | honest-setup #20 (journey: import-later path); #7 | anchored |
-| journey 5: decline the background agent — honest summary, no enable calls, no smoke sync | honest-setup #20 (journey: decline background agent); §4 steps 5–6 | anchored |
+| journey 5: decline automatic sync — honest summary, no enable calls, no connection check | honest-setup #20 (journey: decline automatic sync); §4 steps 5–6 | anchored |
 
 ### test/fresh-install-rehearsal.test.ts (tests added 2026-06-10)
 

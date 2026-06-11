@@ -33,7 +33,7 @@ await step("public CLI surface", async () => {
   const compiledVersion = (await runText([join(repo, "bin", "nutshell"), "--version"])).trim();
   if (sourceVersion !== `nutshell ${pkg.version}`) throw new Error(`source CLI version mismatch: ${sourceVersion} vs ${pkg.version}`);
   if (compiledVersion !== `nutshell ${pkg.version}`) throw new Error(`compiled CLI version mismatch: ${compiledVersion} vs ${pkg.version}`);
-  for (const expected of ["nutshell setup", "nutshell sync", "nutshell health", "nutshell dashboard", "nutshell doctor", "nutshell import"]) {
+  for (const expected of ["nutshell setup", "nutshell status", "nutshell sync", "nutshell sync pause", "nutshell reset", "nutshell dashboard", "nutshell doctor", "nutshell import"]) {
     if (!help.includes(expected)) throw new Error(`help is missing ${expected}`);
   }
   for (const word of forbiddenUserSurfaceWords()) {
@@ -150,11 +150,11 @@ await step("app-owned helper surface is present and setup uses it", async () => 
   for (const expected of ['"register-agent"', '"enable-sync"']) {
     if (!setupRuntime.includes(expected)) throw new Error(`setup runtime is missing app-owned command ${expected}`);
   }
-  if (setupRuntime.includes('"__sync-once"')) throw new Error("setup may run only a bounded app-owned smoke sync; the __sync-once bridge is banned in setup");
-  for (const expected of ['"--timeout"', '"--mode", "recent"']) {
-    if (!setupRuntime.includes(expected)) throw new Error(`setup may run only a bounded app-owned smoke sync; setup runtime is missing ${expected}`);
+  if (setupRuntime.includes('"__sync-once"')) throw new Error("setup may run only a bounded app-owned connection check; the __sync-once bridge is banned in setup");
+  for (const expected of ['"--smoke"', '"--json"']) {
+    if (!setupRuntime.includes(expected)) throw new Error(`setup may run only a bounded app-owned connection check; setup runtime is missing ${expected}`);
   }
-  if (setupRuntime.includes('"--mode", "backfill"')) throw new Error('setup may run only a bounded app-owned smoke sync; "--mode", "backfill" is banned in setup');
+  if (setupRuntime.includes('"--mode", "backfill"')) throw new Error('setup may run only a bounded app-owned connection check; "--mode", "backfill" is banned in setup');
   return { appExecutable };
 });
 

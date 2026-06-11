@@ -95,6 +95,7 @@ test("apple notes automation denial returns an explicit permission finding", asy
     expect(String(detail.nextAction)).toContain("nutshell");
     expect(result.health[0]?.guidance?.state).toBe("needs_permission");
     expect(result.health[0]?.guidance?.fix).toContain("System Settings");
+    expect(result.health[0]?.guidance?.url).toBe("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation");
     expect(result.health[0]?.guidance?.confirm).toBe("nutshell doctor apple_notes");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -131,6 +132,7 @@ test("AppleEvent consent timeout classifies as automation permission, not a bug"
     expect(findings.some((item) => item.code === "apple_notes_automation_permission_required")).toBe(true);
     expect(findings[0]?.guidance?.state).toBe("needs_permission");
     expect(findings[0]?.guidance?.fix).toContain("Automation");
+    expect(findings[0]?.guidance?.url).toBe("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -165,6 +167,7 @@ test("apple notes health probe fails closed on automation denial", async () => {
     expect(String((findings[0]?.detail as JsonObject).error)).toContain("Not authorized");
     expect(findings[0]?.guidance?.state).toBe("needs_permission");
     expect(findings[0]?.guidance?.fix).toContain("System Settings");
+    expect(findings[0]?.guidance?.url).toBe("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation");
     expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor apple_notes");
   } finally {
     rmSync(root, { recursive: true, force: true });

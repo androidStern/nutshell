@@ -139,7 +139,7 @@ Old app bundles can confound permission testing. If an old agent or old app path
 
 Setup must not run full ingestion as a hidden setup step. Setup should coordinate plugin checks, permissions, archive import prompts, and background-agent enablement. Backlog ingestion belongs to sync and import.
 
-The permissions helper should not be the place where background sync is enabled. The helper's job is to guide Full Disk Access. The terminal setup flow should verify permissions after the helper closes and then ask whether to enable the background service.
+The permissions helper should not be the place where automatic sync is enabled. The helper's job is to guide Full Disk Access. The terminal setup flow should verify permissions after the helper closes and then ask whether to enable automatic sync.
 
 The dashboard cannot derive next sync only from source run history. A fresh install may have no source run yet. Next sync must come from the app-owned scheduler state, agent logs, or schedule calculation.
 

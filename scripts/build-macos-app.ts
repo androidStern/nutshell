@@ -1,6 +1,7 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { appInstallPath } from "./lib/app-install-path.ts";
 import { hostBuildArch, machoArchName, resolveBuildArch } from "./lib/build-arch.ts";
 
 const repo = resolve(import.meta.dir, "..");
@@ -11,7 +12,7 @@ const arch = resolveBuildArch(process.argv.slice(2), process.env);
 const buildRoot = join(tmpdir(), `nutshell-macos-build-${arch}`);
 const appRoot = join(buildRoot, appName);
 const distAppRoot = join(repo, "dist", "macos", `darwin-${arch}`, appName);
-const installPath = "/Applications/Nutshell.app";
+const installPath = appInstallPath();
 const coreEntitlements = join(repo, "macos", "nutshell-core.entitlements.plist");
 const corePath = join(repo, "dist", "compile", `darwin-${arch}`, "nutshell");
 const install = process.argv.includes("--install");
@@ -28,6 +29,7 @@ await signBundle();
 
 if (install) {
   rmSync(installPath, { recursive: true, force: true });
+  mkdirSync(dirname(installPath), { recursive: true });
   await copyBundle(appRoot, installPath);
   process.stdout.write(`${installPath}\n`);
 } else {

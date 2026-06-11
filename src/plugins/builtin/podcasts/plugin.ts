@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
 import type {
   Checkpoint,
+  HealthFinding,
   Json,
   JsonObject,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   RawObservation,
   SyncRequest,
@@ -29,6 +31,8 @@ interface PodcastsState {
   permissionBlockCode?: string | null;
 }
 
+const SMOKE_CHECK_TIMEOUT_MS = 2_000;
+
 export class PodcastsPlugin implements TracePlugin {
   readonly manifest: PluginManifest = {
     id: "podcasts",
@@ -51,6 +55,23 @@ export class PodcastsPlugin implements TracePlugin {
 
   async check(ctx: PluginContext) {
     const cfg = config(ctx);
+    return this.checkWithConfig(cfg);
+  }
+
+  async smoke(ctx: PluginContext): Promise<PluginSmokeResult> {
+    const cfg = config(ctx);
+    const findings = await this.checkWithConfig({
+      ...cfg,
+      checkTimeoutMs: Math.min(cfg.checkTimeoutMs, SMOKE_CHECK_TIMEOUT_MS),
+    });
+    return {
+      message: findings[0]?.message ?? "Apple Podcasts database is readable.",
+      findings,
+      metrics: { checkedPaths: existingDbPaths(cfg).length, timeoutMs: Math.min(cfg.checkTimeoutMs, SMOKE_CHECK_TIMEOUT_MS) },
+    };
+  }
+
+  private async checkWithConfig(cfg: ReturnType<typeof configFromJson>): Promise<HealthFinding[]> {
     const paths = existingDbPaths(cfg);
     if (!paths.length) {
       return [PODCASTS_FINDINGS.make("podcasts_db_missing", "Apple Podcasts database is missing", { dbPath: cfg.dbPath, dbPaths: cfg.dbPaths })];

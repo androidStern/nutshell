@@ -1,24 +1,26 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shouldUseAppHandoff } from "../src/cli";
 
 setDefaultTimeout(15_000);
 
-test("help exposes only the minimal product CLI", async () => {
+test("help teaches common user workflows without exposing app plumbing", async () => {
   const result = await runCli(["help"]);
   expect(result.exitCode).toBe(0);
-  // Exact public surface: six commands, one descriptive line each.
-  expect(result.stdout.trim().split("\n")).toHaveLength(6);
+  expect(result.stdout).toContain("Sync configured sources into a local digital trace for LLM agents.");
+  expect(result.stdout).toContain("Common tasks:");
   expect(result.stdout).toContain("nutshell setup");
-  expect(result.stdout).toContain("safe to re-run anytime");
-  expect(result.stdout).toContain("nutshell sync [all|source] [--json]");
-  expect(result.stdout).toContain("nutshell health [--json]");
-  expect(result.stdout).toContain("nutshell doctor [source] [--json]");
-  expect(result.stdout).toContain("nutshell dashboard [--no-open]");
-  expect(result.stdout).toContain("nutshell import <source> <archive>");
-  expect(result.stdout).toContain("nutshell import twitter ~/Downloads/x-archive.zip");
+  expect(result.stdout).toContain("nutshell status");
+  expect(result.stdout).toContain("nutshell sync");
+  expect(result.stdout).toContain("nutshell sync pause");
+  expect(result.stdout).toContain("nutshell sync resume");
+  expect(result.stdout).toContain("nutshell reset");
+  expect(result.stdout).toContain("nutshell dashboard");
+  expect(result.stdout).toContain("nutshell import");
+  expect(result.stdout).toContain("nutshell help sync");
+  expect(result.stdout).toContain("nutshell help reset");
   // Removed user surfaces must not leak back into help (mirrors certify-release).
   for (const forbidden of ["init", "launchd", "migrate", "legacy", "waive", "preserve", "canonical", "repair-plan", "enrich"]) {
     expect(result.stdout).not.toContain(forbidden);
@@ -38,6 +40,27 @@ test("help exposes only the minimal product CLI", async () => {
     "trace project",
   ]) {
     expect(result.stdout).not.toContain(forbidden);
+  }
+});
+
+test("layered help explains sync and reset without creating state", async () => {
+  for (const [args, expected] of [
+    [["help", "sync"], "nutshell sync pause"],
+    [["help", "reset"], "Reset does not delete Chrome login"],
+    [["sync", "--help"], "nutshell sync resume"],
+    [["reset", "--help"], "nutshell reset source youtube"],
+  ] as const) {
+    const root = mkdtempSync(join(tmpdir(), "nutshell-cli-layered-help-"));
+    try {
+      const result = await runCli(["--root", root, ...args]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(expected);
+      expect(existsSync(join(root, "nutconfig.jsonc"))).toBe(false);
+      expect(existsSync(join(root, "nutshell.sqlite"))).toBe(false);
+      expect(existsSync(join(root, "logs"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -78,6 +101,32 @@ test("version command matches package version", async () => {
   expect(result.stdout.trim()).toBe(`nutshell ${pkg.version}`);
 });
 
+test("sync pause and resume use the automatic-sync user path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-cli-sync-control-"));
+  try {
+    const appPath = join(root, "Nutshell.app");
+    const appExecutable = installFakeApp(appPath, root);
+    writeFileSync(join(root, "nutconfig.jsonc"), `${JSON.stringify({ storage: { root }, app: { path: appPath } }, null, 2)}\n`);
+
+    const paused = await runCli(["--root", root, "sync", "pause"]);
+    expect(paused.exitCode).toBe(0);
+    expect(paused.stdout).toContain("Automatic sync paused");
+
+    const resumed = await runCli(["--root", root, "sync", "resume", "--json"]);
+    expect(resumed.exitCode).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toMatchObject({ status: "ok", action: "resume" });
+
+    const calls = readFileSync(join(root, "calls.log"), "utf8").trim().split("\n");
+    expect(calls).toEqual([
+      `${appExecutable} disable-sync`,
+      `${appExecutable} enable-sync`,
+      `${appExecutable} register-agent`,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged macOS protected commands hand off to Nutshell.app", () => {
   expect(shouldUseAppHandoff("health", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
   expect(shouldUseAppHandoff("doctor", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
@@ -91,6 +140,8 @@ test("packaged macOS protected commands hand off to Nutshell.app", () => {
 test("subcommand help is side-effect free", async () => {
   for (const args of [
     ["sync", "--help"],
+    ["reset", "--help"],
+    ["status", "--help"],
     ["health", "--help"],
     ["doctor", "--help"],
     ["dashboard", "--help"],
@@ -100,7 +151,7 @@ test("subcommand help is side-effect free", async () => {
     try {
       const result = await runCli(["--root", root, ...args]);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("nutshell setup");
+      expect(result.stdout).toContain("nutshell");
       expect(existsSync(join(root, "nutconfig.jsonc"))).toBe(false);
       expect(existsSync(join(root, "nutshell.sqlite"))).toBe(false);
       expect(existsSync(join(root, "run.lock"))).toBe(false);
@@ -131,6 +182,26 @@ test("invalid numeric flags fail before runtime state is created", async () => {
     }
   }
 });
+
+function installFakeApp(appPath: string, root: string): string {
+  const executable = join(appPath, "Contents", "MacOS", "Nutshell");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+set -eu
+printf '%s %s\\n' "$0" "$*" >> ${JSON.stringify(join(root, "calls.log"))}
+case "\${1:-}" in
+  disable-sync) echo "automatic sync paused" ;;
+  enable-sync) echo "automatic sync resumed" ;;
+  register-agent) echo "automatic sync ready" ;;
+  *) echo "unexpected fake app command: $*" >&2; exit 64 ;;
+esac
+`,
+  );
+  chmodSync(executable, 0o755);
+  return executable;
+}
 
 async function runCli(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, "src/cli.ts", ...args], {

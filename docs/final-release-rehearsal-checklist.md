@@ -34,7 +34,7 @@ report without `--force-new-report`.
 - [ ] `nutshell setup`: source selection → permission window opens → grant
       Full Disk Access to `Nutshell.app` (and only it) → each selected source
       verifies with its probe (sign into Chrome / approve prompts as asked) →
-      background service enabled → smoke sync reports a real result.
+      automatic sync enabled → connection check passes.
 - [ ] Final summary: every selected source `verified`; anything else shows an
       honest state with a fix line — a surprise here is a release blocker.
 - [ ] `nutshell dashboard` shows app installed, agent enabled, access granted,
@@ -50,7 +50,7 @@ report without `--force-new-report`.
 ## C. Reboot persistence
 
 - [ ] After permissions are granted and the agent is enabled: reboot.
-- [ ] Background agent still enabled (`nutshell health` schedule line),
+- [ ] Automatic sync still enabled (`nutshell status` schedule line),
       health clean, `nutshell sync` works, protected Apple sources still read
       with no new permission prompts.
 

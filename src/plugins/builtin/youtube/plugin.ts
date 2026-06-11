@@ -4,6 +4,7 @@ import type {
   JsonObject,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   ProviderExportImportRequest,
   RawObservation,
@@ -34,6 +35,8 @@ type YouTubeProbeFailureCode = "youtube_signed_out" | "youtube_keychain_blocked"
 type YouTubeProbeResult =
   | { ok: true; message: string; detail: JsonObject }
   | { ok: false; code: YouTubeProbeFailureCode; message: string; detail: JsonObject };
+
+const SMOKE_COOKIE_TIMEOUT_MS = 2_000;
 
 export class YouTubePlugin implements TracePlugin {
   constructor(private readonly collect: YouTubeCollector = collectYouTubeFromMyActivityHttp) {}
@@ -75,6 +78,25 @@ export class YouTubePlugin implements TracePlugin {
       probe = youtubeProbeException(error);
     }
     return probe.ok ? [] : [YOUTUBE_FINDINGS.make(probe.code, probe.message, probe.detail)];
+  }
+
+  async smoke(ctx: PluginContext): Promise<PluginSmokeResult> {
+    const cfg = config(ctx);
+    if (cfg.accessMode !== "myactivity_http") {
+      const finding = YOUTUBE_FINDINGS.make("youtube_access_mode_unsupported", "Only direct My Activity HTTP sync is supported", {
+        accessMode: cfg.accessMode,
+      });
+      return { message: finding.message, findings: [finding], metrics: { accessMode: cfg.accessMode } };
+    }
+    let probe: YouTubeProbeResult;
+    try {
+      probe = await this.probe({ ...cfg, cookieTimeoutMs: Math.min(cfg.cookieTimeoutMs, SMOKE_COOKIE_TIMEOUT_MS) }, ctx.signal);
+    } catch (error) {
+      probe = youtubeProbeException(error);
+    }
+    if (probe.ok) return { message: probe.message, findings: [], metrics: probe.detail };
+    const finding = YOUTUBE_FINDINGS.make(probe.code, probe.message, probe.detail);
+    return { message: finding.message, findings: [finding], metrics: probe.detail };
   }
 
   async importProviderExport(_ctx: PluginContext, request: ProviderExportImportRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
@@ -187,7 +209,7 @@ function classifyYouTubeAccessError(
   if (text.includes(MYACTIVITY_SESSION_UNVERIFIABLE)) {
     return {
       code: "youtube_session_unverifiable",
-      message: "Google served an identity-verification page instead of My Activity for this account; recent YouTube sync cannot establish a session.",
+      message: "Google needs one more verification step in Chrome before My Activity can be read.",
       detail: { error: text },
     };
   }

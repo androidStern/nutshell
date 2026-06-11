@@ -231,6 +231,59 @@ export interface SyncReport {
   sources: SyncSourceReport[];
 }
 
+export interface PluginSmokeResult {
+  message: string;
+  findings: HealthFinding[];
+  metrics: Json;
+}
+
+export interface StoreHealthcheckReport {
+  runId: string;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  metrics: JsonObject;
+}
+
+export interface SourceResetReport {
+  sources: SourceId[];
+  deletedRecords: number;
+  deletedObservations: number;
+  deletedRuns: number;
+  deletedFindings: number;
+  deletedCheckpoints: number;
+  deletedArtifactRows: number;
+  artifactPaths: string[];
+}
+
+export interface SmokeStoreReport {
+  status: "ok" | "critical";
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  message: string;
+  detail: JsonObject;
+}
+
+export interface SmokeSourceReport {
+  source: SourceId;
+  status: "ok" | "warning" | "critical";
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  message: string;
+  findings: HealthFinding[];
+  metrics: Json;
+}
+
+export interface SmokeReport {
+  status: "ok" | "warning" | "critical";
+  startedAt: Date;
+  finishedAt: Date;
+  store: SmokeStoreReport;
+  sources: SmokeSourceReport[];
+}
+
 export interface ArtifactRef {
   path: string;
   contentHash: string;

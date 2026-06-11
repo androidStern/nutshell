@@ -50,7 +50,7 @@ await step("installed command is on PATH and exposes the public CLI", async () =
   const which = await runText(["sh", "-lc", "command -v nutshell"], env);
   const version = await runText(["nutshell", "--version"], env);
   const help = await runText(["nutshell", "help"], env);
-  for (const expected of ["nutshell setup", "nutshell sync", "nutshell health", "nutshell dashboard", "nutshell doctor", "nutshell import"]) {
+  for (const expected of ["nutshell setup", "nutshell status", "nutshell sync", "nutshell sync pause", "nutshell reset", "nutshell dashboard", "nutshell doctor", "nutshell import"]) {
     if (!help.includes(expected)) throw new Error(`help is missing ${expected}`);
   }
   for (const forbidden of forbiddenPublicCommands()) {

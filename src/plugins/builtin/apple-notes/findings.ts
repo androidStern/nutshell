@@ -7,8 +7,9 @@ export const APPLE_NOTES_FINDINGS = new FindingCatalog("apple_notes", {
   apple_notes_automation_permission_required: {
     level: "critical",
     state: "needs_permission",
-    fix: "Click Allow on the macOS automation prompt, or enable Nutshell under System Settings → Privacy & Security → Automation → Notes, then retry.",
+    fix: "If a macOS prompt appears, click Allow. If no prompt appears, open System Settings > Privacy & Security > Automation and allow Nutshell to control Notes, then retry.",
     confirm: CONFIRM,
+    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
     sample: "Apple Notes is blocked by macOS automation permissions",
   },
   apple_notes_access_failed: {

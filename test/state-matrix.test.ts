@@ -86,12 +86,13 @@ const MATRIX: MatrixRow[] = [
   },
   {
     source: "youtube",
-    state: "blocked_bug",
+    state: "needs_auth",
     expectedCode: "youtube_session_unverifiable",
     expectedExitCode: 2,
     arrange: async () => {
       // Google interposed an identity-verification page (multi-account /
-      // device-binding); cookies are valid but no My Activity session forms.
+      // device-binding); the user can finish that browser verification in
+      // Chrome and retry.
       const plugin = new YouTubePlugin(async () => {
         throw new Error("Google could not establish a My Activity session: it served an identity-verification page for this account");
       });

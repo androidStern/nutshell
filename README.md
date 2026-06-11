@@ -1,6 +1,6 @@
 # Nutshell
 
-Nutshell is a local personal trace ingestion runtime. It pulls Apple Notes, YouTube activity, Apple Podcasts listening history, and Twitter/X data into one local store with one health command, one background job, and rebuildable daily projections.
+Nutshell is a local personal trace ingestion runtime. It pulls Apple Notes, YouTube activity, Apple Podcasts listening history, and Twitter/X data into one local store with one status command, automatic sync, and rebuildable daily projections.
 
 It is standalone. It does not require Hermes, BirdClaw, prior generated archives, or machine-specific historical stores.
 
@@ -13,7 +13,8 @@ It is standalone. It does not require Hermes, BirdClaw, prior generated archives
 - Secrets: `~/Nutshell/secrets.json`
 - Logs: `~/Nutshell/logs/`
 - macOS app bundle: installed by the release path; Homebrew stores it inside the
-  `nutshell` prefix, and the tarball installer defaults to `~/Applications/Nutshell.app`
+  `nutshell` prefix, while the tarball and local development installers default
+  to `~/Applications/Nutshell.app`
 - app-owned agent label: `com.winterfell.nutshell.agent`
 
 `~/nutconfig.jsonc` controls storage location, enabled plugins, sync schedule, browser profile settings, backfill cutoff, and per-plugin settings. Secret values do not belong in this file. Plugin secrets are stored through the namespaced Nutshell secret store with strict local file permissions.
@@ -31,7 +32,7 @@ tar -xzf nutshell-<version>-darwin-<arch>.tar.gz && ./install.sh
 The npm/Bun registry path (`bun install -g nutshell`) is deferred and not
 currently published or validated; do not use it as an install path.
 
-The background sync must be owned by `Nutshell.app`, not by Bun, zsh, Codex, a
+Automatic sync must be owned by `Nutshell.app`, not by Bun, zsh, Codex, a
 Homebrew Cellar executable, or a development checkout. Protected macOS reads
 should happen through the app-owned agent after Full Disk Access is granted.
 
@@ -47,14 +48,22 @@ bun run install:macos-app
 ./bin/nutshell help
 ```
 
+`bun run install:macos-app` is development tooling. It installs the locally
+built app to `~/Applications/Nutshell.app`, matching the stable app path the CLI
+uses for protected macOS reads.
+
 ## Commands
 
 The normal CLI surface is intentionally small:
 
 ```bash
 nutshell setup
+nutshell status [--json]
 nutshell sync [all|source] [--json]
-nutshell health [--json]
+nutshell sync status
+nutshell sync pause
+nutshell sync resume
+nutshell reset
 nutshell dashboard [--no-open] [--host 127.0.0.1] [--port 0]
 nutshell doctor [source] [--json]
 nutshell import <source> <archive-path> [--dry-run] [--json]
@@ -68,9 +77,10 @@ Source names accept obvious aliases: `x` for `twitter`, `notes` for
 `nutshell setup` is the normal first-run path and the one canonical fix-it
 flow — it is safe to re-run anytime. It asks which sources to enable, sorts
 out app permissions, verifies each source with its real probe, offers optional
-provider archive imports, enables the app-owned background agent, and finishes
-with one bounded smoke sync through the app so the final summary reports a
-real result. Full ingestion happens after setup, in the background.
+provider archive imports, enables automatic sync, and finishes
+with a bounded connection check through the app so the final summary proves
+the store and source access paths. Full ingestion happens after setup, in
+automatic sync.
 
 Hidden app/helper commands may exist inside the packaged app, but they are not the normal user workflow. There are no normal CLI commands for old-system migration, legacy status, preserved exports, waivers, canonical imports, repair plans, pending imports, or provider-internal step management.
 
@@ -154,14 +164,26 @@ Browser-session plugins should store browser/profile references when possible. T
 
 The dashboard, health output, and logs redact secret-looking keys and token strings.
 
-## Health And Permissions
+## Status And Permissions
 
 ```bash
-nutshell health
-nutshell health --json
+nutshell status
+nutshell status --json
+nutshell doctor
 ```
 
-Health checks data-root writability, disk free space, SQLite quick_check, lock presence, app-owned background agent state, Full Disk Access state, plugin auth/dependency checks, rate-limit markers, configured backfill coverage, source freshness, and projection freshness.
+Status checks data-root writability, disk free space, SQLite quick_check, lock presence, automatic-sync state, Full Disk Access state, plugin auth/dependency checks, rate-limit markers, configured backfill coverage, source freshness, and projection freshness. `nutshell health` remains available for scripts, but `nutshell status` is the user-facing command.
+
+## Reset
+
+```bash
+nutshell reset
+nutshell reset data
+nutshell reset source youtube
+nutshell reset logs
+```
+
+Use reset for fresh sync tests. `reset data` clears records, checkpoints, source run history, artifacts, and dashboard projections while keeping setup choices, config, secrets, browser login, Keychain items, macOS permissions, browser profiles, and automatic-sync settings. `reset all` clears Nutshell-owned local state, but still does not touch external browser auth or macOS permissions.
 
 Every problem finding carries its own fix: a user-state classification
 (`needs_auth`, `needs_permission`, `blocked_bug`, …), the concrete human
@@ -193,7 +215,7 @@ nutshell dashboard --no-open
 
 The dashboard starts a local server on `127.0.0.1` with an ephemeral port, prints the URL, and opens the browser unless `--no-open` is passed. It is served by the installed Nutshell command itself; there is no dev server, cloud service, Hermes job, or separate UI process.
 
-It shows health, app-owned background status, lock/storage status, recent daily records, source detail panels, safe sync controls, projection rebuild, diagnostics copying, and a guarded settings editor for `~/nutconfig.jsonc`. Config saves validate first, create a timestamped backup, and report the changed fields.
+It shows status, automatic-sync state, lock/storage status, recent daily records, source detail panels, safe sync controls, projection rebuild, diagnostics copying, and a guarded settings editor for `~/nutconfig.jsonc`. Config saves validate first, create a timestamped backup, and report the changed fields.
 
 ## Scheduling
 
@@ -202,7 +224,9 @@ It shows health, app-owned background status, lock/storage status, recent daily 
 the bundled `nutshell-core` executable. It will not sync until Full Disk Access is
 granted and `enable-sync` has created the local enable marker.
 
-`nutshell setup` handles the normal background-agent registration and enablement from the terminal flow, then runs one bounded smoke sync through the app identity and reports its real result. The macOS permission helper window is permission-only: it opens Full Disk Access, provides a draggable app icon so the user does not have to manually hunt through `/Applications`, and tells the user to return to the terminal once access is granted.
+`nutshell setup` handles automatic-sync registration and enablement from the terminal flow, then runs one bounded connection check through the app identity. The macOS permission helper window is permission-only: it opens Full Disk Access, provides a draggable app icon so the user does not have to manually hunt through `/Applications`, and tells the user to return to the terminal once access is granted.
+
+Use `nutshell sync pause` and `nutshell sync resume` to pause or resume automatic sync. Use `nutshell sync status` to see the last and next scheduled sync.
 
 The scheduler self-heals degraded sources: each scheduled run gives a degraded
 source one bounded probe — a passing probe flips it back to ready and syncs;
@@ -243,7 +267,7 @@ The full first-user release rehearsal is documented in
 `docs/fresh-install-release-rehearsal.md`. It uses a disposable macOS test
 environment, verifies a clean baseline with no prior Nutshell state or browser
 auth, installs from the published artifact, exercises setup and app permissions,
-imports official provider archives, runs foreground and background sync, and
+imports official provider archives, runs foreground and automatic sync, and
 records the result with:
 
 ```bash

@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { JsonObject } from "../src/core/types";
-import { GoldenJourney, SMOKE_SYNC_OK_MESSAGE, signedOutFinding, type JourneyStep } from "./helpers/journey";
+import { CONNECTION_CHECK_OK_MESSAGE, GoldenJourney, signedOutFinding, type JourneyStep } from "./helpers/journey";
 
 setDefaultTimeout(15_000);
 
@@ -16,7 +16,7 @@ const ALL_SOURCES = ["youtube", "podcasts", "apple_notes", "twitter"] as const;
 const YOUTUBE_IMPORT_COMMAND = "nutshell import youtube <google-export.zip> --json";
 
 describe.skipIf(process.platform !== "darwin")("golden journeys: real interactive setup over a pty", () => {
-  test("journey 1: first run, every source verifies, background agent + smoke sync succeed", async () => {
+  test("journey 1: first run, every source verifies, automatic sync + connection check succeed", async () => {
     const journey = new GoldenJourney("all-pass");
     try {
       const steps: JourneyStep[] = [
@@ -39,28 +39,28 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
         expect(plugin?.findings).toEqual([]);
       }
       expect(result.report.backgroundAgent.ok).toBe(true);
-      expect(result.report.backgroundAgent.message).toBe("background agent enabled");
-      expect(result.report.syncHandoff).toMatchObject({ attempted: true, ok: true, message: SMOKE_SYNC_OK_MESSAGE });
+      expect(result.report.backgroundAgent.message).toBe("automatic sync enabled");
+      expect(result.report.syncHandoff).toMatchObject({ attempted: true, ok: true, message: CONNECTION_CHECK_OK_MESSAGE });
 
-      // Output: each source proves itself, the smoke sync ran, and the final
+      // Output: each source proves itself, the connection check ran, and the final
       // summary declares full verification.
       expect(result.text).toContain("✓ YouTube My Activity verified");
       expect(result.text).toContain("✓ Apple Podcasts verified");
       expect(result.text).toContain("✓ Apple Notes verified");
       expect(result.text).toContain("✓ Twitter/X verified");
-      expect(result.text).toContain("Running a quick first sync");
+      expect(result.text).toContain("Checking connections");
       expect(result.text).toContain("YouTube My Activity — verified");
       expect(result.text).toContain("All selected sources are verified.");
 
       // Config state: all sources enabled and proven ready by one probe each,
-      // and the smoke sync went through the app identity.
+      // and the connection check went through the app identity.
       for (const source of ALL_SOURCES) {
         expect(journey.probeCount(source)).toBe(1);
         const config = journey.readConfig();
         expect(pluginConfig(config, source).enabled).toBe(true);
         expect(journey.pluginSetup(source).status).toBe("ready");
       }
-      expect(journey.appCalls()).toContain("sync all --mode recent --timeout 60 --json");
+      expect(journey.appCalls()).toContain("sync all --smoke --json");
     } finally {
       journey.cleanup();
     }
@@ -224,7 +224,7 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
     }
   });
 
-  test("journey 5: decline the background agent — honest summary, no enable calls, no smoke sync", async () => {
+  test("journey 5: decline automatic sync — honest summary, no enable calls, no connection check", async () => {
     const journey = new GoldenJourney("decline-agent");
     try {
       // Agent not yet registered, so setup must actually ask.
@@ -234,7 +234,7 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
         { waitFor: "Choose which sources", send: "enter" },
         { waitFor: "Import Google YouTube export now?", send: "no" },
         { waitFor: "Import official X archive now?", send: "no" },
-        { waitFor: "enable the background service now?", send: "no" },
+        { waitFor: "enable automatic sync now?", send: "no" },
         { waitFor: "Setup complete" },
       ]);
 
@@ -243,16 +243,16 @@ describe.skipIf(process.platform !== "darwin")("golden journeys: real interactiv
       expect(result.report.backgroundAgent).toMatchObject({
         attempted: true,
         ok: true,
-        message: "background service left disabled by user choice",
+        message: "left paused by user choice",
       });
       expect(result.report.syncHandoff).toMatchObject({
         attempted: false,
         ok: true,
-        message: "initial sync not scheduled; background service was not enabled",
+        message: "initial sync not scheduled; automatic sync was not enabled",
       });
 
-      expect(result.text).toContain("Background: background service left disabled by user choice");
-      expect(result.text).not.toContain("Running a quick first sync");
+      expect(result.text).toContain("Automatic sync: left paused by user choice");
+      expect(result.text).not.toContain("Checking connections");
 
       // Declining means the app was never asked to enable anything or sync.
       const calls = journey.appCalls();

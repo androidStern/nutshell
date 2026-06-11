@@ -37,6 +37,35 @@ test("youtube recent sync uses My Activity overlap and emits canonical events", 
   expect((result.nextCheckpoint as JsonObject).lastRunAt).toBe("2026-05-22T12:00:00.000Z");
 });
 
+test("youtube smoke uses the plugin's lightweight My Activity probe", async () => {
+  const calls: Array<{ maxPages: number; cookieTimeoutMs: number }> = [];
+  const plugin = new YouTubePlugin(async (input) => {
+    calls.push({ maxPages: input.maxPages, cookieTimeoutMs: input.cookieTimeoutMs });
+    return {
+      items: [activity("20260521", "Watched", "Recent video")],
+      scroll: {
+        driver: "fixture",
+        pages: 1,
+        maxPages: input.maxPages,
+        reachedCutoff: true,
+        stoppedForStagnation: false,
+        stoppedForCursorLoop: false,
+        stoppedForExhaustion: false,
+        oldestLoadedDateKey: "20260521",
+        newestLoadedDateKey: "20260521",
+        loadedCardCount: 1,
+        nextCursor: null,
+      },
+    };
+  });
+
+  const result = await plugin.smoke(context({ cookieTimeoutMs: 30_000 }));
+
+  expect(calls).toEqual([{ maxPages: 1, cookieTimeoutMs: 2_000 }]);
+  expect(result.findings).toEqual([]);
+  expect(result.message).toContain("YouTube browser session works");
+});
+
 test("youtube historical backfill refuses live collection and requires official Google export import", async () => {
   let calls = 0;
   const plugin = new YouTubePlugin(async () => {
@@ -96,6 +125,8 @@ test("youtube health probe fails closed on unexpected empty access", async () =>
   expect(findings.some((item) => item.level === "critical" && item.code === "youtube_activity_unreadable")).toBe(true);
   expect(findings[0]?.guidance?.state).toBe("blocked_bug");
   expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
+  expect(findings[0]?.guidance?.fix).toContain("file a bug");
+  expect(findings[0]?.guidance?.fix).toContain("nutshell doctor youtube --json");
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
   expect(JSON.stringify(findings[0]?.detail)).toContain("cursor-1");
 });
@@ -114,14 +145,14 @@ test("youtube health probe reports collector auth exceptions instead of crashing
   expect(findings[0]?.guidance?.state).toBe("needs_auth");
   expect(findings[0]?.guidance?.fix.length).toBeGreaterThan(0);
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
-  expect(findings[0]?.guidance?.url).toBe("https://www.youtube.com");
+  expect(findings[0]?.guidance?.url).toBe("https://myactivity.google.com/myactivity?product=26");
   expect(JSON.stringify(findings[0]?.detail)).toContain("signed-out shell");
 });
 
 test("youtube health probe names Google's identity-verification interstitial, not a false signed-out", async () => {
   // Regression: a real multi-account / device-bound Google session gets bounced
   // to an identity-verification page even with valid cookies. The product must
-  // name that (blocked_bug, route to import) instead of claiming "signed out".
+  // tell the user to finish verification in Chrome instead of claiming "signed out".
   const plugin = new YouTubePlugin(async () => {
     throw new Error("Google could not establish a My Activity session: it served an identity-verification page for this account");
   });
@@ -130,10 +161,13 @@ test("youtube health probe names Google's identity-verification interstitial, no
 
   expect(findings).toHaveLength(1);
   expect(findings[0]?.code).toBe("youtube_session_unverifiable");
-  expect(findings[0]?.guidance?.state).toBe("blocked_bug");
-  expect(findings[0]?.guidance?.fix).toContain("import youtube");
+  expect(findings[0]?.message).toContain("verification step in Chrome");
+  expect(findings[0]?.guidance?.state).toBe("needs_auth");
+  expect(findings[0]?.guidance?.fix).toContain("Google My Activity");
+  expect(findings[0]?.guidance?.fix).not.toContain("import youtube");
   expect(findings[0]?.guidance?.fix).toContain("authUser");
   expect(findings[0]?.guidance?.confirm).toBe("nutshell doctor youtube");
+  expect(findings[0]?.guidance?.url).toBe("https://myactivity.google.com/myactivity?product=26");
 });
 
 test("youtube health probe reports Chrome Safe Storage as a permission block", async () => {
@@ -163,12 +197,13 @@ function request(mode: "recent" | "backfill", maxRequests: number | null): SyncR
   };
 }
 
-function context(): PluginContext {
+function context(config: JsonObject = {}): PluginContext {
   return {
     root: "/tmp/nutshell-test",
     config: {
       accessMode: "myactivity_http",
       httpMaxPages: 2,
+      ...config,
     },
     logger: { event() {}, warn() {}, error() {} },
     signal: new AbortController().signal,

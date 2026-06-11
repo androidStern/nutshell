@@ -5,6 +5,7 @@ import type {
   JsonObject,
   PluginContext,
   PluginManifest,
+  PluginSmokeResult,
   PluginSyncResult,
   RawObservation,
   SyncRequest,
@@ -51,6 +52,7 @@ type ProbeCheck = SetupCheck & { permission?: boolean };
 const MIN_BODY_FETCH_MS = 1_000;
 const MIN_ARTIFACT_RESERVE_MS = 1_000;
 const MAX_BODY_BATCH_SIZE = 25;
+const SMOKE_OSASCRIPT_TIMEOUT_MS = 2_000;
 
 export class AppleNotesPlugin implements TracePlugin {
   constructor(private readonly sourceFactory: (cfg: ReturnType<typeof config>) => NotesSource = buildSource) {}
@@ -95,6 +97,34 @@ export class AppleNotesPlugin implements TracePlugin {
     ];
   }
 
+  async smoke(ctx: PluginContext): Promise<PluginSmokeResult> {
+    const cfg = config(ctx);
+    if (cfg.source === "fixture") {
+      const findings = existsSync(cfg.fixturePath)
+        ? []
+        : [APPLE_NOTES_FINDINGS.make("apple_notes_fixture_missing", "Apple Notes fixture is missing", { fixturePath: cfg.fixturePath })];
+      return {
+        message: findings[0]?.message ?? "Apple Notes fixture is readable.",
+        findings,
+        metrics: { source: cfg.source, lightweightProbe: true },
+      };
+    }
+    const osascript = Bun.which("osascript");
+    if (!osascript) {
+      const finding = APPLE_NOTES_FINDINGS.make("osascript_missing", "osascript is not available", {});
+      return { message: finding.message, findings: [finding], metrics: { source: cfg.source } };
+    }
+    const probe = await this.probe(cfg, ctx.signal, SMOKE_OSASCRIPT_TIMEOUT_MS);
+    if (probe.ok) return { message: probe.message, findings: [], metrics: probe.detail ?? {} };
+    const finding = APPLE_NOTES_FINDINGS.make(
+      probe.permission ? "apple_notes_automation_permission_required" : "apple_notes_access_failed",
+      probe.message,
+      probe.detail ?? {},
+      probe.level ?? "critical",
+    );
+    return { message: finding.message, findings: [finding], metrics: probe.detail ?? {} };
+  }
+
   async sync(ctx: PluginContext, request: SyncRequest, checkpoint: Checkpoint): Promise<PluginSyncResult> {
     const cfg = config(ctx);
     const source = this.sourceFactory(cfg);
@@ -124,7 +154,7 @@ export class AppleNotesPlugin implements TracePlugin {
               error: String(error),
               requiredPermission: permission ? "Automation access to Notes" : null,
               nextAction: permission
-                ? "Open System Settings > Privacy & Security > Automation and allow the installed `nutshell` app or command to control Notes. Then run `nutshell health` again."
+                ? "Open System Settings > Privacy & Security > Automation and allow Nutshell.app to control Notes. Then run `nutshell status` again."
                 : "Run `nutshell sync apple_notes --mode recent --json` again and inspect the error if it repeats.",
             },
           ),
@@ -205,7 +235,7 @@ export class AppleNotesPlugin implements TracePlugin {
               error: String(error),
               requiredPermission: permission ? "Automation access to Notes" : null,
               nextAction: permission
-                ? "Open System Settings > Privacy & Security > Automation and allow the installed `nutshell` app or command to control Notes. Then run `nutshell health` again."
+                ? "Open System Settings > Privacy & Security > Automation and allow Nutshell.app to control Notes. Then run `nutshell status` again."
                 : "Run `nutshell sync apple_notes --mode recent --json` again and inspect the error if it repeats.",
             },
           ),
@@ -414,10 +444,10 @@ export class AppleNotesPlugin implements TracePlugin {
     };
   }
 
-  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal): Promise<ProbeCheck> {
+  private async probe(cfg: ReturnType<typeof configFromJson>, signal: AbortSignal, maxTimeoutMs = 45_000): Promise<ProbeCheck> {
     try {
       const source = this.sourceFactory(cfg);
-      const timeoutMs = Math.min(cfg.osascriptTimeoutMs, 45_000);
+      const timeoutMs = Math.min(cfg.osascriptTimeoutMs, maxTimeoutMs);
       if (source.probeAccess) {
         const probe = await source.probeAccess(timeoutMs, signal);
         return {

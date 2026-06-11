@@ -59,7 +59,7 @@ Everywhere this doc says `<release-candidate>`, substitute the version under tes
 
 8. (0 min) Podcasts: do **not** open Podcasts.app and do not sign into an Apple ID. The live-sync gate stages the SQLite-safe Podcasts seed (`rehearsal-seeds/MTLibrary.sqlite`) through the harness instead — see the seed-staging notes in `docs/vm-rehearsal-operations-playbook.md` and `docs/fresh-install-release-rehearsal.md`.
 
-9. (~3 min) Continue setup to the end: enable the background agent when offered and let the bounded smoke sync run. Expect exit code 0 and per-source verified states in the final summary.
+9. (~1 min) Continue setup to the end: enable automatic sync when offered and let the bounded connection check run. Expect exit code 0 and per-source verified states in the final summary.
 
 10. (~2 min, optional sanity) Run `nutshell doctor` once and confirm no permission findings appear. The binding verification is the host one-liner below, not this glance.
 
@@ -92,7 +92,7 @@ Everywhere this doc says `<release-candidate>`, substitute the version under tes
 
 - Do not log into anything new — no Google, X, Apple ID, or any other account. The auth state must remain exactly the seeded one.
 - Do not update macOS or Chrome (no Software Update, no `chrome://settings/help`).
-- Do not run `nutshell sync` manually; the only sync in this session is the bounded smoke sync setup runs itself. Gates run their own syncs from clones.
+- Do not run `nutshell sync` manually; setup only runs the bounded connection check and automatic sync handles ingestion. Gates run their own syncs from clones.
 - Do not reuse a dirty failed-rehearsal VM as the starting point (gates doc rule). Only a clone of the proven auth-present snapshot.
 - Do not click through any prompt not listed above. An unexpected prompt means something is wrong: record it, stop, and freeze the session.
 - Do not grant permissions to Terminal, Bun, or anything other than `Nutshell.app`. The gate asserts the grants belong to the app.

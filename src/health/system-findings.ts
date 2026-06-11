@@ -3,7 +3,7 @@ import { CLI_NAME, PRODUCT_NAME } from "../core/product";
 import { finding } from "../plugins/interface";
 import { FindingCatalog, guidanceFromJson, guidanceFromSpec } from "./guidance";
 
-const HEALTH = `${CLI_NAME} health`;
+const HEALTH = `${CLI_NAME} status`;
 const DOCTOR = `${CLI_NAME} doctor`;
 
 // One code = one user state = one fix. Every problem finding the core runtime
@@ -28,7 +28,7 @@ export const SYSTEM_FINDINGS = new FindingCatalog("system", {
   nutshell_app_full_disk_access_unknown: {
     level: "warning",
     state: "blocked_bug",
-    fix: `Open ${PRODUCT_NAME}.app once so it can report its permission status, then run ${CLI_NAME} health again.`,
+    fix: `Open ${PRODUCT_NAME}.app once so it can report its permission status, then run ${CLI_NAME} status again.`,
     confirm: HEALTH,
     sample: `${PRODUCT_NAME}.app Full Disk Access could not be determined`,
   },
@@ -37,21 +37,21 @@ export const SYSTEM_FINDINGS = new FindingCatalog("system", {
     state: "needs_permission",
     fix: `Approve ${PRODUCT_NAME} in System Settings → General → Login Items & Extensions.`,
     confirm: HEALTH,
-    sample: `${PRODUCT_NAME} background agent requires approval`,
+    sample: `${PRODUCT_NAME} automatic sync requires approval`,
   },
   nutshell_agent_not_enabled: {
     level: "warning",
     state: "needs_permission",
-    fix: `Rerun ${CLI_NAME} setup and enable the background service.`,
+    fix: `Run ${CLI_NAME} sync resume to enable automatic sync.`,
     confirm: HEALTH,
-    sample: `${PRODUCT_NAME} background agent is not enabled`,
+    sample: `${PRODUCT_NAME} automatic sync is not enabled`,
   },
   nutshell_background_sync_disabled: {
     level: "warning",
     state: "needs_permission",
-    fix: `Rerun ${CLI_NAME} setup and enable the background service.`,
+    fix: `Run ${CLI_NAME} sync resume to turn automatic sync back on.`,
     confirm: HEALTH,
-    sample: `${PRODUCT_NAME} background sync is disabled`,
+    sample: `${PRODUCT_NAME} automatic sync is paused`,
   },
   lock_active: {
     level: "warning",
@@ -112,7 +112,7 @@ export const SYSTEM_FINDINGS = new FindingCatalog("system", {
   disk_free_unknown: {
     level: "warning",
     state: "blocked_bug",
-    fix: `Check that the ${PRODUCT_NAME} data root volume is mounted and readable, then run ${CLI_NAME} health again.`,
+    fix: `Check that the ${PRODUCT_NAME} data root volume is mounted and readable, then run ${CLI_NAME} status again.`,
     confirm: HEALTH,
     sample: `${PRODUCT_NAME} data root disk free space could not be checked`,
   },
@@ -182,7 +182,7 @@ export const SYSTEM_FINDINGS = new FindingCatalog("system", {
   app_owned_sync_not_verified: {
     level: "warning",
     state: "blocked_bug",
-    fix: `Run ${CLI_NAME} sync once, or wait for the next background sync.`,
+    fix: `Run ${CLI_NAME} sync once, or wait for the next automatic sync.`,
     confirm: HEALTH,
     sample: "Apple Notes has not been verified by an app-owned sync yet",
   },
@@ -192,6 +192,13 @@ export const SYSTEM_FINDINGS = new FindingCatalog("system", {
     fix: `Run ${CLI_NAME} sync for this source to retry; if it keeps failing, report the error in the finding detail — this is a ${PRODUCT_NAME} bug.`,
     confirm: DOCTOR,
     sample: "twitter failed before commit",
+  },
+  plugin_smoke_runtime_error: {
+    level: "critical",
+    state: "blocked_bug",
+    fix: `Run ${CLI_NAME} doctor for this source; if the connection check keeps failing, report the error in the finding detail — this is a ${PRODUCT_NAME} bug.`,
+    confirm: DOCTOR,
+    sample: "Twitter/X connection check failed",
   },
   plugin_enrichment_runtime_error: {
     level: "critical",

@@ -47,6 +47,7 @@ test("setup marks selected plugins ready without source-specific core steps", as
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
 
     expect(report.status).toBe("ok");
+    expect(ui.notes.some((note) => note.includes("Press Enter to continue"))).toBe(true);
     expect(report.plugins.filter((item) => item.status === "ready").map((item) => item.source).sort()).toEqual(["other", "ready"]);
     const reloaded = loadConfig(root);
     expect(pluginSetupStatus(reloaded, "ready")).toBe("ready");
@@ -338,7 +339,7 @@ test("setup records protected sources as degraded instead of probing them in-pro
   }
 });
 
-test("setup enables background sync through the installed app helper", async () => {
+test("setup enables automatic sync through the installed app helper", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-app-owned-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
@@ -366,7 +367,7 @@ test("setup enables background sync through the installed app helper", async () 
       ui,
       host,
       prober: new FakeSetupProber(),
-      appCommandRunner: emptySmokeSyncRunner(),
+      appCommandRunner: emptyConnectionCheckRunner(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
@@ -386,7 +387,7 @@ test("setup enables background sync through the installed app helper", async () 
   }
 });
 
-test("setup opens the app permission window before any plugin probe and before enabling background sync", async () => {
+test("setup opens the app permission window before any plugin probe and before enabling automatic sync", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-permission-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
@@ -418,7 +419,7 @@ test("setup opens the app permission window before any plugin probe and before e
       ui,
       host,
       prober,
-      appCommandRunner: emptySmokeSyncRunner(),
+      appCommandRunner: emptyConnectionCheckRunner(),
     });
 
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: true, syncHandoff: true });
@@ -470,7 +471,7 @@ test("setup refuses to claim handoff when app-owned status stays disabled", asyn
     expect(report.status).toBe("warning");
     expect(report.backgroundAgent.ok).toBe(false);
     expect(report.syncHandoff.ok).toBe(false);
-    expect(report.syncHandoff.message).toContain("not handed off");
+    expect(report.syncHandoff.message).toContain("connection check not run");
     expect(host.runs.map((run) => [run.command, ...run.args])).toEqual([
       [executable, "enable-sync"],
       [executable, "register-agent"],
@@ -480,7 +481,7 @@ test("setup refuses to claim handoff when app-owned status stays disabled", asyn
   }
 });
 
-test("setup runs one bounded smoke sync through the app identity and reports its real result", async () => {
+test("setup runs one bounded connection check through the app identity and reports its real result", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-sync-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
@@ -515,11 +516,12 @@ test("setup runs one bounded smoke sync through the app identity and reports its
           code: 0,
           stdout: JSON.stringify({
             status: "ok",
+            store: { status: "ok", message: "Nutshell can write to its data store." },
             sources: [
-              { source: "youtube", status: "ok", commit: { insertedRecords: 5 } },
-              { source: "podcasts", status: "ok", commit: { insertedRecords: 7 } },
-              { source: "apple_notes", status: "ok" },
-              { source: "twitter", status: "warning", commit: { insertedRecords: 0 } },
+              { source: "youtube", status: "ok", message: "YouTube browser session works." },
+              { source: "podcasts", status: "ok", message: "Apple Podcasts database is readable." },
+              { source: "apple_notes", status: "ok", message: "Apple Notes automation works." },
+              { source: "twitter", status: "warning", message: "X reported a rate limit." },
             ],
           }),
           stderr: "",
@@ -532,24 +534,21 @@ test("setup runs one bounded smoke sync through the app identity and reports its
 
     expect(runnerCalls.length).toBe(1);
     expect(runnerCalls[0]?.appPath).toBe(appPath);
-    const args = runnerCalls[0]!.args;
-    expect(args).toContain("--timeout");
-    const modeIndex = args.indexOf("--mode");
-    expect(modeIndex).toBeGreaterThanOrEqual(0);
-    expect(args[modeIndex + 1]).toBe("recent");
+    expect(runnerCalls[0]!.args).toEqual(["sync", "all", "--smoke", "--json"]);
+    expect(runnerCalls[0]!.timeoutMs).toBeLessThanOrEqual(10_000);
     expect(report.syncHandoff.attempted).toBe(true);
     expect(report.syncHandoff.ok).toBe(true);
-    expect(report.syncHandoff.message).toContain("12 records");
+    expect(report.syncHandoff.message).toBe("connection check passed; automatic sync is running (4 sources checked)");
     expect(report.status).toBe("ok");
     // The real result appears in the final summary, not just the report JSON.
-    expect(ui.notes.some((note) => note.includes("smoke sync ok: 12 records across 4 sources"))).toBe(true);
+    expect(ui.notes.some((note) => note.includes("connection check passed; automatic sync is running (4 sources checked)"))).toBe(true);
     expect(ui.notes.every((note) => !note.includes("handed off to background agent"))).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("a smoke sync that fails to run is reported honestly and degrades the setup report", async () => {
+test("a connection check that fails to run is reported honestly and degrades the setup report", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-fail-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
@@ -584,7 +583,7 @@ test("a smoke sync that fails to run is reported honestly and degrades the setup
 
     expect(report.syncHandoff.attempted).toBe(true);
     expect(report.syncHandoff.ok).toBe(false);
-    expect(report.syncHandoff.message).toBe("smoke sync failed to run");
+    expect(report.syncHandoff.message).toBe("connection check failed to run");
     expect(report.syncHandoff.detail.code).toBe(2);
     expect(report.status).toBe("warning");
     expect(exitCodeForSetup(report)).toBe(1);
@@ -593,7 +592,7 @@ test("a smoke sync that fails to run is reported honestly and degrades the setup
   }
 });
 
-test("declining the background service skips the smoke sync with an honest message", async () => {
+test("declining automatic sync skips the connection check with an honest message", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-setup-smoke-declined-"));
   try {
     const appPath = join(root, "Applications", "Nutshell.app");
@@ -627,7 +626,7 @@ test("declining the background service skips the smoke sync with an honest messa
     expect(runnerCalls.length).toBe(0);
     expect(report.syncHandoff.attempted).toBe(false);
     expect(report.syncHandoff.ok).toBe(true);
-    expect(report.syncHandoff.message).toBe("initial sync not scheduled; background service was not enabled");
+    expect(report.syncHandoff.message).toBe("initial sync not scheduled; automatic sync was not enabled");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -762,7 +761,7 @@ test("the probe loop opens the guidance url and re-verifies on the open-and-retr
     config.data.plugins = {};
     const ui = new FakeSetupUI();
     ui.multiselectValues = [["probed"]];
-    ui.selectedValues = ["open"];
+    ui.selectedValues = ["open", "continue"];
     const prober = new FakeSetupProber({ probed: [[criticalProbeFinding("probed", url)], []] });
     const host = new FakeHost();
     const runtime = new SetupRuntime({
@@ -777,6 +776,8 @@ test("the probe loop opens the guidance url and re-verifies on the open-and-retr
     const report = await runtime.run({ json: false, assumeYes: false, backgroundAgent: false, syncHandoff: false });
 
     expect(host.openedUrls).toEqual([url]);
+    expect(ui.selectTitles).toContain("Finish in the opened window, then continue.");
+    expect(ui.notes.some((note) => note.includes("Press Enter to continue"))).toBe(true);
     expect(prober.callCount("probed")).toBe(2);
     expect(report.plugins.find((item) => item.source === "probed")?.status).toBe("ready");
     expect(pluginSetupStatus(loadConfig(root), "probed")).toBe("ready");
@@ -966,9 +967,14 @@ function installFakeApp(appPath: string): string {
   return executable;
 }
 
-// A scripted app-command runner whose smoke sync succeeds with no sources.
-function emptySmokeSyncRunner(): AppCommandRunner {
-  return async () => ({ code: 0, stdout: JSON.stringify({ status: "ok", sources: [] }), stderr: "", timedOut: false });
+// A scripted app-command runner whose connection check succeeds with no sources.
+function emptyConnectionCheckRunner(): AppCommandRunner {
+  return async () => ({
+    code: 0,
+    stdout: JSON.stringify({ status: "ok", store: { status: "ok", message: "Nutshell can write to its data store." }, sources: [] }),
+    stderr: "",
+    timedOut: false,
+  });
 }
 
 class NoMultiselectUI extends FakeSetupUI {

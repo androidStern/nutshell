@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appInstallPath } from "../scripts/lib/app-install-path.ts";
 import { parseBuildArch, resolveBuildArch } from "../scripts/lib/build-arch.ts";
 import { homebrewFormula } from "../scripts/lib/homebrew-formula.ts";
 
@@ -97,6 +98,12 @@ test("build arch resolution prefers flag, then env, then host", () => {
   expect(resolveBuildArch([], {})).toBe(parseBuildArch(process.arch));
   expect(() => resolveBuildArch(["--arch", "riscv"], {})).toThrow(/unsupported build arch/);
   expect(() => resolveBuildArch(["--arch"], {})).toThrow(/--arch requires a value/);
+});
+
+test("local macOS app install path matches the stable user app path", () => {
+  const home = join(tmpdir(), "nutshell-install-home");
+  expect(appInstallPath({}, home)).toBe(join(home, "Applications", "Nutshell.app"));
+  expect(appInstallPath({ NUTSHELL_INSTALL_APP_DIR: "/Applications" }, home)).toBe("/Applications/Nutshell.app");
 });
 
 async function run(cmd: string[], env: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
