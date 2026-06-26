@@ -389,7 +389,7 @@ function cardsForSource(records: TraceRecord[]): JsonObject[] {
 function likeGroupCard(records: TraceRecord[]): JsonObject {
   const sorted = [...records].sort((a, b) => eventTime(b).getTime() - eventTime(a).getTime());
   const first = sorted[0]!;
-  const items = sorted.slice(0, 5).map((record) => recordCard(record));
+  const items = sorted.map((record) => recordCard(record));
   return {
     source: "twitter",
     kind: "event",
@@ -399,7 +399,11 @@ function likeGroupCard(records: TraceRecord[]): JsonObject {
     title: `You liked ${records.length} X ${records.length === 1 ? "post" : "posts"}`,
     subtitle: "Your liked posts",
     bodyText: null,
-    excerpt: items.map((item) => item.title).filter(Boolean).join("  "),
+    excerpt: items
+      .slice(0, 5)
+      .map((item) => item.title)
+      .filter(Boolean)
+      .join("  "),
     url: null,
     happenedAt: first.happenedAt ? first.happenedAt.toISOString() : null,
     observedAt: first.observedAt.toISOString(),
@@ -1261,12 +1265,15 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
   grid-template-rows: auto 1fr auto;
   background: linear-gradient(90deg, oklch(0.988 0.008 232), oklch(0.993 0.004 232));
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-width: 0;
+  overflow: hidden;
 }
 .trace-card.note-doc.long { grid-column: auto; }
 .trace-card.note-doc header,
 .trace-card.note-doc .note-body,
 .trace-card.note-doc footer {
   padding: 9px 11px;
+  min-width: 0;
 }
 .trace-card.note-doc header {
   min-height: 38px;
@@ -1275,8 +1282,14 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  overflow: hidden;
 }
 .trace-card.note-doc header a { min-width: 0; }
+.trace-card.note-doc .note-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
 .trace-card.note-doc footer {
   display: flex;
   justify-content: space-between;
@@ -1287,6 +1300,14 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+.trace-card.note-doc footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-card.note-doc footer span:first-child { flex: 1 1 auto; }
+.trace-card.note-doc footer span:last-child { flex: 0 1 auto; max-width: 50%; text-align: right; }
 .trace-card.note-doc .title { font-size: 13px; line-height: 1.2; letter-spacing: -0.015em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .trace-card.note-doc .meta {
   color: var(--blue);
@@ -1305,11 +1326,13 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
 }
 .trace-card.note-doc .excerpt {
   max-height: none;
-  overflow: hidden;
+  overflow: visible;
   margin: 0;
   color: oklch(0.255 0.025 239);
   font-size: 12.5px;
   line-height: 1.45;
+  min-width: 0;
+  max-width: 100%;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -1450,7 +1473,9 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
 .trace-card.likes-group {
   grid-column: auto;
   display: flex;
+  flex-direction: column;
   min-height: 0;
+  overflow: hidden;
   background: oklch(0.985 0.007 240);
 }
 .likes-stack {
@@ -1466,23 +1491,36 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
   object-fit: cover;
   display: block;
 }
-.likes-body { padding: 16px; }
+.likes-body {
+  padding: 16px;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .likes-body h2 { margin: 0 0 10px; font-size: 18px; letter-spacing: -0.03em; }
 .like-row {
   display: grid;
-  grid-template-columns: 84px 1fr;
+  grid-template-columns: minmax(58px, 84px) minmax(0, 1fr);
   gap: 10px;
   padding: 7px 0;
   border-top: 1px solid var(--line);
   font-size: 13px;
   line-height: 1.35;
+  min-width: 0;
 }
 .like-row span:first-child {
   color: var(--muted);
   font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.like-row > div { min-width: 0; overflow-wrap: anywhere; }
 .trace-card.podcast-listen {
   grid-column: auto;
   display: flex;
@@ -1534,7 +1572,17 @@ h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-sp
 }
 .podcast-body { padding: 12px; min-height: 0; overflow: hidden; }
 .trace-card.podcast-listen .title { font-size: 15px; line-height: 1.2; letter-spacing: -0.025em; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.likes-list { display: grid; gap: 7px; margin-top: 2px; }
+.likes-list {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  margin-top: 2px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-width: thin;
+}
 .like-line { color: oklch(0.36 0.014 252); font-size: 13px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .like-count { color: var(--ink); font-size: 13px; font-weight: 600; }
 .pod-card { display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: center; }
@@ -1728,10 +1776,10 @@ function renderCard(record, remoteMedia) {
 }
 
 function renderLikesCard(record) {
-  const items = (record.items || []).slice(0, 5);
+  const items = record.items || [];
   const images = mediaUrls(record).slice(0, 4);
   const media = images.length ? '<div class="likes-stack">' + images.map((url) => '<img loading="lazy" src="' + esc(url) + '" alt="">').join('') + '</div>' : '';
-  const list = items.slice(0, 4).map((item) => {
+  const list = items.map((item) => {
     const display = item.display || {};
     const tweet = display.tweet || null;
     const author = tweet?.author || {};
@@ -1739,7 +1787,8 @@ function renderLikesCard(record) {
     const who = author.username ? '@' + author.username : item.subtitle || item.collection || 'X';
     return '<div class="like-row"><span>' + avatar + esc(who) + '</span><div>' + esc(item.title || item.excerpt || item.sourceId || 'Liked post') + '</div></div>';
   }).join('');
-  return '<article class="trace-card likes-group">' + media + '<div class="likes-body"><div class="card-kicker"><span>X likes</span><span>' + esc(record.timeLabel || 'grouped') + '</span></div><h2>You liked ' + esc(record.count || items.length) + ' posts</h2>' + list + '</div></article>';
+  const count = Number(record.count || items.length);
+  return '<article class="trace-card likes-group">' + media + '<div class="likes-body"><div class="card-kicker"><span>X likes</span><span>' + esc(record.timeLabel || 'grouped') + '</span></div><h2>You liked ' + esc(count) + ' ' + (count === 1 ? 'post' : 'posts') + '</h2><div class="likes-list">' + list + '</div></div></article>';
 }
 
 function renderYoutubeVideoCard(record, remoteMedia) {
@@ -1759,8 +1808,9 @@ function renderYoutubeSearchGroupCard(record) {
 }
 
 function renderNoteCard(record) {
-  const long = String(record.excerpt || record.bodyText || '').length > 220 ? ' long' : '';
-  return '<article class="trace-card note-doc' + long + '"><header>' + titleLink(record) + '<div class="meta">' + esc(record.subtitle || 'Apple Notes') + ' / ' + esc(record.timeLabel || '') + '</div></header><div class="note-body"><p class="excerpt">' + esc(record.excerpt || record.bodyText || '') + '</p></div><footer><span>' + esc(record.type || 'apple_note') + '</span><span>' + esc(record.collection || 'notes') + '</span></footer></article>';
+  const noteText = record.bodyText || record.excerpt || '';
+  const long = String(noteText).length > 220 ? ' long' : '';
+  return '<article class="trace-card note-doc' + long + '"><header>' + titleLink(record) + '<div class="meta">' + esc(record.subtitle || 'Apple Notes') + ' / ' + esc(record.timeLabel || '') + '</div></header><div class="note-body"><p class="excerpt">' + esc(noteText) + '</p></div><footer><span>' + esc(record.type || 'apple_note') + '</span><span>' + esc(record.collection || 'notes') + '</span></footer></article>';
 }
 
 function renderTweetCard(record, remoteMedia) {

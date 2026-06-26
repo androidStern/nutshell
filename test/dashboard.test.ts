@@ -106,6 +106,62 @@ test("dashboard days API returns deterministic grouped records and truncated not
   }
 });
 
+test("dashboard grouped likes expose every liked post for scrollable rendering", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-likes-"));
+  try {
+    const runtime = runtimeFor(root);
+    for (let index = 1; index <= 19; index += 1) {
+      await commitRecord(
+        runtime,
+        "twitter",
+        record("twitter", "twitter.liked", `likes:${index}`, `Liked post ${index}`, `2026-05-21T12:${String(index).padStart(2, "0")}:00Z`, `https://x.com/i/web/status/${index}`),
+      );
+    }
+
+    const response = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/days?from=2026-05-21&to=2026-05-22"));
+    const json = (await response.json()) as { days: Array<{ sources: Record<string, Array<Record<string, unknown>>> }> };
+    const likes = json.days[0]?.sources.twitter?.[0] as Record<string, unknown>;
+    const items = likes.items as Array<Record<string, unknown>>;
+
+    expect(likes.type).toBe("twitter.likes_group");
+    expect(likes.count).toBe(19);
+    expect(items.length).toBe(19);
+    expect(items[0]?.title).toBe("Liked post 19");
+    expect(items.at(-1)?.title).toBe("Liked post 1");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dashboard note cards use preserved note text and bounded narrow-card chrome", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-notes-"));
+  try {
+    const runtime = runtimeFor(root);
+    const body = "random ai security thought\nPeople will probably try to pit models against each other.\n\nKeep the note readable in a narrow dashboard card.";
+    await commitRecord(runtime, "apple_notes", record("apple_notes", "apple_note", "note-lines", "Security thought", "2026-05-21T13:00:00Z", null, body));
+
+    const response = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/api/days?from=2026-05-21&to=2026-05-22"));
+    const json = (await response.json()) as { days: Array<{ sources: Record<string, Array<Record<string, unknown>>> }> };
+    const note = json.days[0]?.sources.apple_notes?.[0];
+    expect(note?.bodyText).toBe(body);
+    expect(String(note?.excerpt)).toContain("random ai security thought People will probably");
+
+    const jsResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/assets/dashboard.js"));
+    const cssResponse = await handleDashboardRequest(runtime, new Request("http://127.0.0.1/assets/dashboard.css"));
+    const js = await jsResponse.text();
+    const css = await cssResponse.text();
+    expect(js).toContain("const noteText = record.bodyText || record.excerpt || ''");
+    expect(js).toContain('<div class="likes-list">');
+    expect(css).toContain(".trace-card.note-doc .note-body");
+    expect(css).toContain("overflow-y: auto");
+    expect(css).toContain(".trace-card.note-doc footer span");
+    await runtime.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dashboard renders Twitter cards from cached enrichment without widget network code", async () => {
   const root = mkdtempSync(join(tmpdir(), "nutshell-dashboard-"));
   try {
