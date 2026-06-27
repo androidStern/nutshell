@@ -9,10 +9,10 @@ bin/nutshell
 *.sqlite-shm
 *.sqlite-wal
 
-artifacts/
-logs/
-projections/
-launchd/
-rehearsal-seeds/
+/artifacts/
+/logs/
+/projections/
+/launchd/
+/rehearsal-seeds/
 
 PROGRESS.txt

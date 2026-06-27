@@ -10,7 +10,7 @@ import { probePluginContext } from "./setup/probe";
 import { JsonlLogger } from "./runtime/logger";
 import { TraceRuntime } from "./runtime/trace-runtime";
 import { exitCodeForHealth } from "./health/health";
-import { formatHealthText } from "./health/reporters";
+import { formatHealthText, formatScheduleText } from "./health/reporters";
 import { formatSyncText } from "./health/sync-reporter";
 import { runProcess } from "./runtime/process";
 import { appExecutable, ensureStableAppPath, runNutshellAppCommand } from "./macos/app-status";
@@ -583,15 +583,11 @@ function syncStatusJson(report: HealthReport): JsonObject {
 }
 
 function formatSyncStatusText(report: HealthReport): string {
-  const automatic = report.app.backgroundSync === "enabled" ? "enabled" : report.app.backgroundSync === "disabled" ? "paused" : "unknown";
   return [
     "Sync status",
     "",
-    `Automatic sync: ${automatic}`,
-    `Last sync: ${report.scheduler.lastRunAt ?? "not yet"}`,
-    `Next sync: ${report.scheduler.nextRunAt ?? "unknown"}`,
-    "",
-    automatic === "paused" ? `Run \`${CLI_NAME} sync resume\` to turn automatic sync back on.` : `Run \`${CLI_NAME} sync pause\` to pause automatic sync.`,
+    formatScheduleText(report).trimEnd(),
+    report.app.backgroundSync === "disabled" ? `Run \`${CLI_NAME} sync resume\` to turn automatic sync back on.` : `Run \`${CLI_NAME} sync pause\` to pause automatic sync.`,
     "",
   ].join("\n");
 }
