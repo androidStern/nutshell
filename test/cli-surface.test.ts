@@ -127,6 +127,57 @@ test("sync pause and resume use the automatic-sync user path", async () => {
   }
 });
 
+test("sync status uses reader-facing automatic-sync text", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nutshell-cli-sync-status-"));
+  try {
+    const appPath = join(root, "Nutshell.app");
+    installFakeApp(appPath, root);
+    mkdirSync(join(root, "logs"), { recursive: true });
+    const nextRunAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    writeFileSync(
+      join(root, "logs", "nutshell-agent.jsonl"),
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        message: "next sync scheduled",
+        detail: { intervalSeconds: 900, nextRunAt },
+      })}\n`,
+    );
+    writeFileSync(
+      join(root, "nutconfig.jsonc"),
+      `${JSON.stringify(
+        {
+          storage: { root },
+          app: { path: appPath },
+          scheduler: { intervalSeconds: 900 },
+          plugins: {
+            youtube: { enabled: false },
+            podcasts: { enabled: false },
+            apple_notes: { enabled: false },
+            twitter: { enabled: false },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await runCli(["--root", root, "sync", "status"], { TZ: "America/Chicago" });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Sync status");
+    expect(result.stdout).toContain("Automatic sync: on");
+    expect(result.stdout).toContain("Background agent: enabled");
+    expect(result.stdout).toContain("Last sync: not run yet");
+    expect(result.stdout).toContain("Next sync:");
+    expect(result.stdout).toContain("Run `nutshell sync` to sync immediately.");
+    expect(result.stdout).not.toContain("SCHEDULE:");
+    expect(result.stdout).not.toContain(`next=${nextRunAt}`);
+    expect(result.stdout).not.toContain(nextRunAt);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged macOS protected commands hand off to Nutshell.app", () => {
   expect(shouldUseAppHandoff("health", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
   expect(shouldUseAppHandoff("doctor", {}, "/opt/homebrew/bin/nutshell", "darwin")).toBe(true);
@@ -192,6 +243,12 @@ function installFakeApp(appPath: string, root: string): string {
 set -eu
 printf '%s %s\\n' "$0" "$*" >> ${JSON.stringify(join(root, "calls.log"))}
 case "\${1:-}" in
+  status)
+    echo "Full Disk Access: granted"
+    echo "Agent status: enabled"
+    echo "Background sync: enabled"
+    echo "Data root: ${root}"
+    ;;
   disable-sync) echo "automatic sync paused" ;;
   enable-sync) echo "automatic sync resumed" ;;
   register-agent) echo "automatic sync ready" ;;
@@ -203,11 +260,12 @@ esac
   return executable;
 }
 
-async function runCli(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function runCli(args: string[], env: Record<string, string | undefined> = {}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, "src/cli.ts", ...args], {
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, ...env },
   });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   return { exitCode, stdout, stderr };

@@ -19,16 +19,51 @@ test("a missing-FDA root cause leads and collapses downstream permission finding
 
   const text = formatHealthText(healthReport([podcasts, fda, notes]));
   const lines = text.trimEnd().split("\n");
+  const rootCauseLine = `CRITICAL system/nutshell_app_full_disk_access_missing: ${fda.message}`;
+  const rootCauseIndex = lines.indexOf(rootCauseLine);
 
-  expect(lines[0]).toStartWith("SCHEDULE:");
-  expect(lines[1]).toBe(`CRITICAL system/nutshell_app_full_disk_access_missing: ${fda.message}`);
-  expect(lines[2]).toBe(`  fix:  ${fda.guidance!.fix}`);
-  expect(lines[3]).toBe(`  then: ${fda.guidance!.confirm}`);
-  expect(lines[4]).toBe("  ↳ 2 source checks blocked by the issue above — fix it first.");
-  expect(lines).toHaveLength(5);
+  expect(lines[0]).toBe("Automatic sync: on");
+  expect(text).not.toContain("SCHEDULE:");
+  expect(rootCauseIndex).toBeGreaterThan(0);
+  expect(lines[rootCauseIndex]).toBe(rootCauseLine);
+  expect(lines[rootCauseIndex + 1]).toBe(`  fix:  ${fda.guidance!.fix}`);
+  expect(lines[rootCauseIndex + 2]).toBe(`  then: ${fda.guidance!.confirm}`);
+  expect(lines[rootCauseIndex + 3]).toBe("  ↳ 2 source checks blocked by the issue above — fix it first.");
   expect(text.match(/blocked by the issue above/g)).toHaveLength(1);
   expect(text).not.toContain("podcasts_db_unreadable");
   expect(text).not.toContain("apple_notes_permission");
+});
+
+test("schedule text renders automatic sync with local reader-facing times", () => {
+  const report = healthReport([]);
+  report.scheduler.lastRunAt = "2026-06-26T22:02:55.209Z";
+  report.scheduler.nextRunAt = "2026-06-26T22:17:58.513Z";
+  report.scheduler.source = "agent_log";
+
+  const text = formatHealthText(report, {
+    now: new Date("2026-06-26T22:05:00.000Z"),
+    locale: "en-US",
+    timeZone: "America/Chicago",
+  });
+
+  expect(text).toContain("Automatic sync: on");
+  expect(text).toContain("Nutshell.app: installed");
+  expect(text).toContain("Background agent: enabled");
+  expect(text).toMatch(/Last sync: today at 5:02 PM (CDT|GMT-5)/);
+  expect(text).toMatch(/Next sync: today at 5:17 PM (CDT|GMT-5)/);
+  expect(text).toContain("Run `nutshell sync` to sync immediately.");
+  expect(text).not.toContain("SCHEDULE:");
+  expect(text).not.toContain("agent=enabled");
+  expect(text).not.toContain("sync=enabled");
+  expect(text).not.toContain("2026-06-26T22:02:55.209Z");
+  expect(text).not.toContain("2026-06-26T22:17:58.513Z");
+});
+
+test("schedule text says when automatic sync has not run yet", () => {
+  const text = formatHealthText(healthReport([]));
+
+  expect(text).toContain("Last sync: not run yet");
+  expect(text).toContain("Run `nutshell sync` to sync immediately.");
 });
 
 test("a single blocked source check renders the singular caused-by line", () => {
