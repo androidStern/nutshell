@@ -57,6 +57,14 @@ Normal stable app path for local/dev installs is:
 
 Homebrew may store an app bundle in its prefix, but the CLI should use/promote a stable user app path for permissions.
 
+For host-machine cleanup before a true Homebrew/tarball install test, use:
+
+```bash
+scripts/cleanup-local-machine-state.sh
+```
+
+It is dry-run by default; pass `--execute` only after reviewing what it will remove. The script deliberately does not run broad privacy resets such as `tccutil reset AppleEvents` or `sfltool resetbtm`, and it does not edit TCC databases with SQL. It removes install artifacts, app bundles, launch plists, package caches/logs, and reports remaining macOS permission/identity metadata so the user can decide whether a broader reset is acceptable.
+
 ## Install Paths
 
 Real user install paths are Homebrew and tarball.
